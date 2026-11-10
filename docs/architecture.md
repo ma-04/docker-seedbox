@@ -295,7 +295,9 @@ statement or one immediate transaction evaluated *after* slow work; a final self
 3. For each job of a downloaded torrent in `downloading` → `uploading`: run
    `rclone copy` (local: copy/move to `/downloads/library/...`), parse
    `--use-json-log --stats 1s` for progress, record `job_files`, then `completed`. S3 endpoints go through an
-   SSRF guard first (user-owned destinations: private ranges refused; shared/admin ones: allowed). rclone gets
+   SSRF guard first (the shared `lib/netguard.ts` `assertPublicEndpoint`; user-owned destinations: private ranges
+   refused; shared/admin ones: allowed). When an S3 copy fails the worker probes the bucket root with the same
+   credentials, and if the server rejects them the job error says so (rclone's own copy message can be misleading). rclone gets
    SIGTERM then SIGKILL after 10 s on abort, and is failed after 30 min without byte progress. Local copies abort
    on cancel and remove their partial target. Local *move* is claimed with one conditional UPDATE that also records
    `torrents.library_path`; jobs for the same torrent that arrive later copy from there.
