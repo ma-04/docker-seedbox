@@ -2,7 +2,7 @@
 import type { Logger } from 'pino';
 import type { Config } from '../lib/config.js';
 import type { Db } from '../lib/db.js';
-import { getSetting } from '../lib/settings.js';
+import { getSetting, setSetting } from '../lib/settings.js';
 import { connectVpn, type VpnClient } from '../lib/vpn.js';
 import { now, type VpnConfigRow } from '../lib/types.js';
 
@@ -26,6 +26,16 @@ export async function reconcileVpn(d: VpnReconcileDeps, trafficExpected: boolean
   }
   if (mode !== 'required') return;
   const enabled = (db.prepare('SELECT COUNT(*) AS n FROM vpn_configs WHERE enabled = 1').get() as { n: number }).n;
+
+  // The active config was deleted/disabled but its tunnel is still up (the API's disconnect call may have failed):
+  // drop it. Required mode stays fail-closed on the sidecar; then fall through to connect another config if any.
+  const activeNow = getSetting(db, 'vpn.activeConfigId');
+  if (activeNow !== null && status.name !== null && !db.prepare('SELECT 1 FROM vpn_configs WHERE id = ? AND enabled = 1').get(activeNow)) {
+    d.log.warn('vpn: the active config is gone or disabled; disconnecting its tunnel');
+    await vpn.disconnect();
+    status = { ...status, connected: false, name: null, publicIp: null, lastHandshakeSec: null };
+    setSetting(db, 'vpn.activeConfigId', null);
+  }
   if (enabled === 0) return;
 
   const rotation = getSetting(db, 'vpn.rotation');

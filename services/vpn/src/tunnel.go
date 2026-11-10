@@ -115,7 +115,7 @@ func handshakeAge(iface string) (int64, bool) {
 
 func wgSetConf(iface string, c *WGConfig, ep netip.AddrPort) error {
 	var b strings.Builder
-	b.WriteString("[Interface]\nPrivateKey = " + c.PrivateKey + "\n[Peer]\nPublicKey = " + c.PublicKey + "\n")
+	b.WriteString("[Interface]\nPrivateKey = " + c.PrivateKey + "\nFwMark = " + wgFwmark + "\n[Peer]\nPublicKey = " + c.PublicKey + "\n")
 	if c.PresharedKey != "" {
 		b.WriteString("PresharedKey = " + c.PresharedKey + "\n")
 	}

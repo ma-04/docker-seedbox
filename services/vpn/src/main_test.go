@@ -98,3 +98,15 @@ func TestSwapRoutesSuccess(t *testing.T) {
 		t.Error("route not installed")
 	}
 }
+
+func TestEndpointExceptionRequiresWireGuardFwmark(t *testing.T) {
+	ep := netip.MustParseAddrPort("203.0.113.5:51820")
+	r := buildRuleset("required", nil, []netip.AddrPort{ep}, "8000")
+	want := "ip daddr 203.0.113.5 udp dport 51820 meta mark " + wgFwmark + " accept"
+	if !strings.Contains(r, want) {
+		t.Errorf("endpoint rule must be restricted to the wg fwmark; ruleset:\n%s", r)
+	}
+	if strings.Contains(r, "51820 accept") {
+		t.Error("unconditional endpoint accept (any uid could use it)")
+	}
+}
