@@ -1,5 +1,5 @@
 /** Regression tests for the review findings in the worker (races, transient downloader loss, disk limits, local moves, Drive folders, SSRF). */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DownloaderUnavailableError } from '../downloaders/types.js';
@@ -49,6 +49,50 @@ describe('races that used to strand jobs', () => {
     expect(torrent(s.db, t).state).toBe('downloading');
     expect(s.dl.added.length).toBeGreaterThanOrEqual(2);
     expect(job(s.db, j2).state).toBe('downloading');
+  });
+
+  it('re-adding a torrent right after its previous job was deleted survives qBittorrent dropping the add (no "disappeared" failure)', async () => {
+    // qBittorrent removes a torrent asynchronously; an add for the same hash accepted while that is still in flight
+    // can vanish. Model: the first add after a remove is acknowledged but the torrent is not there afterwards.
+    class DroppingDownloader extends FakeDownloader {
+      dropNextAdd = false;
+      async add(i: Parameters<FakeDownloader['add']>[0]) {
+        await super.add(i);
+        if (this.dropNextAdd) { this.dropNextAdd = false; this.items.delete(i.id); }
+      }
+      async remove(ref: string, deleteData: boolean) { await super.remove(ref, deleteData); this.dropNextAdd = true; }
+    }
+    const dl = new DroppingDownloader();
+    const s = setup({ downloader: dl });
+    const u = addUser(s.db, 'alice');
+    const d = addDest(s.db, { type: 'local' });
+    const t = addTorrent(s.db, H1);
+    const j1 = addJob(s.db, u, t, d);
+    writeFiles(join(s.content(H1), 'Pack'), { 'a.txt': 'A' });
+    await s.worker.tick();
+    dl.set(H1, { state: 'completed', name: 'Pack', totalSize: 1, progress: 1, contentPath: join(s.content(H1), 'Pack'), savePath: s.content(H1) });
+    await s.worker.tick(); await s.worker.idle();
+    expect(job(s.db, j1).state).toBe('completed');
+    // the user deletes the finished job; the worker retires the torrent (removes it from qBittorrent)
+    s.db.prepare('DELETE FROM jobs WHERE id = ?').run(j1);
+    rmSync(torrent(s.db, t).library_path!, { recursive: true, force: true }); // deleting a local job removes its library copy
+    await s.worker.tick();
+    expect(torrent(s.db, t).state).toBe('removed');
+    expect(dl.dropNextAdd).toBe(true);
+    // the same torrent is added again straight away (the API flips the row back to pending, as routes/jobs.ts does)
+    s.db.prepare("UPDATE torrents SET state = 'pending', progress = 0, error = NULL, completed_at = NULL WHERE id = ?").run(t);
+    const j2 = addJob(s.db, u, t, d);
+    await s.worker.tick(); // add is dropped by the downloader
+    await s.worker.tick(); // missing -> transparently re-added
+    await s.worker.tick();
+    expect(job(s.db, j2)).toMatchObject({ state: 'downloading', error: null });
+    expect(torrent(s.db, t).state).toBe('downloading');
+    expect(dl.items.has(H1)).toBe(true);
+    // and it can still be finished
+    writeFiles(join(s.content(H1), 'Pack'), { 'a.txt': 'A' });
+    dl.set(H1, { state: 'completed', name: 'Pack', totalSize: 1, progress: 1, contentPath: join(s.content(H1), 'Pack'), savePath: s.content(H1) });
+    await s.worker.tick(); await s.worker.tick(); await s.worker.idle();
+    expect(job(s.db, j2)).toMatchObject({ state: 'completed', error: null });
   });
 
   it('self-heal: a removed or errored torrent with an active job is reset to pending and re-downloaded', async () => {
