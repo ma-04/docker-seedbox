@@ -1,0 +1,6 @@
+# Test-only: publish the TLS front on one loopback port so a developer machine can reach the e2e stack through
+# `ssh -L` (see e2e/README.md). Never used by CI or the normal stack.
+services:
+  front:
+    ports:
+      - "127.0.0.1:${E2E_PUBLISH_PORT:-18443}:443"

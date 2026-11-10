@@ -1,0 +1,118 @@
+import { expect, test } from '@playwright/test';
+import { DEST, addJob, api, destinationId, ensureDestination, expectJobState, jobRow, userPage } from '../lib/app';
+import { env } from '../lib/env';
+import { fixtureFile, getManifest, sha256 } from '../lib/infra';
+import { raw } from '../lib/net';
+
+test.describe.configure({ mode: 'serial' });
+
+test.describe('3. .torrent upload -> local destination -> signed downloads', () => {
+  let links: { url: string; path: string }[] = [];
+  let jobId = 0;
+
+  test.beforeAll(async ({ browser }, testInfo) => {
+    const a = await userPage(browser, testInfo, 'admin');
+    await ensureDestination(a.page, DEST.local, 'local', {});
+    await a.close();
+  });
+
+  test('multi-file torrent progresses live to completed and the Files panel lists every file', async ({ browser }, testInfo) => {
+    const m = await getManifest();
+    const { page, close } = await userPage(browser, testInfo, 'alice');
+    const sse = page.waitForRequest((r) => new URL(r.url()).pathname === '/api/events');
+    const added = await addJob(page, { torrent: { name: 'multi.torrent', buffer: await fixtureFile(m.multi.torrent) } }, DEST.local);
+    expect(added.status).toBe(201);
+    jobId = added.id;
+    await sse;
+    const row = jobRow(page, jobId);
+    await expect(row).toBeVisible();
+    await expect(row).toContainText('E2E Multi Pack');
+    // no reload, no navigation: the row is updated by the live stream
+    await expectJobState(row, 'completed', 120_000);
+
+    await row.getByTestId('job-files').click();
+    const panel = row.getByRole('region');
+    for (const f of m.multi.files) await expect(panel.getByText(f.path, { exact: true })).toBeVisible();
+    await expect(panel.getByTestId('file-link')).toHaveCount(m.multi.files.length);
+    links = await panel.getByTestId('file-link').evaluateAll((as) => as.map((a) => ({ url: (a as HTMLAnchorElement).href, path: '' })));
+    expect(links).toHaveLength(m.multi.files.length);
+    await close();
+  });
+
+  test('every link downloads through files.seedbox.test with the right sha256 (awkward names included)', async () => {
+    const m = await getManifest();
+    for (const f of m.multi.files) {
+      const l = links.find((x) => decodeURIComponent(new URL(x.url).pathname).endsWith(`/E2E Multi Pack/${f.path}`) || decodeURIComponent(new URL(x.url).pathname).endsWith(`/E2E Multi Pack [${m.multi.infohash.slice(0, 8)}]/${f.path}`));
+      expect(l, `link for ${f.path}`).toBeTruthy();
+      const u = new URL(l!.url);
+      expect(u.origin).toBe(env.filesURL);
+      const r = await raw(l!.url);
+      expect(r.status, f.path).toBe(200);
+      expect(r.body.length, f.path).toBe(f.size);
+      expect(sha256(r.body), f.path).toBe(f.sha256);
+      expect(r.headers['content-disposition'], f.path).toContain("filename*=UTF-8''");
+      expect(r.headers['x-content-type-options']).toBe('nosniff');
+    }
+  });
+
+  test('Range request -> 206; tampered signature -> 403; no signature -> 403/404', async () => {
+    const m = await getManifest();
+    const f = m.multi.files.find((x) => x.path === 'plain.bin')!;
+    const url = links.find((x) => decodeURIComponent(new URL(x.url).pathname).endsWith('/plain.bin') && !new URL(x.url).pathname.includes('deeper'))!.url;
+    const full = await raw(url);
+    expect(full.headers['accept-ranges']).toBe('bytes');
+    const part = await raw(url, { headers: { range: 'bytes=100-199' } });
+    expect(part.status).toBe(206);
+    expect(part.headers['content-range']).toBe(`bytes 100-199/${f.size}`);
+    expect(part.body.equals(full.body.subarray(100, 200))).toBe(true);
+
+    const u = new URL(url);
+    const sig = u.searchParams.get('sig')!;
+    u.searchParams.set('sig', (sig[0] === 'a' ? 'b' : 'a') + sig.slice(1));
+    expect((await raw(u.toString())).status).toBe(403);
+    u.searchParams.delete('sig');
+    expect((await raw(u.toString())).status).toBe(403);
+    const other = new URL(url);
+    other.pathname = other.pathname.replace('plain.bin', 'with%20space.bin');   // valid signature, different path
+    expect((await raw(other.toString())).status).toBe(403);
+    const traversal = new URL(url);
+    traversal.pathname = '/dl/..%2f..%2fetc%2fpasswd';
+    expect([400, 403, 404]).toContain((await raw(traversal.toString())).status);
+    // the gateway only serves /dl/ on the files host, and not the library directly
+    expect((await raw(`${env.filesURL}/_protected/plain.bin`)).status).toBe(404);
+    expect((await raw(`${env.filesURL}/`)).status).toBe(404);
+  });
+
+  test('an expired link -> 410', async ({ browser }, testInfo) => {
+    const a = await userPage(browser, testInfo, 'admin');
+    const alice = await userPage(browser, testInfo, 'alice');
+    const id = await destinationId(a.page, DEST.local);
+    try {
+      expect((await api(a.page, 'PATCH', `/api/admin/destinations/${id}`, { config: { linkTtlSeconds: 1 } })).status).toBe(200);
+      const files = await api(alice.page, 'GET', `/api/jobs/${jobId}/files`);
+      const url = files.json.files[0].url as string;
+      expect(new URL(url).searchParams.get('exp')).toBeTruthy();
+      await expect.poll(async () => (await raw(url)).status, { timeout: 15_000 }).toBe(410);
+    } finally {
+      await api(a.page, 'PATCH', `/api/admin/destinations/${id}`, { config: { linkTtlSeconds: 86400 } });
+      await a.close(); await alice.close();
+    }
+  });
+
+  test('SSE streams through the gateway without buffering', async ({ browser }, testInfo) => {
+    const { page, close } = await userPage(browser, testInfo, 'alice');
+    const first = await page.evaluate(async () => {
+      const ctl = new AbortController();
+      const t0 = performance.now();
+      const res = await fetch('/api/events', { signal: ctl.signal, headers: { Accept: 'text/event-stream' } });
+      const reader = res.body!.getReader();
+      const chunk = await Promise.race([reader.read(), new Promise<null>((r) => setTimeout(() => r(null), 8000))]);
+      ctl.abort();
+      return { type: res.headers.get('content-type'), ms: Math.round(performance.now() - t0), text: chunk ? new TextDecoder().decode((chunk as ReadableStreamReadResult<Uint8Array>).value) : null };
+    });
+    expect(first.type).toContain('text/event-stream');
+    expect(first.text, 'first SSE chunk must arrive immediately (not buffered)').toContain('retry:');
+    expect(first.ms).toBeLessThan(5000);
+    await close();
+  });
+});

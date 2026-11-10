@@ -1,0 +1,68 @@
+# TLS front for the e2e stack. Hosts: app./auth./files. -> gateway, s3. -> MinIO (presigned links),
+# fixtures. -> static test fixtures, ctl. -> the e2e control service (token protected).
+resolver 127.0.0.11 valid=5s ipv6=off;
+client_max_body_size 50m;
+
+server {
+  listen 443 ssl default_server;
+  server_name _;
+  ssl_certificate /etc/nginx/certs/cert.pem;
+  ssl_certificate_key /etc/nginx/certs/key.pem;
+  location = /healthz { return 200 "ok\n"; }
+  location / { return 404; }
+}
+
+server {
+  listen 443 ssl;
+  server_name app.seedbox.test auth.seedbox.test files.seedbox.test;
+  ssl_certificate /etc/nginx/certs/cert.pem;
+  ssl_certificate_key /etc/nginx/certs/key.pem;
+  location / {
+    set $gw http://gateway:8080;
+    proxy_pass $gw;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header Connection "";
+    proxy_read_timeout 1h;
+  }
+}
+
+server {
+  listen 443 ssl;
+  server_name s3.seedbox.test;
+  ssl_certificate /etc/nginx/certs/cert.pem;
+  ssl_certificate_key /etc/nginx/certs/key.pem;
+  location / {
+    set $minio http://minio:9000;
+    proxy_pass $minio;
+    proxy_http_version 1.1;
+    proxy_set_header Host minio:9000;   # presigned URLs are signed for the in-network endpoint
+    proxy_set_header Connection "";
+    proxy_buffering off;
+  }
+}
+
+server {
+  listen 443 ssl;
+  server_name fixtures.seedbox.test;
+  ssl_certificate /etc/nginx/certs/cert.pem;
+  ssl_certificate_key /etc/nginx/certs/key.pem;
+  root /srv/fixtures;
+  default_type application/octet-stream;
+  add_header Cache-Control "no-store";
+  location / { try_files $uri =404; }
+}
+
+server {
+  listen 443 ssl;
+  server_name ctl.seedbox.test;
+  ssl_certificate /etc/nginx/certs/cert.pem;
+  ssl_certificate_key /etc/nginx/certs/key.pem;
+  location / {
+    set $ctl http://ctl:9000;
+    proxy_pass $ctl;
+    proxy_read_timeout 120s;
+  }
+}
