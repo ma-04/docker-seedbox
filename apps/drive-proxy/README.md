@@ -12,7 +12,7 @@ https://drive.example.com/<userSlug>/<torrentName>/<sub/dir/file.ext>?exp=<unix>
 
 - The path is URL-encoded per segment. Decoded, it is the canonical path (`/alice/My Torrent/a b.mkv`).
 - `sig = hex(HMAC-SHA256(SIGNING_KEY, path + "\n" + exp))`, 64 lowercase hex chars. `exp` is unix seconds (1-12 digits); `0` never expires. See `docs/architecture.md` (Links) for the shared contract and test vectors.
-- `?inline=1` (not signed) switches `Content-Disposition` from `attachment` to `inline`.
+- Responses are always `Content-Disposition: attachment` with `Content-Security-Policy: default-src 'none'; sandbox` and `nosniff`; html/xhtml/svg/xml/javascript files are served as `application/octet-stream`. There is no inline mode (`?inline=1` is ignored).
 
 Behaviour: only `GET`/`HEAD` (others 405). The signature is verified before any Google call (bad or missing 403, expired 410). The path is then resolved folder by folder with `files.list` (cached with the Cache API, `CACHE_TTL_SECONDS`, negative results at most 30 s) and the file is streamed with `Range` support. Anything else (`/`, directories, Google Docs, malformed or traversal paths) is a 404. There is never a directory listing. `/robots.txt` disallows everything. Drive quota errors become 429 with `Retry-After`; other upstream failures become 502 with no upstream details.
 
