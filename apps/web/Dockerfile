@@ -13,7 +13,7 @@ COPY apps/api/src/lib apps/api/src/lib
 COPY apps/web apps/web
 RUN cd apps/web && npx vite build
 
-FROM nginxinc/nginx-unprivileged:alpine
+FROM nginxinc/nginx-unprivileged:1.30.6-alpine
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /repo/apps/web/dist /usr/share/nginx/html
 EXPOSE 8080

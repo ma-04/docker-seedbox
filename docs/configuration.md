@@ -23,9 +23,9 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `QBT_URL` | worker | `http://vpn:8080` (fixed in compose). |
 | `VPN_URL` | api, worker | `http://vpn:8000` (fixed in compose). |
 | `PORT` | api | `3000` (fixed in compose). |
-| `LAN_CIDRS` | vpn, qbittorrent | Subnet of the internal network, default `172.31.250.0/24`. Change it only if it collides with another Docker network or your LAN. |
-| `LAN_IP_RANGE`, `VPN_IPV4`, `API_IP`, `WORKER_IP` | compose | Fixed addresses for `vpn`/`api`/`worker` (defaults `.2`/`.3`/`.4` of the default subnet); other containers get addresses from `LAN_IP_RANGE` (default `172.31.250.128/25`). If you change `LAN_CIDRS`, change all four together. |
-| `VPN_DEFAULT_MODE` | vpn | `off` (default) or `required`: the sidecar's mode right after a container start; the worker re-applies the admin's `vpn.mode`. |
+| `LAN_CIDRS` | vpn, qbittorrent | Subnet of the internal network, default `172.31.250.0/24`. Change it only if it collides with another Docker network or your LAN, and then change the four address variables below with it: `./setup.sh` derives them all from `LAN_CIDRS` (edit `LAN_CIDRS` in `deploy/.env`, re-run `./setup.sh`). |
+| `LAN_IP_RANGE`, `VPN_IPV4`, `API_IP`, `WORKER_IP` | compose | Fixed addresses for `vpn`/`api`/`worker` (defaults `.2`/`.3`/`.4` of the default subnet); other containers get addresses from `LAN_IP_RANGE` (default `172.31.250.128/25`). All must be inside `LAN_CIDRS`. `API_IP` and `WORKER_IP` are the only addresses allowed to use qBittorrent's WebUI without a password (`QBT_TRUSTED_IPS`). |
+| `VPN_DEFAULT_MODE` | vpn | `required` (default, fail closed) or `off`. Mode of the VPN sidecar after every (re)start, until the worker applies the admin's `vpn.mode` (within seconds). |
 | `LOG_LEVEL` | all | `info`. |
 
 ### Deployment variables (compose / setup.sh)
@@ -58,15 +58,18 @@ Open **Admin** after logging in as a member of `admins`.
 | `limits.maxTorrentBytes` | 0 | Reject larger torrents; 0 = unlimited. |
 | `limits.minFreeDiskBytes` | 2 GiB | Refuse new downloads below this free space. |
 | `seeding.ratio` | 0 | Stop seeding at this ratio; 0 = remove as soon as the upload finishes. |
+| `seeding.maxMinutes` | 0 | With `seeding.ratio` > 0: stop seeding after this many minutes even if the ratio is not reached; 0 = no cap. |
+| `limits.metadataTimeoutMinutes` | 30 | A magnet that gets no metadata (no peers) within this time fails and frees the user's job slot; 0 = never. |
+| `cleanup.failedGraceMinutes` | 60 | After an upload failed, keep the downloaded data this long so "Retry" re-uploads without downloading again. |
 | `google.oauthClientId` / `google.oauthClientSecret` | unset | Reserved for the planned per-user Google Drive connect (not a supported feature yet). |
 
 ### VPN
 
-Admin -> VPN: paste or upload one or more WireGuard configs (`wg-quick` format, e.g. from your provider). IPv6 (`::/0`) is stripped from `AllowedIPs`. Set `vpn.mode` to `required` before adding torrents you want protected. The server needs `/dev/net/tun` (check with `./setup.sh doctor`). Rotation switches to the next enabled config.
+Admin -> VPN: paste or upload one or more WireGuard configs (`wg-quick` format, e.g. from your provider). IPv6 (`::/0`) is stripped from `AllowedIPs`. Set `vpn.mode` to `required` before adding torrents you want protected. The server needs a WireGuard-capable kernel (check with `./setup.sh doctor`); no `/dev/net/tun` is required. Rotation switches to the next enabled config.
 
 ### Destinations
 
-Admin -> Destinations creates shared destinations visible to every user. Files land in `<prefix>/<user>/<torrent name>/...`.
+Admin -> Destinations creates shared destinations visible to every user. Files land in `<prefix>/<user>-<id>/<torrent name> [<8 hex of the infohash>]/...`.
 
 **Google Drive (shared account).** The seedbox uploads to one Drive account/folder you control.
 

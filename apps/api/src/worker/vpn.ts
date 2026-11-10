@@ -2,7 +2,7 @@
 import type { Logger } from 'pino';
 import type { Config } from '../lib/config.js';
 import type { Db } from '../lib/db.js';
-import { getSetting } from '../lib/settings.js';
+import { getSetting, setSetting } from '../lib/settings.js';
 import { connectVpn, type VpnClient } from '../lib/vpn.js';
 import { now, type VpnConfigRow } from '../lib/types.js';
 
@@ -18,12 +18,26 @@ export interface VpnReconcileDeps { db: Db; config: Config; vpn: VpnClient; log:
 export async function reconcileVpn(d: VpnReconcileDeps, trafficExpected: boolean): Promise<void> {
   const { db, config, vpn } = d;
   const mode = getSetting(db, 'vpn.mode');
-  await vpn.setMode(mode);
+  let status = await vpn.status();
+  // Only touch the sidecar when its mode differs: `/mode off` tears a live tunnel down, so re-asserting it blindly is harmful.
+  if (status.mode !== mode) {
+    await vpn.setMode(mode);
+    status = { ...status, mode };
+  }
   if (mode !== 'required') return;
   const enabled = (db.prepare('SELECT COUNT(*) AS n FROM vpn_configs WHERE enabled = 1').get() as { n: number }).n;
+
+  // The active config was deleted/disabled but its tunnel is still up (the API's disconnect call may have failed):
+  // drop it. Required mode stays fail-closed on the sidecar; then fall through to connect another config if any.
+  const activeNow = getSetting(db, 'vpn.activeConfigId');
+  if (activeNow !== null && status.name !== null && !db.prepare('SELECT 1 FROM vpn_configs WHERE id = ? AND enabled = 1').get(activeNow)) {
+    d.log.warn('vpn: the active config is gone or disabled; disconnecting its tunnel');
+    await vpn.disconnect();
+    status = { ...status, connected: false, name: null, publicIp: null, lastHandshakeSec: null };
+    setSetting(db, 'vpn.activeConfigId', null);
+  }
   if (enabled === 0) return;
 
-  const status = await vpn.status();
   const rotation = getSetting(db, 'vpn.rotation');
   const activeId = getSetting(db, 'vpn.activeConfigId');
   const stale = trafficExpected && status.connected && status.lastHandshakeSec !== null && status.lastHandshakeSec > HANDSHAKE_STALE_SEC;

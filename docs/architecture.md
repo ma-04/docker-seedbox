@@ -92,8 +92,11 @@ Authoritative schema: `apps/api/migrations/001_init.sql`. Timestamps are unix se
 - `users(id, username UNIQUE, email, display_name, is_admin, disabled, max_active_jobs NULL, created_at, last_seen_at)`
 - `destinations(id, owner_user_id NULL, name, type, config_enc, enabled, is_default, created_at)` —
   `owner_user_id NULL` = shared (admin-managed, visible to all); otherwise private to that user.
-- `torrents(id, infohash UNIQUE, name, source_enc, total_size, state, progress, dl_speed, save_path, error, added_at, completed_at)` —
+- `torrents(id, infohash UNIQUE, name, source_enc, total_size, state, progress, dl_speed, save_path, error, added_at, completed_at, library_path, cleanup_pending, started_at)` —
   one row per infohash; many jobs may reference it (two users adding the same torrent share one download).
+  `library_path` (migration 003): where a completed local job moved the data (later jobs copy from there);
+  `cleanup_pending`: the worker still has to remove a failed torrent and its data; `started_at`: when it was first
+  handed to the downloader (metadata timeout).
 - `jobs(id, user_id, torrent_id, destination_id, state, upload_progress, upload_speed, remote_path, folder_url, error, created_at, updated_at, completed_at)`
 - `job_files(id, job_id, path, size)` — relative paths, recorded when the upload finishes.
 - `vpn_configs(id, name UNIQUE, config_enc, endpoint_host, enabled, last_used_at, last_error, created_at)`
@@ -124,14 +127,28 @@ type LocalConfig = { type: 'local'; subdir?: string;
   linkTtlSeconds?: number };
 ```
 
-Remote layout for every destination: `<prefix>/<userSlug>/<torrentName>/...` for shared
-destinations, `<prefix>/<torrentName>/...` for user-owned ones. `userSlug` =
-`username` lowercased, `[^a-z0-9._-]` → `_`. Local destination root is
-`/downloads/library` inside the containers.
+Remote layout for every destination: `<prefix>/<userDir>/<jobDir>/...` for shared destinations,
+`<prefix>/<jobDir>/...` for user-owned ones (`jobs.remote_path` stores `<userDir>/<jobDir>` or `<jobDir>`;
+`job_files.path` is relative to it).
+
+- `jobDir` = `<torrentName> [<first 8 hex of the infohash>]`, so two different torrents with the same name never
+  merge or overwrite each other. `torrentName` is sanitised by `safeSegment`: separators and control characters →
+  `_`, leading dots → `_`, trailing dots/spaces removed, truncated by UTF-8 bytes on a code-point boundary so that
+  the whole `jobDir` is at most 180 bytes (filesystems cap names at 255 bytes; CJK/emoji names used to overflow).
+- `userDir` = `<userSlug>-<userId>` where `userSlug` = `username` lowercased, `[^a-z0-9._-]` → `_`, at most 64
+  chars. The slug alone collides (`Bob`/`bob`, `a b`/`a_b`), the id makes the directory unique.
+- Example: user `Alice B` (id 12), torrent `Big Buck Bunny`, infohash `abcdef01…` on a shared destination →
+  `alice_b-12/Big Buck Bunny [abcdef01]/video.mp4`.
+- Local destination root is `/downloads/library` inside the containers.
+- `jobRemoteDir(dest, user, infohash, torrentName)` in `apps/api/src/lib/destinations.ts` is the only place that
+  builds it; the API never recomputes it (it reads `jobs.remote_path`).
+- Google Drive: the worker creates/resolves `<userDir>` and `<jobDir>` itself (in-process mutex per
+  destination+user, deterministic oldest-first match when duplicates exist) and points rclone at the job folder
+  (`root_folder_id=<job folder id>`, target `DST:`), so rclone never creates parent folders.
 
 ### Links
 
-- gdrive, shared, with proxy: `${proxyBaseUrl}/<urlencoded path>?exp=<unix>&sig=<hex>`.
+- gdrive, shared, with proxy: `${proxyBaseUrl}/<urlencoded path>?exp=<unix>&sig=<hex>` (path = `<userDir>/<jobDir>/<file>`).
   The API also returns the per-user Drive folder URL when `sharing != 'none'`.
 - gdrive, user-owned: Drive `webViewLink` of the uploaded folder.
 - s3: `publicBaseUrl` join, else a presigned GET.
@@ -189,7 +206,8 @@ Settings keys (defaults): `vpn.mode` (`"off"` | `"required"`, default `"off"` un
 config exists), `vpn.rotation` (`"manual"` | `"interval"` | `"on-failure"`),
 `vpn.rotationMinutes` (360), `limits.maxActiveJobsPerUser` (5),
 `limits.maxTorrentBytes` (0 = unlimited), `limits.minFreeDiskBytes` (2 GiB),
-`seeding.ratio` (0 = stop when complete), `google.oauthClientId`,
+`limits.metadataTimeoutMinutes` (30; 0 = never), `cleanup.failedGraceMinutes` (60),
+`seeding.ratio` (0 = stop when complete), `seeding.maxMinutes` (0 = no cap; with `seeding.ratio` > 0, stop seeding after this long), `google.oauthClientId`,
 `google.oauthClientSecret` (encrypted; used for user "Connect Google Drive").
 
 Infohashes are stored lowercase hex (v1, 40 chars); base32 magnets are converted before
@@ -233,6 +251,9 @@ a whitelist is the only safe surface. If the engine is unreachable the API answe
 | `VPN_URL` | api, worker | `http://vpn:8000` |
 | `PORT` | api | `3000` |
 | `LAN_CIDRS` | vpn, qbittorrent | compose subnet, default `172.31.250.0/24` |
+| `LAN_IP_RANGE`, `VPN_IPV4`, `API_IP`, `WORKER_IP` | compose | fixed addresses of `vpn`/`api`/`worker` (`172.31.250.2`/`.3`/`.4`) and the range for everything else (`172.31.250.128/25`); all derived from `LAN_CIDRS` by `setup.sh`; compose passes `API_IP`,`WORKER_IP` to qbittorrent as `QBT_TRUSTED_IPS` |
+| `QBT_TRUSTED_IPS` | qbittorrent | comma-separated addresses allowed to use the WebUI without a password (`/32` implied); empty = nobody |
+| `VPN_DEFAULT_MODE` | vpn | `required` (default) \| `off`; mode right after a container start |
 | `LOG_LEVEL` | all | `info` |
 
 Ports inside the compose network: `gateway:8080`, `web:8080`, `api:3000`,
@@ -248,16 +269,42 @@ future work and must plug in here without touching the job state machine.
 
 ## Worker loop (every 2 s)
 
+On start the worker applies `vpn.mode` immediately (retrying every ~3 s until the sidecar answers), then ticks.
+Every transition that can race with the API (which inserts/retries jobs at any time) is a single conditional
+statement or one immediate transaction evaluated *after* slow work; a final self-heal step catches the rest.
+
+0. Self-heal: a torrent in `removed`/`error` that has an active job (`queued`/`downloading`/`uploading`) is
+   reset to `pending` (re-download) instead of stranding the job.
 1. New `pending` torrents → add to qBittorrent (category `seedbox`, save path
    `/downloads/incomplete/<infohash>`). Enforce limits; refuse if `vpn.mode=required`
-   and VPN is not connected.
+   and VPN is not connected. A pending torrent whose only jobs are dead is retired
+   (`UPDATE ... WHERE NOT EXISTS (active job)`). A pending torrent whose data was already moved into the library
+   by a completed local job (`library_path` still exists) becomes `downloaded` without downloading again.
 2. Sync progress for active torrents; on completion mark `downloaded`.
+   - *Missing is transient*: qBittorrent restarting can briefly return an empty list. A torrent the downloader
+     does not know is re-added from `source_enc` (idempotent); it is failed only after being missing > 120 s
+     continuously AND a re-add was definitively rejected. An unreachable downloader
+     (`DownloaderUnavailableError`) never fails anything.
+   - Metadata timeout: no metadata after `limits.metadataTimeoutMinutes` → fail ("no peers / metadata timeout").
+   - Disk: once metadata is known the torrent (plus extra library copies when seeding or other jobs force copy
+     instead of move) must fit above `limits.minFreeDiskBytes`, else fail with a clear message; while
+     downloading, free space is re-checked every 60 s and the torrent fails when it falls below the floor.
+   - Failing a torrent marks it `error` + `cleanup_pending`, fails its active jobs; a sweep (every tick) removes
+     it and its data from qBittorrent and retries until that works. A torrent that a retry has given an active
+     job again is never swept.
 3. For each job of a downloaded torrent in `downloading` → `uploading`: run
-   `rclone copy` (local: `rclone copy` to `/downloads/library/...`), parse
-   `--use-json-log --stats 1s` for progress, record `job_files`, then `completed`.
+   `rclone copy` (local: copy/move to `/downloads/library/...`), parse
+   `--use-json-log --stats 1s` for progress, record `job_files`, then `completed`. S3 endpoints go through an
+   SSRF guard first (user-owned destinations: private ranges refused; shared/admin ones: allowed). rclone gets
+   SIGTERM then SIGKILL after 10 s on abort, and is failed after 30 min without byte progress. Local copies abort
+   on cancel and remove their partial target. Local *move* is claimed with one conditional UPDATE that also records
+   `torrents.library_path`; jobs for the same torrent that arrive later copy from there.
 4. When no job still needs a torrent's data and the seeding rule is met → remove from
-   qBittorrent with data.
-5. VPN: apply `vpn.mode`, health-check, rotate per `vpn.rotation`.
+   qBittorrent with data, then mark `removed` in one transaction that re-checks for active jobs (if one appeared,
+   the torrent goes back to `pending`). After a failed upload the data is kept for
+   `cleanup.failedGraceMinutes` so "Retry" does not re-download. Seeding stops at `seeding.ratio` or, if set,
+   after `seeding.maxMinutes`.
+5. VPN: apply `vpn.mode` (only when the sidecar's reported mode differs), health-check, rotate per `vpn.rotation`.
 Crash-safe: all state lives in SQLite; on boot, `uploading` jobs restart their upload.
 
 ## VPN sidecar (`services/vpn`)
@@ -282,8 +329,12 @@ executes nothing from it, strips IPv6 `Address`/`DNS`/`AllowedIPs` (`::/0`), wai
 traffic until the new one has a handshake, routes are then swapped atomically.
 `connected` = interface up and last handshake <= 180 s ago. `publicIp` comes from `PUBLIC_IP_URL`
 (default a plain-text IP service) fetched through the tunnel, `null` on failure.
-`VPN_DEFAULT_MODE` (`off` | `required`, default `off`) is the mode after a container start; the mode
-and the last config are otherwise in memory only and are re-applied by the worker.
+`VPN_DEFAULT_MODE` (`off` | `required`, default **`required`**: fail closed) is the mode after a container
+start. After a host or container restart qBittorrent resumes torrents immediately, so the sidecar must not boot
+open; the worker then applies the admin's `vpn.mode` right at its start. `POST /mode` with the mode the sidecar
+already has changes nothing (the worker re-checks regularly and `off` would tear a live tunnel down); the mode
+and the last config are otherwise in memory only and are re-applied by the worker. A failed route swap during
+`/connect` restores the previous tunnel's routes.
 
 Kill switch (always on in `required` mode, including before the first `/connect` and during
 rotation): one nftables table, replaced atomically and installed before the API listens. OUTPUT
@@ -305,10 +356,15 @@ service names: the e2e tracker/seeder use fixed IPs inside `LAN_CIDRS`.
 
 qBittorrent WebUI auth: `services/qbittorrent` wraps the official image with an
 entrypoint that (re)asserts, in `qBittorrent.conf` (`[WebUI]` section in qBittorrent 5), WebUI
-port 8080, auth bypass for `LAN_CIDRS` via `AuthSubnetWhitelist`, `LocalHostAuth=false`, host-header
+port 8080, password-less access only for `QBT_TRUSTED_IPS` (compose: the static `api` and `worker` /32 addresses)
+via `AuthSubnetWhitelist`, `LocalHostAuth=false` (loopback is shared only with the vpn sidecar), host-header
 validation and CSRF protection off, no UPnP, anonymous mode off, no interface binding, and on first
 start only: DHT/PeX on, LSD off, no pre-allocation, default save path `/downloads/incomplete`;
-it runs as uid/gid 1000. The WebUI is never routed by the gateway.
+it runs as uid/gid 1000 and refuses to start with `PUID`/`PGID` 0. Every other address in the compose network must
+authenticate, and nobody knows the password (none is stored, so qBittorrent generates a random temporary one per
+start and only logs it): a compromised sibling container can no longer call `setPreferences`/autorun (= code
+execution in the qBittorrent container). The container runs with `cap_drop: [ALL]` plus the five capabilities the
+root-to-1000 entrypoint needs. The WebUI is never routed by the gateway.
 
 ## drive-proxy (Cloudflare Worker)
 

@@ -15,8 +15,13 @@ export interface RcloneCommand {
   secrets: string[];
 }
 
-/** Build the `rclone copy` command for a remote (gdrive/s3) destination. `src` is a directory or a single file. */
-export function buildRcloneCommand(config: DestinationConfig, src: string, remotePath: string): RcloneCommand {
+/**
+ * Build the `rclone copy` command for a remote (gdrive/s3) destination. `src` is a directory or a single file.
+ * `opts.gdriveFolderId`: Drive folder the files go directly into. The worker resolves it first (under a mutex) so
+ * rclone never creates parent folders itself (two concurrent uploads would create duplicate same-named folders);
+ * it becomes rclone's `root_folder_id` and the target is `DST:`.
+ */
+export function buildRcloneCommand(config: DestinationConfig, src: string, remotePath: string, opts: { gdriveFolderId?: string } = {}): RcloneCommand {
   const env: NodeJS.ProcessEnv = {};
   const secrets: string[] = [];
   const set = (k: string, v: string, secret = false) => {
@@ -30,10 +35,10 @@ export function buildRcloneCommand(config: DestinationConfig, src: string, remot
     set('CLIENT_ID', config.clientId);
     set('CLIENT_SECRET', config.clientSecret, true);
     set('SCOPE', 'drive.file');
-    set('ROOT_FOLDER_ID', config.rootFolderId);
+    set('ROOT_FOLDER_ID', opts.gdriveFolderId ?? config.rootFolderId);
     set('TOKEN', JSON.stringify({ access_token: '', token_type: 'Bearer', refresh_token: config.refreshToken, expiry: '2000-01-01T00:00:00Z' }), true);
     secrets.push(config.refreshToken);
-    target = `DST:${remotePath}`;
+    target = opts.gdriveFolderId ? 'DST:' : `DST:${remotePath}`;
   } else if (config.type === 's3') {
     set('TYPE', 's3');
     set('PROVIDER', 'Other');
@@ -91,6 +96,10 @@ export interface RunOptions {
   onStats: (s: RcloneStats) => void;
   /** Called with the process so the caller can kill it on shutdown. */
   onProc?: (p: RcloneProc) => void;
+  /** After an abort: SIGTERM first, SIGKILL if the process is still alive after this long. Default 10 s. */
+  killGraceMs?: number;
+  /** Fail (and kill rclone) when `bytes` did not increase for this long. Default 30 min; 0 disables. */
+  stallMs?: number;
 }
 
 export class RcloneError extends Error {}
@@ -107,14 +116,36 @@ export function runRclone(o: RunOptions): Promise<void> {
     const tail: string[] = [];
     let buf = '';
     let done = false;
-    const finish = (fn: () => void) => { if (!done) { done = true; o.signal?.removeEventListener('abort', onAbort); fn(); } };
-    const onAbort = () => { proc.kill('SIGTERM'); finish(() => reject(new RcloneAborted())); };
+    const finish = (fn: () => void) => { if (!done) { done = true; if (stallTimer) clearTimeout(stallTimer); o.signal?.removeEventListener('abort', onAbort); fn(); } };
+    let exited = false;
+    let stallTimer: NodeJS.Timeout | undefined;
+    const kill = () => {
+      proc.kill('SIGTERM');
+      const t = setTimeout(() => { if (!exited) proc.kill('SIGKILL'); }, o.killGraceMs ?? 10_000);
+      t.unref?.();
+    };
+    const onAbort = () => { kill(); finish(() => reject(new RcloneAborted())); };
     o.signal?.addEventListener('abort', onAbort, { once: true });
+    const stallMs = o.stallMs ?? 30 * 60_000;
+    let lastBytes = -1;
+    const armStall = () => {
+      if (stallMs <= 0) return;
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        kill();
+        finish(() => reject(new RcloneError(`rclone stalled: no transfer progress for ${Math.round(stallMs / 60_000)} minutes`)));
+      }, stallMs);
+      stallTimer.unref?.();
+    };
+    armStall();
 
     const onLine = (line: string) => {
       if (!line.trim()) return;
       const stats = parseStatsLine(line);
-      if (stats) return o.onStats(stats);
+      if (stats) {
+        if (stats.bytes !== lastBytes) { lastBytes = stats.bytes; armStall(); }
+        return o.onStats(stats);
+      }
       let msg = line;
       let level = '';
       if (line[0] === '{') {
@@ -130,8 +161,10 @@ export function runRclone(o: RunOptions): Promise<void> {
       let i: number;
       while ((i = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, i)); buf = buf.slice(i + 1); }
     });
+    proc.on('exit', () => { exited = true; });
     proc.on('error', (err) => finish(() => reject(new RcloneError(`Could not run rclone: ${redact(err.message, o.cmd.secrets)}`))));
     proc.on('close', (code, signal) => {
+      exited = true;
       if (buf) onLine(buf);
       finish(() => {
         if (code === 0) return resolve();

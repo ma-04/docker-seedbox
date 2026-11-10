@@ -26,11 +26,33 @@ describe('vpn reconcile', () => {
     await s.run();
     expect(s.vpn.modes).toEqual(['off']);
     expect(s.vpn.connects).toEqual([]);
+    await s.run(); // already off: the sidecar is not touched again
+    expect(s.vpn.modes).toEqual(['off']);
+  });
+
+  it('never re-asserts a mode the sidecar already has (setMode off tears a live tunnel down)', async () => {
+    const s = setup('on-failure');
+    s.add('one', null);
+    s.vpn.status_ = { ...s.vpn.status_, mode: 'required', connected: true, lastHandshakeSec: 3 };
+    await s.run(); await s.run();
+    expect(s.vpn.modes).toEqual([]);
+    setSetting(s.db, 'vpn.mode', 'off');
+    await s.run(); await s.run();
+    expect(s.vpn.modes).toEqual(['off']);
+  });
+
+  it('a sidecar that booted fail-closed (required) is switched to the admin mode right away, once', async () => {
+    const s = setup('on-failure');
+    setSetting(s.db, 'vpn.mode', 'off');
+    s.vpn.status_ = { ...s.vpn.status_, mode: 'required' };
+    await s.run();
+    expect(s.vpn.modes).toEqual(['off']);
   });
 
   it('initial connect when required and not connected', async () => {
     const s = setup('on-failure');
     s.add('one', null);
+    s.vpn.status_.mode = 'off'; // sidecar currently open
     await s.run();
     expect(s.vpn.modes).toEqual(['required']);
     expect(s.vpn.connects).toEqual(['one']);
@@ -38,6 +60,7 @@ describe('vpn reconcile', () => {
 
   it('required with no configs: sets mode, no connect', async () => {
     const s = setup('on-failure');
+    s.vpn.status_.mode = 'off';
     await s.run();
     expect(s.vpn.modes).toEqual(['required']);
     expect(s.vpn.connects).toEqual([]);
@@ -87,6 +110,42 @@ describe('vpn reconcile', () => {
     s.vpn.status_.connected = false;
     await s.run();
     expect(s.vpn.connects).toEqual(['a']);
+  });
+
+  it('a tunnel whose config was deleted/disabled is disconnected, then another config is connected', async () => {
+    const s = setup('on-failure');
+    const a = s.add('a', 100);
+    const b = s.add('b', 200);
+    setSetting(s.db, 'vpn.activeConfigId', a);
+    s.vpn.status_ = { ...s.vpn.status_, connected: true, name: 'a', lastHandshakeSec: 3 };
+    s.db.prepare('UPDATE vpn_configs SET enabled = 0 WHERE id = ?').run(a);
+    await s.run();
+    expect(s.vpn.disconnects).toBe(1);
+    expect(s.vpn.connects).toEqual(['b']);
+    expect(getSetting(s.db, 'vpn.activeConfigId')).toBe(b);
+  });
+
+  it('with no enabled config left the orphaned tunnel is disconnected and the sidecar stays required', async () => {
+    const s = setup('on-failure');
+    const a = s.add('a', 100);
+    setSetting(s.db, 'vpn.activeConfigId', a);
+    s.vpn.status_ = { ...s.vpn.status_, connected: true, name: 'a', lastHandshakeSec: 3 };
+    s.db.prepare('DELETE FROM vpn_configs WHERE id = ?').run(a);
+    await s.run();
+    expect(s.vpn.disconnects).toBe(1);
+    expect(s.vpn.connects).toEqual([]);
+    expect(s.vpn.modes).toEqual([]); // never switched to off
+  });
+
+  it('Worker.start() applies vpn.mode immediately, not after vpnEveryMs', async () => {
+    const env = makeEnv();
+    const vpn = new FakeVpn();
+    setSetting(env.db, 'vpn.mode', 'off');
+    const w = new Worker({ db: env.db, config: env.config, downloader: new FakeDownloader(), vpn, log: silent, vpnEveryMs: 1e9, tickMs: 1e9 });
+    w.start();
+    await w.idle();
+    expect(vpn.modes).toEqual(['off']);
+    await w.stop();
   });
 
   it('Worker.reconcileVpn never throws when the sidecar is unreachable', async () => {

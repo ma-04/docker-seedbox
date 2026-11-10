@@ -17,7 +17,8 @@ import (
 //
 // required: OUTPUT policy drop; allowed = loopback, LAN_CIDRS, wg interfaces, and the
 //
-//	UDP endpoint(s) of the tunnel being brought up / currently up.
+//	UDP endpoint(s) of the tunnel being brought up / currently up, and only
+//	for packets carrying wgFwmark (WireGuard's own).
 //	IPv6 (except loopback) is dropped. Docker's embedded resolver (127.0.0.11,
 //	which forwards from the host side) is usable by root only (this process,
 //	to resolve a WireGuard endpoint hostname) and never by qBittorrent.
@@ -26,6 +27,14 @@ import (
 // both:     INPUT from the tunnel to the control/WebUI ports is dropped, so other
 //
 //	customers of the VPN provider cannot reach them via the tunnel address.
+//
+// wgFwmark is set on every WireGuard interface (`FwMark` in the wg conf). The kernel stamps it on the OUTER
+// (encrypted) UDP packets of the tunnel, and only those: they are kernel-originated, carry no socket owner (so
+// `meta skuid` cannot tell them apart from nothing) and qBittorrent (uid 1000, no CAP_NET_ADMIN) cannot set
+// SO_MARK. The endpoint exception below matches this mark, so a torrent peer/tracker/DHT node that happens to
+// share the endpoint's IP:port gets no direct, cleartext path from the real address.
+const wgFwmark = "0x5b76"
+
 func buildRuleset(mode string, lan []netip.Prefix, endpoints []netip.AddrPort, webPorts string) string {
 	var b strings.Builder
 	b.WriteString("add table inet sbvpn\ndelete table inet sbvpn\ntable inet sbvpn {\n")
@@ -45,7 +54,7 @@ func buildRuleset(mode string, lan []netip.Prefix, endpoints []netip.AddrPort, w
 		}
 		b.WriteString("    oifname \"wg*\" accept\n")
 		for _, e := range endpoints {
-			fmt.Fprintf(&b, "    ip daddr %s udp dport %d accept\n", e.Addr(), e.Port())
+			fmt.Fprintf(&b, "    ip daddr %s udp dport %d meta mark %s accept\n", e.Addr(), e.Port(), wgFwmark)
 		}
 		b.WriteString("  }\n")
 	} else {

@@ -4,14 +4,8 @@
 # The worker overrides CMD with `node dist/worker.js`.
 
 ARG NODE_IMAGE=node:22-bookworm-slim
-
-# --- Collect every workspace package.json (+ lockfile) so `npm ci` layers cache independently of source changes.
-FROM ${NODE_IMAGE} AS manifests
-WORKDIR /src
-COPY . .
-RUN mkdir /out \
- && cp package.json package-lock.json /out/ \
- && find apps e2e -maxdepth 2 -name package.json -not -path '*/node_modules/*' -exec cp --parents {} /out/ \;
+# Pinned: a floating tag would change the uploader (and its flags) under a running deployment.
+ARG RCLONE_IMAGE=rclone/rclone:1.74.4
 
 # --- Build tools for native modules (better-sqlite3 falls back to node-gyp if no prebuilt binary matches).
 FROM ${NODE_IMAGE} AS build-base
@@ -19,7 +13,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=manifests /out/ ./
+# Only the manifests + lockfile, so the `npm ci` layers are cached independently of source edits and no local
+# file (.env, credentials, ...) can enter the build cache.
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY apps/drive-proxy/package.json apps/drive-proxy/package.json
+COPY e2e/package.json e2e/package.json
 
 # --- Full install + TypeScript build.
 FROM build-base AS build
@@ -39,11 +39,13 @@ RUN --mount=type=cache,target=/root/.npm \
  && npm cache clean --force
 
 # --- Runtime.
+FROM ${RCLONE_IMAGE} AS rclone
+
 FROM ${NODE_IMAGE} AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=rclone/rclone:latest /usr/local/bin/rclone /usr/local/bin/rclone
+COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     DOWNLOADS_DIR=/downloads \

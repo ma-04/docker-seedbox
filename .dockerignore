@@ -7,6 +7,10 @@
 credentials
 **/.env
 **/.env.*
+**/.dev.vars
+deploy/authelia/users
+deploy/**/.env*
+e2e/.state
 !**/.env.example
 **/*.log
 # e2e artifacts

@@ -11,8 +11,9 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..',
 export function openDb(path: string, migrationsDir = MIGRATIONS_DIR): Db {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
-  db.pragma('journal_mode = WAL');
+  // busy_timeout first: switching to WAL takes a lock, and api + worker open the file concurrently.
   db.pragma('busy_timeout = 5000');
+  db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   migrate(db, migrationsDir);
   return db;

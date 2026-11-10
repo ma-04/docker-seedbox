@@ -131,7 +131,7 @@ services:
       init: { condition: service_completed_successfully }
     networks:
       default:
-        ipv4_address: ${API_IP:-172.31.250.3}      # static: qBittorrent's WebUI trusts these addresses
+        ipv4_address: ${API_IP:-172.31.250.3}      # static: qBittorrent's WebUI trusts exactly this address (QBT_TRUSTED_IPS)
     healthcheck:
       # /api/health needs the gateway secret like every other request.
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health',{headers:{'x-gateway-secret':process.env.GATEWAY_SECRET}}).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
@@ -159,7 +159,7 @@ services:
     cap_drop: [ALL]
     networks:
       default:
-        ipv4_address: ${WORKER_IP:-172.31.250.4}
+        ipv4_address: ${WORKER_IP:-172.31.250.4}   # static: qBittorrent's WebUI trusts exactly this address (QBT_TRUSTED_IPS)
     depends_on:
       init: { condition: service_completed_successfully }
       api: { condition: service_healthy }
@@ -179,7 +179,7 @@ services:
     environment:
       VPN_CONTROL_TOKEN: ${VPN_CONTROL_TOKEN:?run ./setup.sh to generate secrets}
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
-      VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-off}   # "required" = fail closed after restarts
+      VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-required}   # fail closed after any restart until the worker applies vpn.mode
       LOG_LEVEL: ${LOG_LEVEL:-info}
     tmpfs: ["/tmp"]                   # not read_only: /etc/resolv.conf must stay writable
     security_opt: ["no-new-privileges:true"]
@@ -204,10 +204,15 @@ services:
     network_mode: service:vpn
     environment:
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
+      # Only api and worker may use the WebUI without a password; everything else in the network must authenticate.
+      QBT_TRUSTED_IPS: ${API_IP:-172.31.250.3},${WORKER_IP:-172.31.250.4}
     volumes:
       - qbt-config:/config
       - downloads:/downloads
     security_opt: ["no-new-privileges:true"]
+    # The entrypoint starts as root only to fix ownership and then drops to PUID/PGID (1000).
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
     depends_on:
       init: { condition: service_completed_successfully }
       vpn:

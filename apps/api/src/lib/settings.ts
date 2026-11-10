@@ -12,6 +12,9 @@ export const SETTING_DEFAULTS = {
   'seeding.ratio': 0,
   'google.oauthClientId': '',
   'google.oauthClientSecret': '', // encrypted blob when set
+  'cleanup.failedGraceMinutes': 60, // keep downloaded data this long after an upload failed, so "Retry" skips the re-download
+  'limits.metadataTimeoutMinutes': 30, // a magnet without metadata after this long fails (0 = never)
+  'seeding.maxMinutes': 0, // 0 = no cap; with seeding.ratio > 0, stop seeding after this many minutes
 };
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
 export type Settings = typeof SETTING_DEFAULTS;

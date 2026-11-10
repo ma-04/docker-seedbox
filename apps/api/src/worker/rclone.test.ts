@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildRcloneCommand, parseStatsLine, redact } from './rclone.js';
+import { buildRcloneCommand, parseStatsLine, redact, runRclone, RcloneAborted, RcloneError } from './rclone.js';
+import { fakeSpawn } from './testkit.js';
 
 describe('buildRcloneCommand', () => {
   it('gdrive: credentials only in env', () => {
@@ -17,6 +18,15 @@ describe('buildRcloneCommand', () => {
     expect(JSON.parse(c.env.RCLONE_CONFIG_DST_TOKEN!)).toMatchObject({ refresh_token: 'rtoken', token_type: 'Bearer', access_token: '', expiry: '2000-01-01T00:00:00Z' });
     expect(Object.keys(c.env).every((k) => k.startsWith('RCLONE_CONFIG_'))).toBe(true);
     expect(c.secrets).toEqual(expect.arrayContaining(['csecret', 'rtoken']));
+  });
+
+  it('gdrive with a resolved job folder: rclone root is that folder and the target is DST: (it never creates parents)', () => {
+    const c = buildRcloneCommand(
+      { type: 'gdrive', clientId: 'cid', clientSecret: 'csecret', refreshToken: 'rtoken', rootFolderId: 'ROOT', sharing: 'none' },
+      '/src/Pack', 'alice-1/Pack [aaaaaaaa]', { gdriveFolderId: 'JOBFOLDER' },
+    );
+    expect(c.args[2]).toBe('DST:');
+    expect(c.env.RCLONE_CONFIG_DST_ROOT_FOLDER_ID).toBe('JOBFOLDER');
   });
 
   it('s3: bucket + prefix target, path-style default, no secrets in argv', () => {
@@ -45,5 +55,51 @@ describe('parsing', () => {
     const t = redact('token=abc refresh_token: "1//xyz" Bearer ya29.AAAA secret-literal-value', ['secret-literal-value']);
     expect(t).not.toMatch(/xyz|ya29|secret-literal/);
     expect(redact('Failed to copy: directory not found')).toBe('Failed to copy: directory not found');
+  });
+});
+
+describe('runRclone abort and stall', () => {
+  const cmd = { args: ['copy', 'a', 'b'], env: {}, secrets: [] };
+  const stats = (bytes: number) => JSON.stringify({ level: 'warning', msg: 'stats', stats: { bytes, totalBytes: 100, speed: 1 } }) + '\n';
+
+  it('abort sends SIGTERM, then SIGKILL after the grace period when rclone ignores it', async () => {
+    const fs_ = fakeSpawn();
+    const ac = new AbortController();
+    const p = runRclone({ spawn: fs_.spawn, bin: 'rclone', cmd, signal: ac.signal, onStats: () => undefined, killGraceMs: 30 });
+    ac.abort();
+    await expect(p).rejects.toBeInstanceOf(RcloneAborted);
+    expect(fs_.procs[0]!.signals).toEqual(['SIGTERM']);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(fs_.procs[0]!.signals).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
+  it('no SIGKILL when rclone exits after SIGTERM', async () => {
+    const fs_ = fakeSpawn();
+    const ac = new AbortController();
+    const p = runRclone({ spawn: fs_.spawn, bin: 'rclone', cmd, signal: ac.signal, onStats: () => undefined, killGraceMs: 30 });
+    ac.abort();
+    await p.catch(() => undefined);
+    fs_.procs[0]!.finish(143);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(fs_.procs[0]!.signals).toEqual(['SIGTERM']);
+  });
+
+  it('a stalled transfer (no byte progress) is killed and fails with a clear error', async () => {
+    const fs_ = fakeSpawn();
+    const p = runRclone({ spawn: fs_.spawn, bin: 'rclone', cmd, onStats: () => undefined, stallMs: 50, killGraceMs: 1000 });
+    fs_.procs[0]!.stderr.write(stats(10));
+    await new Promise((r) => setTimeout(r, 30));
+    fs_.procs[0]!.stderr.write(stats(10)); // same bytes: not progress
+    await expect(p).rejects.toThrow(/stalled/);
+    await p.catch((e) => expect(e).toBeInstanceOf(RcloneError));
+    expect(fs_.procs[0]!.signals[0]).toBe('SIGTERM');
+  });
+
+  it('progress keeps the watchdog quiet', async () => {
+    const fs_ = fakeSpawn();
+    const p = runRclone({ spawn: fs_.spawn, bin: 'rclone', cmd, onStats: () => undefined, stallMs: 60 });
+    for (let i = 1; i <= 5; i++) { fs_.procs[0]!.stderr.write(stats(i)); await new Promise((r) => setTimeout(r, 30)); }
+    fs_.procs[0]!.finish(0);
+    await expect(p).resolves.toBeUndefined();
   });
 });

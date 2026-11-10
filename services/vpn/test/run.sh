@@ -26,6 +26,9 @@ sh_()   { bash -c "$1"; }
 OUT=""
 has()    { printf '%s\n' "$OUT" | grep -q -- "$1"; }
 jqok()   { printf '%s\n' "$OUT" | head -1 | jq -e "$1"; }
+intruder_code() { $DC exec -T lan-intruder curl -s -m 5 -o /dev/null -w '%{http_code}' "$@"; }
+mode_noop() { echo '{"mode":"required"}' | $DC exec -T lan-client /t/ctl.sh POST /mode | head -1 | jq -e '.connected and .mode=="required"'; }
+qbt_refuses_root() { docker run --rm -e PUID=0 sbvpn-qbittorrent 2>&1 | grep -q 'refusing to run'; }
 status() { ctl GET /status | head -1; }
 connect() { # name file : POST /connect with the generated config
   $DC cp "$WORK/$2.conf" lan-client:/tmp/cfg.conf >/dev/null 2>&1
@@ -39,7 +42,7 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
-export -f ctl probe probe_ip jqs status connect sh_ has jqok
+export -f ctl probe probe_ip jqs status connect sh_ has jqok intruder_code mode_noop qbt_refuses_root
 export DC WORK
 
 section "build + keys"
@@ -66,7 +69,7 @@ mkconf A 10.99.1 "$S1_PUB" wg1:51820
 mkconf B 10.99.2 "$S2_PUB" 172.31.251.12:51820
 { cat "$WORK/A.conf"; echo "PostUp = touch /tmp/pwned"; } > "$WORK/evil.conf"
 
-$DC up -d echo-direct echo-behind wg1 wg2 lan-client >/dev/null
+$DC up -d echo-direct echo-behind wg1 wg2 lan-client lan-intruder >/dev/null
 VPN_DEFAULT_MODE=off $DC up -d --wait vpn qbittorrent probe >/dev/null || { $DC ps; $DC logs vpn qbittorrent | tail -30; exit 2; }
 sleep 1
 
@@ -78,9 +81,13 @@ check "WebUI :8080 reachable from LAN client" $DC exec -T lan-client curl -fsS -
 check "resolv.conf = Docker resolver" $DC exec -T probe grep -q 127.0.0.11 /etc/resolv.conf
 check "qBittorrent healthy" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
 OUT=$($DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/preferences)
-check "qBittorrent seeded: port 8080, LAN whitelist, no host-header/CSRF checks" jqok '.web_ui_port==8080 and .bypass_auth_subnet_whitelist_enabled and .bypass_auth_subnet_whitelist=="172.31.250.0/24" and (.web_ui_host_header_validation_enabled|not) and (.web_ui_csrf_protection_enabled|not)'
+check "qBittorrent seeded: port 8080, whitelist = only QBT_TRUSTED_IPS (/32), no host-header/CSRF checks" jqok '.web_ui_port==8080 and .bypass_auth_subnet_whitelist_enabled and .bypass_auth_subnet_whitelist=="172.31.250.50/32" and (.web_ui_host_header_validation_enabled|not) and (.web_ui_csrf_protection_enabled|not)'
 check "qBittorrent seeded: no UPnP, DHT/PeX on, save path, no prealloc, anonymous off" jqok '(.upnp|not) and .dht and .pex and .save_path=="/downloads/incomplete" and (.preallocate_all|not) and (.anonymous_mode|not) and .current_network_interface==""'
 OUT=""
+check "untrusted sibling container: WebUI API is 403 (needs a password nobody knows)" test "$(intruder_code http://vpn:8080/api/v2/app/version)" = 403
+check "untrusted sibling container: setPreferences (autorun = RCE) is 403" test "$(intruder_code -X POST --data-urlencode 'json={"autorun_enabled":true}' http://vpn:8080/api/v2/app/setPreferences)" = 403
+checkno "untrusted sibling container: default password adminadmin does not log in" bash -c "$DC exec -T lan-intruder curl -s -m 5 -d 'username=admin&password=adminadmin' http://vpn:8080/api/v2/auth/login | grep -q 'Ok.'"
+check "qBittorrent entrypoint refuses PUID=0" qbt_refuses_root
 check "qBittorrent runs as uid 1000" bash -c "$DC exec -T qbittorrent sh -c 'ps -o user,args | grep \"[q]bittorrent-nox\"' | grep -q qbtUser"
 
 # ---------------------------------------------------------------- 2
@@ -130,6 +137,10 @@ checkno "zero direct successes during the switch (leak loop)" probe test -s /tmp
 OUT=$(connect A A); echo "$OUT" | head -1
 check "and back: B -> A" sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.11$'"
 checkno "zero direct successes during second switch" probe test -s /tmp/leaks
+# The endpoint exception must only cover WireGuard's own (fwmarked, kernel-originated) packets.
+check "endpoint rule is restricted to the wg fwmark" sh_ "$DC exec -T -u 0 vpn nft list chain inet sbvpn output | grep 'udp dport 51820' | grep -q 'meta mark 0x00005b76'"
+checkno "uid 1000 cannot send cleartext UDP to the active tunnel endpoint (172.31.251.11:51820)" sh_ "echo leak | $DC exec -T -u 1000 probe socat -T1 - UDP:172.31.251.11:51820"
+check "tunnel still works after that attempt" sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.11$'"
 OUT=$(echo "{\"name\":\"bad\",\"config\":$(sed 's/^PublicKey.*/PublicKey = '"$C_PUB"'/' "$WORK/B.conf" | jq -Rs .)}" | ctl POST /connect)
 check "bad-key config (no handshake) -> 502" has '^HTTP 502$'
 check "old tunnel (A) kept after the failed switch" sh_ "status | jq -e '.connected and .name==\"A\"'"
@@ -184,6 +195,7 @@ checkno "direct echo blocked right after restart" probe curl -sS -m 3 http://172
 checkno "tunnel target blocked until /connect" probe curl -sS -m 3 http://172.31.252.20/
 check "WebUI reachable after restart" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
 OUT=$(connect A A); check "/connect works after restart" jqok .connected
+check "POST /mode with the current mode leaves a live tunnel alone" mode_noop
 check "tunnel works after restart" probe curl -sS -m 5 http://172.31.252.20/
 # plain `docker restart` (same container, stale resolv.conf from the previous run must be healed)
 docker stop -t 1 sbvpn-qbittorrent-1 sbvpn-probe-1 >/dev/null
@@ -193,6 +205,8 @@ check "docker restart (required default): fail closed, mode=required" test "$(st
 P2="docker run --rm --network container:sbvpn-vpn-1 -u 1000 sbvpn-tools"
 checkno "fresh namespace: direct echo blocked" $P2 curl -sS -m 3 http://172.31.251.20/
 checkno "fresh namespace: DNS blocked" $P2 nslookup example.com
+VPN_DEFAULT_MODE= $DC up -d --force-recreate --wait vpn >/dev/null 2>&1
+check "VPN_DEFAULT_MODE unset/empty = required (fail closed)" test "$(status | jqs '.mode+" "+(.connected|tostring)')" = "required false"
 VPN_DEFAULT_MODE=off $DC up -d --force-recreate --wait vpn >/dev/null 2>&1
 P2="docker run --rm --network container:sbvpn-vpn-1 -u 1000 sbvpn-tools"
 check "default off after recreate: direct echo reachable" $P2 curl -sS -m 4 http://172.31.251.20/

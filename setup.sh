@@ -33,7 +33,7 @@ Commands:
   install (default)   configure, pull/build images and start the stack
   add-user            add an Authelia user (--admin-user NAME --admin-password PW --admin-email MAIL [--group admins])
   update              pull newer images and restart (add --build to rebuild from this clone)
-  doctor              diagnose DNS, containers, /dev/net/tun, WireGuard and disk space
+  doctor              diagnose DNS, containers, the WireGuard kernel module and disk space
 
 Install options (each also readable from the environment as SEEDBOX_<NAME>, e.g. SEEDBOX_DOMAIN):
   --domain DOMAIN        app host, e.g. seedbox.example.com (auth./files. subdomains are derived)
@@ -119,6 +119,18 @@ env_put() { # env_put KEY VALUE : replace the line (or append). Edits in place, 
   fi
   cat "$tmp" >"$ENV_FILE"; rm -f "$tmp"
 }
+lan_ips() { # lan_ips CIDR -> "<vpn ip> <api ip> <worker ip> <dynamic range>" (IPv4, /8../26)
+  # vpn/api/worker get network+2/+3/+4 (the low half of the subnet); Docker hands out the rest from the upper half.
+  local cidr=$1 a b c d bits n mask net half
+  printf '%s' "$cidr" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$' || return 1
+  IFS=. read -r a b c d <<<"${cidr%/*}"; bits=${cidr#*/}
+  [ "$bits" -ge 8 ] && [ "$bits" -le 26 ] || return 1
+  [ "$a" -le 255 ] && [ "$b" -le 255 ] && [ "$c" -le 255 ] && [ "$d" -le 255 ] || return 1
+  n=$(( (a << 24) | (b << 16) | (c << 8) | d )); mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+  net=$(( n & mask )); half=$(( net + (1 << (31 - bits)) ))
+  dotted() { printf '%d.%d.%d.%d' $(( ($1 >> 24) & 255 )) $(( ($1 >> 16) & 255 )) $(( ($1 >> 8) & 255 )) $(( $1 & 255 )); }
+  printf '%s %s %s %s/%d\n' "$(dotted $((net + 2)))" "$(dotted $((net + 3)))" "$(dotted $((net + 4)))" "$(dotted $half)" $((bits + 1))
+}
 env_ensure() { # env_ensure KEY VALUE : only if currently unset/empty (secrets!)
   [ -n "$(env_get "$1")" ] || env_put "$1" "$2"
 }
@@ -163,9 +175,18 @@ authelia_image() { # single source of truth: deploy/compose.yaml
 
 # --- Authelia users -------------------------------------------------------------------------------
 hash_password() { # hash_password PASSWORD -> argon2id digest, via the pinned Authelia image
-  local out
-  out=$(docker run --rm "$(authelia_image)" authelia crypto hash generate argon2 --password "$1" --no-confirm 2>&1) \
-    || die "Could not hash the password with $(authelia_image): $out"
+  # The password goes in through a 0600 env file, never on the `docker run` command line (visible in `ps` and
+  # shell history to every local user). Limitation: `authelia crypto hash generate` has no stdin/file input, so
+  # the authelia process inside the throw-away container still has it in its argv for about a second.
+  local out envf rc=0
+  envf=$(mktemp) || die "Cannot create a temporary file"
+  chmod 600 "$envf"
+  printf 'SEEDBOX_PW=%s\n' "$1" >"$envf"
+  # shellcheck disable=SC2016  # $SEEDBOX_PW must expand inside the container
+  out=$(docker run --rm --env-file "$envf" --entrypoint sh "$(authelia_image)" \
+    -c 'exec authelia crypto hash generate argon2 --password "$SEEDBOX_PW" --no-confirm' 2>&1) || rc=$?
+  rm -f "$envf"
+  [ "$rc" -eq 0 ] || die "Could not hash the password with $(authelia_image) (exit $rc)"
   printf '%s\n' "$out" | sed -n 's/^Digest: //p' | head -n 1
 }
 
@@ -323,6 +344,13 @@ cmd_install() {
   fi
   [ -n "$(env_get SEEDBOX_REGISTRY)" ] || env_put SEEDBOX_REGISTRY ghcr.io/ma-04
   [ -n "$(env_get SEEDBOX_VERSION)" ] || env_put SEEDBOX_VERSION latest
+  # One source of truth: LAN_CIDRS. The static addresses of vpn/api/worker (api and worker are the only ones
+  # qBittorrent's WebUI trusts) and the dynamic range must lie inside it, so they are always re-derived from it.
+  local lan lan_vpn lan_api lan_worker lan_range
+  lan=$(env_get LAN_CIDRS); lan=${lan:-172.31.250.0/24}
+  read -r lan_vpn lan_api lan_worker lan_range < <(lan_ips "$lan") || die "LAN_CIDRS '$lan' is not a valid IPv4 CIDR (/8 to /26)"
+  env_put LAN_CIDRS "$lan"; env_put VPN_IPV4 "$lan_vpn"; env_put API_IP "$lan_api"; env_put WORKER_IP "$lan_worker"
+  env_put LAN_IP_RANGE "$lan_range"
 
   # Secrets: generated once, never overwritten.
   env_ensure APP_SECRET "$(gen_hex 32)"
@@ -477,7 +505,7 @@ cmd_doctor() {
   if have curl; then
     local scheme code
     scheme=$(env_get PUBLIC_SCHEME); scheme=${scheme:-https}
-    for h in "$(env_get APP_HOST)" "$(env_get AUTH_HOST)"; do
+    for h in "$(env_get APP_HOST)" "$(env_get AUTH_HOST)" "$(env_get FILES_HOST)"; do
       code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$scheme://$h/healthz" 2>/dev/null || true)
       if [ "$code" = 200 ]; then ok "$scheme://$h/healthz -> 200"; else bad "$scheme://$h/healthz -> ${code:-no response} (DNS, firewall, certificate or proxy mapping?)"; fi
     done
@@ -486,10 +514,11 @@ cmd_doctor() {
   fi
 
   say ""; say "VPN prerequisites"
-  if [ -c /dev/net/tun ]; then ok "/dev/net/tun exists"; else bad "/dev/net/tun missing (modprobe tun; LXC/OpenVZ guests need the device passed through)"; fi
+  # The sidecar uses the kernel's WireGuard through netlink (NET_ADMIN); it needs no /dev/net/tun.
   if [ -d /sys/module/wireguard ]; then ok "WireGuard kernel module loaded/built in"
+  elif have modinfo && modinfo wireguard >/dev/null 2>&1; then ok "WireGuard kernel module available (loads on demand)"
   elif have modprobe && modprobe -n wireguard >/dev/null 2>&1; then ok "WireGuard kernel module available (loads on demand)"
-  else meh "No WireGuard kernel module found (kernel >= 5.6 includes it). Check: sudo modprobe wireguard"; fi
+  else meh "Could not confirm WireGuard kernel support (kernel >= 5.6 includes it; containers/VMs may hide it). If the VPN fails to connect: sudo modprobe wireguard"; fi
 
   say ""; say "Disk"
   local root avail_kb
