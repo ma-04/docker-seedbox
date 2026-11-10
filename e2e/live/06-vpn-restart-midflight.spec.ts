@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { api, compose, inQbt, login, mask, serverEgressIp, state, note } from './lib';
+import { api, compose, ensureFreshJob, inQbt, login, mask, serverEgressIp, state, note } from './lib';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -7,9 +7,10 @@ test.describe('6a. `compose restart vpn` mid-download', () => {
   test('the namespace is fail-closed until the VPN is back, then the download resumes', async ({ page }, testInfo) => {
     test.setTimeout(15 * 60_000);
     await login(page, 'admin');
-    const jobId = state().jobs.debianDrive!.id;
+    const jobId = await ensureFreshJob(page, 'restartIso', 'ubuntu-desktop');   // fresh, big, mid-download
     const progress = async () => ((await api(page, 'GET', '/api/jobs')).json as { id: number; downloadProgress: number; state: string }[]).find((j) => j.id === jobId)!;
     const own = await serverEgressIp();
+    await expect.poll(async () => (await progress()).downloadProgress, { timeout: 120_000, intervals: [3000] }).toBeGreaterThan(0.01);
     const p0 = await progress();
     expect(p0.state).toBe('downloading');
 
@@ -35,6 +36,6 @@ test.describe('6a. `compose restart vpn` mid-download', () => {
     expect(after.mode).toBe('required');
     expect(after.publicIp).not.toBe(own);
     // the download picks up again
-    await expect.poll(async () => { const p = await progress(); return p.state === 'downloading' && p.downloadProgress > p0.downloadProgress; }, { timeout: 300_000, intervals: [5000] }).toBe(true);
+    await expect.poll(async () => { const p = await progress(); return (p.state === 'downloading' && p.downloadProgress > p0.downloadProgress) || (p.state !== 'downloading' && p.state !== 'failed' && p.downloadProgress > p0.downloadProgress); }, { timeout: 300_000, intervals: [5000] }).toBe(true);
   });
 });

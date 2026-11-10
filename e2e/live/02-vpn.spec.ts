@@ -14,7 +14,8 @@ test.describe('2. VPN', () => {
     await login(page, 'admin');
     await page.getByRole('link', { name: 'VPN' }).click();
     const form = page.getByRole('form', { name: 'Add VPN config' });
-    const existing = await page.getByTestId('vpn-config-row').count();
+    const existing = ((await api(page, 'GET', '/api/admin/vpn/configs')).json as unknown[]).length;   // via the API: the table may not have rendered yet
+    if (existing > 0) await expect(page.getByTestId('vpn-config-row')).toHaveCount(existing);
     const files = live.wgConfigs();
     expect(files.length).toBeGreaterThanOrEqual(2);
     if (existing === 0) {

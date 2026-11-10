@@ -61,7 +61,7 @@ services:
     image: sbvpn-qbittorrent
     network_mode: service:vpn
     cap_drop: [ALL]   # same as deploy/compose.yaml: proves the entrypoint works with exactly these capabilities
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]
     environment: { LAN_CIDRS: 172.31.250.0/24, QBT_TRUSTED_IPS: 172.31.250.50 }   # only lan-client may use the WebUI
     volumes: ["qbt-config:/config", "downloads:/downloads"]
     depends_on: { vpn: { condition: service_healthy, restart: true } }

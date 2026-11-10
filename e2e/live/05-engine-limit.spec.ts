@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { api, login, qbtJson, note } from './lib';
+import { api, ensureFreshJob, login, qbtJson, note } from './lib';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -7,6 +7,7 @@ test.describe('5. engine settings: download limit', () => {
   test('Advanced -> a download limit is applied (speed drops), then reset', async ({ page }, testInfo) => {
     test.setTimeout(10 * 60_000);
     await login(page, 'admin');
+    await ensureFreshJob(page, 'limitIso', 'debian-dvd');   // something big and still downloading
     // the engine's own global download rate (all torrents), read from inside the VPN namespace
     const speed = async (): Promise<number> => (await qbtJson('/api/v2/transfer/info')).dl_info_speed as number;
     const sample = async (n: number) => { const xs: number[] = []; for (let i = 0; i < n; i++) { xs.push(await speed()); await page.waitForTimeout(2000); } return xs; };

@@ -96,16 +96,20 @@ export function fetchHash(url: string, headers: Record<string, string> = {}, opt
     req.end();
   });
 }
-export async function getText(url: string): Promise<string> {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`${url}: ${r.status}`);
-  return r.text();
+/** fetch with a short timeout and retries: a mirror round-robin occasionally has one unreachable address. */
+async function getRetry(url: string): Promise<Response> {
+  let last: unknown;
+  for (let i = 0; i < 5; i++) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      if (!r.ok) throw new Error(`${url}: ${r.status}`);
+      return r;
+    } catch (e) { last = e; }
+  }
+  throw last;
 }
-export async function getBuffer(url: string): Promise<Buffer> {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`${url}: ${r.status}`);
-  return Buffer.from(await r.arrayBuffer());
-}
+export async function getText(url: string): Promise<string> { return (await getRetry(url)).text(); }
+export async function getBuffer(url: string): Promise<Buffer> { return Buffer.from(await (await getRetry(url)).arrayBuffer()); }
 
 // ---- official torrents ------------------------------------------------------------------------------------------------
 export interface Official { name: string; torrent: Buffer; sha256: string; size?: number }
@@ -209,4 +213,57 @@ export function signingKey(): string {
 export function note(ti: import('@playwright/test').TestInfo, type: string, description: string): void {
   ti.annotations.push({ type, description });
   console.log(`[${type}] ${description}`);
+}
+
+// ---- adding a torrent through the UI form (shared by specs 04, 05, 06) ------------------------------------------------
+export async function addTorrent(page: Page, o: Official, destination: string): Promise<{ id: number; infohash: string; status: number }> {
+  await page.goto('/');
+  const form = page.getByTestId('add-form');
+  await expect(form).toBeVisible();
+  await page.getByTestId('torrent-file').setInputFiles({ name: `${o.name}.torrent`, mimeType: 'application/x-bittorrent', buffer: o.torrent });
+  const select = page.getByTestId('destination-select');
+  const opt = select.locator('option', { hasText: destination });
+  await expect(opt).toHaveCount(1);
+  await select.selectOption({ label: await opt.first().innerText() });
+  const [resp] = await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/jobs' && r.request().method() === 'POST'),
+    page.getByTestId('add-submit').click(),
+  ]);
+  const body = await resp.json();
+  return { id: body.id, infohash: body.infohash, status: resp.status() };
+}
+
+/**
+ * A fresh, big, official ISO torrent that is still downloading when a test needs one (engine limit, VPN restart).
+ * Idempotent per `key`: a job already recorded in the run state (and still present) is reused. `kind` picks the
+ * official file: the Debian DVD-1 (cdimage.debian.org) or the Ubuntu desktop ISO (releases.ubuntu.com). Added for the
+ * admin to the shared Local destination; the cleanup spec deletes it with the other jobs (jobs are keyed in state.jobs).
+ */
+export async function ensureFreshJob(page: Page, key: string, kind: 'debian-dvd' | 'ubuntu-desktop'): Promise<number> {
+  const known = state().jobs[key];
+  const jobs = (await api(page, 'GET', '/api/jobs')).json as { id: number }[];
+  if (known && jobs.some((j) => j.id === known.id)) return known.id;
+  let name: string; let torrent: Buffer;
+  if (kind === 'debian-dvd') {
+    const base = 'https://cdimage.debian.org/debian-cd/current/amd64/bt-dvd';
+    const t = /debian-[\d.]+-amd64-DVD-1\.iso\.torrent/.exec(await getText(`${base}/`))?.[0];
+    if (!t) throw new Error('no Debian DVD-1 torrent found');
+    name = t.replace(/\.torrent$/, ''); torrent = await getBuffer(`${base}/${t}`);
+    if (webSeedsOn()) torrent = withWebSeeds(torrent, seedUrls(name, ['https://deb.debian.org/debian-cd/current/amd64/iso-dvd'], process.env.LIVE_WEBSEEDS_DEBIAN));
+  } else {
+    const idx = await getText('https://releases.ubuntu.com/');
+    const dirs = [...new Set([...idx.matchAll(/href="(\d\d\.04(?:\.\d+)?)\/"/g)].map((m) => m[1]!))].sort(cmp).reverse();
+    let found: { d: string; t: string } | undefined;
+    for (const d of dirs) {
+      const t = new RegExp(`ubuntu-${esc(d)}-desktop-amd64\\.iso\\.torrent`).exec(await getText(`https://releases.ubuntu.com/${d}/`))?.[0];
+      if (t) { found = { d, t }; break; }
+    }
+    if (!found) throw new Error('no Ubuntu desktop torrent found');
+    name = found.t.replace(/\.torrent$/, ''); torrent = await getBuffer(`https://releases.ubuntu.com/${found.d}/${found.t}`);
+    if (webSeedsOn()) torrent = withWebSeeds(torrent, seedUrls(name, [`https://releases.ubuntu.com/${found.d}`], process.env.LIVE_WEBSEEDS_UBUNTU));
+  }
+  const r = await addTorrent(page, { name, torrent, sha256: '' }, 'live-local');
+  expect(r.status).toBe(201);
+  save({ jobs: { ...state().jobs, [key]: { id: r.id, user: 'admin' } } });
+  return r.id;
 }

@@ -225,7 +225,8 @@ OUT=$(connect A A); check "/connect works after restart" jqok .connected
 check "POST /mode with the current mode leaves a live tunnel alone" mode_noop
 check "tunnel works after restart" retry 10 probe curl -sS -m 5 http://172.31.252.20/
 # plain `docker restart` (same container, stale resolv.conf from the previous run must be healed)
-docker stop -t 1 sbvpn-qbittorrent-1 sbvpn-probe-1 >/dev/null
+docker stop -t 20 sbvpn-qbittorrent-1 sbvpn-probe-1 >/dev/null
+check "qbittorrent got SIGTERM and exited cleanly (tini could forward it: needs CAP_KILL; otherwise resume data is lost)" sh_ "! docker logs sbvpn-qbittorrent-1 2>&1 | grep -q 'FATAL tini' && test \"\$(docker inspect -f '{{.State.ExitCode}}' sbvpn-qbittorrent-1)\" = 0"
 docker restart -t 1 sbvpn-vpn-1 >/dev/null
 for i in $(seq 1 20); do [ "$(docker inspect -f '{{.State.Health.Status}}' sbvpn-vpn-1)" = healthy ] && break; sleep 1; done
 check "docker restart (required default): fail closed, mode=required" test "$(status | jqs '.mode+" "+(.connected|tostring)')" = "required false"

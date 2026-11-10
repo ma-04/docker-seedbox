@@ -213,7 +213,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     # The entrypoint starts as root only to fix ownership and then drops to PUID/PGID (1000).
     cap_drop: [ALL]
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]   # KILL: tini (root) must be able to forward SIGTERM to qbittorrent (uid 1000) so it saves resume data on stop
     depends_on:
       init: { condition: service_completed_successfully }
       vpn:

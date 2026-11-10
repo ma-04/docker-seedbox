@@ -1,25 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
-import { api, debianNetinst, jobRow, login, qbtJson, save, state, ubuntuLts, type Official } from './lib';
+import { addTorrent, api, debianNetinst, jobRow, login, qbtJson, save, state, ubuntuLts, type Official } from './lib';
 
 test.describe.configure({ mode: 'serial' });
-
-// Only official, legal Linux distribution torrents: the current Ubuntu Server LTS ISO and the Debian netinst ISO.
-async function addTorrent(page: Page, o: Official, destination: string): Promise<{ id: number; infohash: string; status: number }> {
-  await page.goto('/');
-  const form = page.getByTestId('add-form');
-  await expect(form).toBeVisible();
-  await page.getByTestId('torrent-file').setInputFiles({ name: `${o.name}.torrent`, mimeType: 'application/x-bittorrent', buffer: o.torrent });
-  const select = page.getByTestId('destination-select');
-  const opt = select.locator('option', { hasText: destination });
-  await expect(opt).toHaveCount(1);
-  await select.selectOption({ label: await opt.first().innerText() });
-  const [resp] = await Promise.all([
-    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/jobs' && r.request().method() === 'POST'),
-    page.getByTestId('add-submit').click(),
-  ]);
-  const body = await resp.json();
-  return { id: body.id, infohash: body.infohash, status: resp.status() };
-}
 
 test.describe('4a. add the torrents (the VPN is required and connected)', () => {
   test('precondition: VPN required and connected before anything is added', async ({ page }) => {
@@ -68,7 +50,12 @@ test.describe('4a. add the torrents (the VPN is required and connected)', () => 
     const u = { id: state().jobs.ubuntu!.id };
 
     // same torrent, two destinations => one download in the engine
-    await expect.poll(async () => (await qbtJson<{ hash: string }[]>('/api/v2/torrents/info')).filter((t) => t.hash === d1.infohash).length, { timeout: 60_000 }).toBe(1);
+    // (on a re-run the download may already be done and gone from the engine: then at most one is acceptable)
+    const jobState = async () => ((await api(a, 'GET', '/api/jobs')).json as { id: number; state: string }[]).find((j) => j.id === d1.id)?.state;
+    await expect.poll(async () => {
+      const n = (await qbtJson<{ hash: string }[]>('/api/v2/torrents/info')).filter((t) => t.hash === d1.infohash).length;
+      return n === 1 || (n === 0 && (await jobState()) !== 'downloading');
+    }, { timeout: 60_000 }).toBe(true);
     await expect(jobRow(a, u.id)).toBeVisible();
     await expect(jobRow(p, d2.id)).toBeVisible();
     await actx.close(); await uctx.close();
