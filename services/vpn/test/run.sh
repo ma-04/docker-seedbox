@@ -42,7 +42,10 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
-export -f ctl probe probe_ip jqs status connect sh_ has jqok intruder_code mode_noop qbt_refuses_root
+# Positive probes right after /connect or a restart: the tunnel needs a moment on a loaded host. Retries only for
+# "does work" checks (never for the "must not work" ones) and reports when more than one attempt was needed.
+retry() { local n=$1 i; shift; for i in $(seq 1 "$n"); do if "$@"; then [ "$i" -gt 1 ] && echo "needed $i attempts: ${*:1:4}" >> "$WORK/retries"; return 0; fi; sleep 1; done; return 1; }
+export -f retry ctl probe probe_ip jqs status connect sh_ has jqok intruder_code mode_noop qbt_refuses_root
 export DC WORK
 
 section "build + keys"
@@ -112,7 +115,7 @@ OUT=$(connect A A); echo "$OUT" | head -1
 check "HTTP 200" has '^HTTP 200$'
 check "connected=true, name=A" jqok '.connected and .name=="A"'
 check "recent handshake (<=10s)" jqok '.lastHandshakeSec<=10'
-check "echo behind WG1 reachable, source = wg1" sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.11$'"
+check "echo behind WG1 reachable, source = wg1" retry 10 sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.11$'"
 checkno "direct echo still blocked" probe curl -sS -m 3 http://172.31.251.20/
 check "IPv6 stripped from tunnel (no :: in allowed-ips)" bash -c "! $DC exec -T vpn wg show wg0 allowed-ips | grep -q ::"
 check "resolv.conf points at the tunnel DNS (shared with qbittorrent)" $DC exec -T qbittorrent grep -q '^nameserver 10.99.1.1' /etc/resolv.conf
@@ -130,18 +133,36 @@ checkno "no leak so far" probe test -s /tmp/leaks
 section "4. rotation A -> B"
 OUT=$(connect B B); echo "$OUT" | head -1
 check "connected=true, name=B" jqok '.connected and .name=="B"'
-check "traffic now exits via wg2 (source 172.31.252.12)" sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.12$'"
+check "traffic now exits via wg2 (source 172.31.252.12)" retry 10 sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.12$'"
 check "exactly one wg interface remains" test "$($DC exec -T vpn sh -c 'ip -o link | grep -c "wg[0-9]"')" = 1
 checkno "direct echo blocked after switch" probe curl -sS -m 3 http://172.31.251.20/
 checkno "zero direct successes during the switch (leak loop)" probe test -s /tmp/leaks
 OUT=$(connect A A); echo "$OUT" | head -1
-check "and back: B -> A" sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.11$'"
+check "and back: B -> A" retry 10 sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.11$'"
 checkno "zero direct successes during second switch" probe test -s /tmp/leaks
 # The endpoint exception must only cover WireGuard's own (fwmarked, kernel-originated) packets.
 check "endpoint rule is restricted to the wg fwmark" sh_ "$DC exec -T -u 0 vpn nft list chain inet sbvpn output | grep 'udp dport 51820' | grep -q 'meta mark 0x00005b76'"
-checkno "uid 1000 cannot send cleartext UDP to the active tunnel endpoint (172.31.251.11:51820)" sh_ "echo leak | $DC exec -T -u 1000 probe socat -T1 - UDP:172.31.251.11:51820"
-check "tunnel still works after that attempt" sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.11$'"
-OUT=$(echo "{\"name\":\"bad\",\"config\":$(sed 's/^PublicKey.*/PublicKey = '"$C_PUB"'/' "$WORK/B.conf" | jq -Rs .)}" | ctl POST /connect)
+# Packet capture on the WireGuard server fixture (wg1 = the active endpoint 172.31.251.11:51820): what arrives there?
+# Positive control first (the capture sees a cleartext datagram from a container outside the namespace), then the same
+# cleartext from uid 1000 and from root inside the qbittorrent namespace must never show up.
+$DC exec -T wg1 sh -c 'rm -f /tmp/cap /tmp/cap.pid; (tcpdump -l -n -A -i any "udp dst port 51820" >/tmp/cap 2>/dev/null & echo $! >/tmp/cap.pid)'
+sleep 1
+LEAK1="LEAKMARK-CONTROL-$RANDOM$RANDOM"; LEAK2="LEAKMARK-UID1000-$RANDOM$RANDOM"; LEAK3="LEAKMARK-ROOT-$RANDOM$RANDOM"
+$DC exec -T echo-direct sh -c "echo $LEAK1 | socat -T1 - UDP:172.31.251.11:51820" >/dev/null 2>&1
+for i in 1 2 3; do
+  echo "$LEAK2" | $DC exec -T -u 1000 probe socat -T1 - UDP:172.31.251.11:51820 >/dev/null 2>&1
+  echo "$LEAK2" | $DC exec -T -u 1000 probe sh -c 'cat >/dev/udp/172.31.251.11/51820' >/dev/null 2>&1
+  echo "$LEAK3" | $DC exec -T -u 0 probe socat -T1 - UDP:172.31.251.11:51820 >/dev/null 2>&1
+  echo "$LEAK2" | $DC exec -T -u 1000 probe socat -T1 - UDP:172.31.251.11:51820,sourceport=51820 >/dev/null 2>&1
+done
+sleep 2
+$DC exec -T wg1 sh -c 'kill $(cat /tmp/cap.pid) 2>/dev/null; sleep 0.5'
+check "capture works: a cleartext datagram from outside the namespace is seen on the WG server" $DC exec -T wg1 grep -q "$LEAK1" /tmp/cap
+check "capture shows real WireGuard traffic from the sidecar (172.31.251.2 -> :51820)" $DC exec -T wg1 grep -q '172.31.251.2.*51820' /tmp/cap
+checkno "uid 1000 in the namespace: no cleartext UDP reached the endpoint IP:port (packet capture on the WG server)" $DC exec -T wg1 grep -q "$LEAK2" /tmp/cap
+checkno "root in the namespace: no cleartext UDP reached the endpoint IP:port (packet capture on the WG server)" $DC exec -T wg1 grep -q "$LEAK3" /tmp/cap
+check "tunnel still works after that attempt" retry 10 sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.11$'"
+OUT=$(echo "{\"name\":\"bad\",\"config\":$(sed 's|^PublicKey.*|PublicKey = '"$C_PUB"'|' "$WORK/B.conf" | jq -Rs .)}" | ctl POST /connect)
 check "bad-key config (no handshake) -> 502" has '^HTTP 502$'
 check "old tunnel (A) kept after the failed switch" sh_ "status | jq -e '.connected and .name==\"A\"'"
 checkno "zero direct successes after failed switch" probe test -s /tmp/leaks
@@ -154,7 +175,7 @@ checkno "tunnel target blocked after /disconnect" probe curl -sS -m 3 http://172
 checkno "direct echo blocked after /disconnect" probe curl -sS -m 3 http://172.31.251.20/
 check "WebUI reachable after /disconnect" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
 connect A A >/dev/null
-check "reconnected to A" probe curl -sS -m 5 http://172.31.252.20/
+check "reconnected to A" retry 10 probe curl -sS -m 5 http://172.31.252.20/
 docker stop -t 1 sbvpn-wg1-1 >/dev/null
 sleep 2
 checkno "WG server dead: tunnel target unreachable" probe curl -sS -m 3 http://172.31.252.20/
@@ -196,7 +217,7 @@ checkno "tunnel target blocked until /connect" probe curl -sS -m 3 http://172.31
 check "WebUI reachable after restart" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
 OUT=$(connect A A); check "/connect works after restart" jqok .connected
 check "POST /mode with the current mode leaves a live tunnel alone" mode_noop
-check "tunnel works after restart" probe curl -sS -m 5 http://172.31.252.20/
+check "tunnel works after restart" retry 10 probe curl -sS -m 5 http://172.31.252.20/
 # plain `docker restart` (same container, stale resolv.conf from the previous run must be healed)
 docker stop -t 1 sbvpn-qbittorrent-1 sbvpn-probe-1 >/dev/null
 docker restart -t 1 sbvpn-vpn-1 >/dev/null
@@ -209,10 +230,11 @@ VPN_DEFAULT_MODE= $DC up -d --force-recreate --wait vpn >/dev/null 2>&1
 check "VPN_DEFAULT_MODE unset/empty = required (fail closed)" test "$(status | jqs '.mode+" "+(.connected|tostring)')" = "required false"
 VPN_DEFAULT_MODE=off $DC up -d --force-recreate --wait vpn >/dev/null 2>&1
 P2="docker run --rm --network container:sbvpn-vpn-1 -u 1000 sbvpn-tools"
-check "default off after recreate: direct echo reachable" $P2 curl -sS -m 4 http://172.31.251.20/
+check "default off after recreate: direct echo reachable" retry 10 $P2 curl -sS -m 4 http://172.31.251.20/
 check "default off: resolv.conf is Docker's" bash -c "$P2 cat /etc/resolv.conf | grep -q 127.0.0.11"
 check "status mode=off" test "$(status | jqs .mode)" = off
 
 section "result"
+[ -s "$WORK/retries" ] && { echo "  checks that needed retries (loaded host / slow handshake):"; sed 's/^/    /' "$WORK/retries"; }
 echo "passed=$PASS failed=$FAILN"
 [ "$FAILN" = 0 ]
