@@ -1,31 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { Button, Check, ErrorNote, Field, PageHeader, Spinner, useToast } from '../../components/ui';
-import { ApiError, endpoints, type EngineSettingsDto, type EngineSettingsUpdateDto, type SettingsDto } from '../../lib/api';
-import { bytesToGb, gbToBytes } from '../../lib/format';
+import { ApiError, endpoints, type EngineSettingsDto } from '../../lib/api';
+import { enginePatch, engineToForm, ENGINE_NUM_KEYS as NUM_KEYS, limitsPatch, limitsToForm, type EngineForm, type LimitsForm } from '../../lib/settingsForm';
 
 export default function AdminSettings() {
   const qc = useQueryClient();
   const toast = useToast();
   const q = useQuery({ queryKey: ['admin-settings'], queryFn: endpoints.admin.settings });
-  const [f, setF] = useState({ maxJobs: '', maxGb: '', minFreeGb: '', ratio: '' });
-  useEffect(() => {
-    const d = q.data;
-    if (d) setF({
-      maxJobs: String(d['limits.maxActiveJobsPerUser']), maxGb: String(bytesToGb(d['limits.maxTorrentBytes'])),
-      minFreeGb: String(bytesToGb(d['limits.minFreeDiskBytes'])), ratio: String(d['seeding.ratio']),
-    });
-  }, [q.data]);
+  const [f, setF] = useState<LimitsForm>({ maxJobs: '', maxGb: '', minFreeGb: '', ratio: '', seedMaxMinutes: '', failedGraceMinutes: '', metadataTimeoutMinutes: '' });
+  useEffect(() => { if (q.data) setF(limitsToForm(q.data)); }, [q.data]);
   const save = useMutation({
     mutationFn: () => {
-      const cur = q.data!;
-      const patch: Partial<SettingsDto> = {};
-      const jobs = Number(f.maxJobs), max = gbToBytes(Number(f.maxGb)), free = gbToBytes(Number(f.minFreeGb)), ratio = Number(f.ratio);
-      if (jobs !== cur['limits.maxActiveJobsPerUser']) patch['limits.maxActiveJobsPerUser'] = jobs;
-      if (max !== cur['limits.maxTorrentBytes']) patch['limits.maxTorrentBytes'] = max;
-      if (free !== cur['limits.minFreeDiskBytes']) patch['limits.minFreeDiskBytes'] = free;
-      if (ratio !== cur['seeding.ratio']) patch['seeding.ratio'] = ratio;
-      if (!Object.keys(patch).length) return Promise.resolve(cur);
+      const patch = limitsPatch(q.data!, f);
+      if (!Object.keys(patch).length) return Promise.resolve(q.data!);
       return endpoints.admin.updateSettings(patch);
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['admin-settings'] }); toast('ok', 'Settings saved'); },
@@ -50,6 +38,15 @@ export default function AdminSettings() {
           <Field label="Seeding ratio" hint="0 = stop as soon as the download completes.">
             {(id) => <input id={id} type="number" min={0} step="any" className="input" value={f.ratio} onChange={set('ratio')} />}
           </Field>
+          <Field label="Stop seeding after (minutes)" hint="Only with a seeding ratio above 0. 0 = no time cap.">
+            {(id) => <input id={id} type="number" min={0} step={1} className="input" value={f.seedMaxMinutes} onChange={set('seedMaxMinutes')} />}
+          </Field>
+          <Field label="Keep data after a failed upload (minutes)" hint="So Retry can skip the download. 0 = remove right away.">
+            {(id) => <input id={id} type="number" min={0} step={1} className="input" value={f.failedGraceMinutes} onChange={set('failedGraceMinutes')} />}
+          </Field>
+          <Field label="Magnet metadata timeout (minutes)" hint="A magnet that finds no metadata within this time fails. 0 = wait forever.">
+            {(id) => <input id={id} type="number" min={0} step={1} className="input" value={f.metadataTimeoutMinutes} onChange={set('metadataTimeoutMinutes')} />}
+          </Field>
           <ErrorNote error={save.error} />
           <Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? 'Saving...' : 'Save settings'}</Button>
         </form>
@@ -59,13 +56,6 @@ export default function AdminSettings() {
   );
 }
 
-type EngineForm = Record<keyof EngineSettingsDto, string | boolean>;
-const NUM_KEYS = ['downloadLimitKBps', 'uploadLimitKBps', 'maxConnections', 'maxConnectionsPerTorrent', 'maxUploads', 'maxUploadsPerTorrent',
-  'maxActiveDownloads', 'maxActiveUploads', 'maxActiveTorrents', 'listenPort'] as const;
-
-const toForm = (d: EngineSettingsDto): EngineForm =>
-  Object.fromEntries(Object.entries(d).map(([k, v]) => [k, typeof v === 'number' ? String(v) : v])) as EngineForm;
-
 /** Collapsed by default; fetches only once opened. */
 function EngineSettings() {
   const qc = useQueryClient();
@@ -73,28 +63,17 @@ function EngineSettings() {
   const [saved, setSaved] = useState(false);
   const q = useQuery({ queryKey: ['admin-engine-settings'], queryFn: endpoints.admin.engineSettings, enabled: open, retry: false });
   const [f, setF] = useState<EngineForm | null>(null);
-  useEffect(() => { if (q.data) setF(toForm(q.data)); }, [q.data]);
+  useEffect(() => { if (q.data) setF(engineToForm(q.data)); }, [q.data]);
   const unreachable = q.error instanceof ApiError && q.error.code === 'engine_unavailable';
 
-  const diff = (): EngineSettingsUpdateDto => {
-    const cur = q.data!;
-    const patch: Record<string, unknown> = {};
-    for (const k of Object.keys(cur) as (keyof EngineSettingsDto)[]) {
-      const v = (NUM_KEYS as readonly string[]).includes(k) ? Number(f![k]) : f![k];
-      if (v !== cur[k]) patch[k] = v;
-    }
-    return patch as EngineSettingsUpdateDto;
-  };
   const save = useMutation({
     mutationFn: () => {
-      const patch = diff();
+      const patch = enginePatch(q.data!, f!);
       if (!Object.keys(patch).length) return Promise.resolve(q.data!);
-      // Turning off random port needs an explicit port; send the one shown in the form.
-      if (patch.randomPort === false && patch.listenPort === undefined) patch.listenPort = Number(f!.listenPort);
       return endpoints.admin.updateEngineSettings(patch);
     },
     onMutate: () => setSaved(false),
-    onSuccess: (d) => { qc.setQueryData(['admin-engine-settings'], d); setF(toForm(d)); setSaved(true); },
+    onSuccess: (d) => { qc.setQueryData(['admin-engine-settings'], d); setF(engineToForm(d)); setSaved(true); },
   });
 
   const num = (k: (typeof NUM_KEYS)[number], label: string, hint?: string, min?: number) => (

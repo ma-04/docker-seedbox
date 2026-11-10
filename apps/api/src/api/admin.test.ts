@@ -65,6 +65,16 @@ describe('admin settings', () => {
     expect((await env.call(root, 'PUT', '/api/admin/settings', { 'vpn.rotationMinutes': 0 })).statusCode).toBe(400);
     expect((await env.call(root, 'PUT', '/api/admin/settings', { 'vpn.mode': 'required' })).statusCode).toBe(409);
 
+    for (const bad of [{ 'cleanup.failedGraceMinutes': -1 }, { 'limits.metadataTimeoutMinutes': 1.5 }, { 'seeding.maxMinutes': 'x' }, { 'seeding.maxMinutes': 10_000_000 }]) {
+      expect((await env.call(root, 'PUT', '/api/admin/settings', bad)).statusCode, JSON.stringify(bad)).toBe(400);
+    }
+    const fresh = (await env.call(root, 'GET', '/api/admin/settings')).json();
+    expect([fresh['cleanup.failedGraceMinutes'], fresh['limits.metadataTimeoutMinutes'], fresh['seeding.maxMinutes']]).toEqual([60, 30, 0]);
+    const lim = await env.call(root, 'PUT', '/api/admin/settings', { 'cleanup.failedGraceMinutes': 15, 'limits.metadataTimeoutMinutes': 0, 'seeding.maxMinutes': 90 });
+    expect(lim.statusCode).toBe(200);
+    expect(lim.json()).toMatchObject({ 'cleanup.failedGraceMinutes': 15, 'limits.metadataTimeoutMinutes': 0, 'seeding.maxMinutes': 90 });
+    expect(getSetting(env.db, 'seeding.maxMinutes')).toBe(90);
+
     // google keys and activeConfigId are ignored
     const ignored = await env.call(root, 'PUT', '/api/admin/settings', { 'google.oauthClientSecret': 'x', 'vpn.activeConfigId': 9, 'limits.maxActiveJobsPerUser': 7 });
     expect(ignored.json()['limits.maxActiveJobsPerUser']).toBe(7);

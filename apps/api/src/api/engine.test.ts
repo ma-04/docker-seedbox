@@ -68,14 +68,27 @@ describe('engine settings', () => {
     expect(r.json().downloadLimitKBps).toBe(5120); // re-read from the engine
   });
 
-  it('PUT randomPort true sends random_port only; false requires listenPort', async () => {
+  it('GET reads random_port (older builds) or listen_port 0 (5.3) as random, and a real listen_port as fixed', async () => {
+    const get = async (p: Record<string, unknown>) => (await setup(undefined, fakeEngine({ getPreferences: async () => p }).engine).call(root, 'GET', URL)).json();
+    const noRandom = (o: Record<string, unknown>) => { const p = { ...prefs(), ...o }; delete p.random_port; return p; };
+    expect(await get(noRandom({ listen_port: 0 }))).toMatchObject({ randomPort: true, listenPort: 0 });
+    expect(await get(noRandom({ listen_port: 6881 }))).toMatchObject({ randomPort: false, listenPort: 6881 });
+    expect(await get({ ...prefs(), random_port: true, listen_port: 40000 })).toMatchObject({ randomPort: true });
+    expect(await get({ ...prefs(), random_port: false, listen_port: 6881 })).toMatchObject({ randomPort: false, listenPort: 6881 });
+  });
+
+  it('PUT randomPort true sends listen_port 0 plus random_port; false sends the explicit port and requires it', async () => {
     const f = fakeEngine();
     const env = setup(undefined, f.engine);
     expect((await env.call(root, 'PUT', URL, { randomPort: true, listenPort: 7000 })).statusCode).toBe(200);
-    expect(f.sets[0]).toEqual({ random_port: true });
+    expect(f.sets[0]).toEqual({ random_port: true, listen_port: 0 });
+    expect((await env.call(root, 'PUT', URL, { randomPort: true })).statusCode).toBe(200);
+    expect(f.sets[1]).toEqual({ random_port: true, listen_port: 0 });
+    expect((await env.call(root, 'PUT', URL, { randomPort: false, listenPort: 6881 })).statusCode).toBe(200);
+    expect(f.sets[2]).toEqual({ random_port: false, listen_port: 6881 });
     const bad = await env.call(root, 'PUT', URL, { randomPort: false });
     expect(bad.statusCode).toBe(400);
-    expect(f.sets).toHaveLength(1);
+    expect(f.sets).toHaveLength(3);
   });
 
   it('PUT with an empty body does not call setPreferences', async () => {

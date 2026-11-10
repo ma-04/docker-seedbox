@@ -31,7 +31,7 @@ const db = {
     { id: 1, name: 'vpn-one', endpointHost: 'vpn1.example.com', enabled: true, lastUsedAt: t - 600, lastError: null, active: true, createdAt: t },
     { id: 2, name: 'vpn-two', endpointHost: 'vpn2.example.com', enabled: true, lastUsedAt: null, lastError: 'handshake timeout', active: false, createdAt: t },
   ] as Record<string, unknown>[],
-  settings: { 'vpn.mode': 'required', 'vpn.rotation': 'interval', 'vpn.rotationMinutes': 360, 'vpn.activeConfigId': 1, 'limits.maxActiveJobsPerUser': 5, 'limits.maxTorrentBytes': 0, 'limits.minFreeDiskBytes': 2 * 1024 ** 3, 'seeding.ratio': 0, 'google.oauthClientId': '', 'google.oauthClientSecret': '' } as Record<string, unknown>,
+  settings: { 'vpn.mode': 'required', 'vpn.rotation': 'interval', 'vpn.rotationMinutes': 360, 'vpn.activeConfigId': 1, 'limits.maxActiveJobsPerUser': 5, 'limits.maxTorrentBytes': 0, 'limits.minFreeDiskBytes': 2 * 1024 ** 3, 'seeding.ratio': 0, 'seeding.maxMinutes': 0, 'cleanup.failedGraceMinutes': 60, 'limits.metadataTimeoutMinutes': 30, 'google.oauthClientId': '', 'google.oauthClientSecret': '' } as Record<string, unknown>,
   users: [
     { id: 1, username: 'alice', email: 'alice@example.com', displayName: 'Alice', isAdmin: true, disabled: false, maxActiveJobs: null, activeJobs: 2, createdAt: t, lastSeenAt: t - 30 },
     { id: 2, username: 'bob', email: null, displayName: null, isAdmin: false, disabled: false, maxActiveJobs: 2, activeJobs: 0, createdAt: t, lastSeenAt: t - 86400 * 3 },

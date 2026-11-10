@@ -19,6 +19,9 @@ const settingsSchema = z.object({
   'limits.maxTorrentBytes': z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   'limits.minFreeDiskBytes': z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   'seeding.ratio': z.number().min(0).max(1000),
+  'seeding.maxMinutes': z.number().int().min(0).max(525_600),
+  'cleanup.failedGraceMinutes': z.number().int().min(0).max(525_600),
+  'limits.metadataTimeoutMinutes': z.number().int().min(0).max(525_600),
 }).partial().strip();
 
 const vpnCreate = z.object({ name: z.string().trim().min(1).max(64), config: z.string().min(1).max(16_384) });

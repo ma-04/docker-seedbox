@@ -73,10 +73,10 @@ export function fromPreferences(prefs: Record<string, unknown>): EngineSettingsD
   const out: Record<string, unknown> = {};
   for (const [name, f] of Object.entries(FIELDS) as unknown as [string, Field<unknown>][]) {
     let v = f.fromEngine(prefs[f.key]);
-    // random_port is deprecated and absent on some builds: derive it from listen_port === 0.
-    if (v === undefined) {
-      if (name === 'randomPort') { v = prefs.listen_port === 0; } else return null;
-    }
+    // qBittorrent >= 5.3 no longer reports random_port: a random port is listen_port === 0. Older builds report
+    // random_port (with the last port still in listen_port). Either signal means "random".
+    if (name === 'randomPort') v = prefs.random_port === true || prefs.listen_port === 0;
+    else if (v === undefined) return null;
     out[name] = v;
   }
   return out as unknown as EngineSettingsDto;
@@ -91,6 +91,8 @@ export function toPreferences(u: EngineSettingsUpdateDto): Record<string, unknow
     if (name === 'listenPort' && u.randomPort === true) continue; // random port wins; fixed port ignored
     out[f.key] = f.toEngine(v);
   }
+  // 5.3 ignores random_port and treats listen_port 0 as "random"; older builds read random_port. Send both.
+  if (u.randomPort === true) out.listen_port = 0;
   if (u.randomPort === false && u.listenPort === undefined) throw new Error('listenPort is required when turning randomPort off');
   return out;
 }
