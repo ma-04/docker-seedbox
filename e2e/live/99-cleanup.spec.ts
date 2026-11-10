@@ -8,7 +8,7 @@ test.describe.configure({ mode: 'serial' });
 test.describe('99. cleanup (this run only)', () => {
   test('delete the test jobs (the engine copy goes with them)', async ({ browser }) => {
     const j = state().jobs;
-    for (const who of ['admin', 'user'] as const) {
+    for (const who of ['admin', 'user', 'user2'] as const) {
       const ctx = await browser.newContext(); const page = await ctx.newPage(); await login(page, who);
       for (const job of Object.values(j).filter((x) => x.user === who)) {
         const r = await api(page, 'DELETE', `/api/jobs/${job.id}`);

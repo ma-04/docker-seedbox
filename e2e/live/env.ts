@@ -26,6 +26,8 @@ export const live = {
   get hosts(): string[] { return [domain, new URL(this.authURL).host, new URL(this.filesURL).host]; },
   admin: { user: opt('LIVE_ADMIN_USER', 'admin'), get password() { return need('LIVE_ADMIN_PASSWORD'); } },
   user: { user: opt('LIVE_USER', 'tester'), get password() { return need('LIVE_USER_PASSWORD'); } },
+  /** a second normal user: lets the same torrent be added once more (one job per user and torrent) */
+  user2: { user: opt('LIVE_USER2', 'tester2'), get password() { return need('LIVE_USER2_PASSWORD'); } },
   /** ssh target of the Docker host, used for out-of-band checks (what the VPN namespace sees) and restarts. */
   ssh: { target: () => need('LIVE_SSH_TARGET'), key: () => need('LIVE_SSH_KEY'), dir: opt('LIVE_REMOTE_DIR', 'docker-seedbox') },
   wgConfigs: () => lines('LIVE_WG_CONFIGS'),

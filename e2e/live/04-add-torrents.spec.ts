@@ -56,6 +56,13 @@ test.describe('4a. add the torrents (the VPN is required and connected)', () => 
     await add(a, 'ubuntu', 'admin', ubuntu, 'live-local');
     const d1 = await add(a, 'debianDrive', 'admin', debian, 'live-gdrive');
     const d2 = await add(p, 'debianB2', 'user', debian, 'live-b2');
+    // a third destination for the same torrent, from a second normal user (one job per user and torrent)
+    const u2ctx = await browser.newContext();
+    const p2 = await u2ctx.newPage();
+    await login(p2, 'user2');
+    const d3 = await add(p2, 'debianLocal', 'user2', debian, 'live-local');
+    expect(d3.infohash).toBe(d1.infohash);
+    await u2ctx.close();
     expect(d2.infohash).toBe(d1.infohash);
     expect(d2.id).not.toBe(d1.id);
     const u = { id: state().jobs.ubuntu!.id };

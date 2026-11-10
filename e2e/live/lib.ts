@@ -32,9 +32,9 @@ export function save(patch: Partial<State>): State {
 export const s3Prefix = (): string => `${live.s3.prefixBase()}/${state().runId}`;
 
 // ---- login / API ----------------------------------------------------------------------------------------------------
-export type Who = 'admin' | 'user';
+export type Who = 'admin' | 'user' | 'user2';
 export async function login(page: Page, who: Who): Promise<void> {
-  const c = who === 'admin' ? live.admin : live.user;
+  const c = who === 'admin' ? live.admin : who === 'user' ? live.user : live.user2;
   await page.goto('/');
   await expect(page).toHaveURL(new RegExp(`^${live.authURL.replace(/[.]/g, '\\.')}`));
   await page.locator('#username-textfield').fill(c.user);
