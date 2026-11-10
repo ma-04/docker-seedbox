@@ -188,6 +188,7 @@ hash_password() { # hash_password PASSWORD -> argon2id digest, via the pinned Au
   rm -f "$envf"
   [ "$rc" -eq 0 ] || die "Could not hash the password with $(authelia_image) (exit $rc)"
   # On a fresh host `docker run` first pulls the image and prints "Digest: sha256:..." too: take only the argon2 line.
+  # shellcheck disable=SC2016  # the $ in the pattern is literal
   printf '%s\n' "$out" | sed -n 's/^Digest: \(\$argon2.*\)$/\1/p' | head -n 1
 }
 
