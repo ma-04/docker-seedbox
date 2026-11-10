@@ -74,7 +74,7 @@ Admin -> Destinations creates shared destinations visible to every user. Files l
 **Google Drive (shared account).** The seedbox uploads to one Drive account/folder you control.
 
 1. In Google Cloud Console create an OAuth client (type "Desktop app") and enable the Google Drive API. Use your own client; rclone's shared default client is heavily rate limited. Publish the consent screen to "In production" so the refresh token does not expire after 7 days.
-2. On any machine with [rclone](https://rclone.org): `rclone config` -> new remote -> storage `drive` -> your client id and secret -> scope `drive` -> authorize in the browser.
+2. On any machine with [rclone](https://rclone.org): `rclone config` -> new remote -> storage `drive` -> your client id and secret -> scope `drive` -> authorize in the browser. (A token with the narrower `drive.file` scope can only see folders that **this same OAuth client created**: use a folder made with that remote, e.g. `rclone mkdir remote:seedbox-root`, and take its id from `rclone lsjson`; any other folder id fails with "File not found".)
 3. `rclone config show <remote>` prints a section like:
 
    ```

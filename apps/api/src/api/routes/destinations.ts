@@ -61,7 +61,13 @@ export async function testDestination(ctx: Ctx, type: DestinationType, config: D
     if (config.type === 'gdrive') {
       const creds = { clientId: config.clientId, clientSecret: config.clientSecret, refreshToken: config.refreshToken };
       await getAccessToken(creds, ctx.config.google);
-      const f = await getFile(creds, ctx.config.google, config.rootFolderId);
+      const f = await getFile(creds, ctx.config.google, config.rootFolderId).catch((err: unknown) => {
+        if (/\(404\)/.test(String((err as Error).message))) {
+          throw new Error('Root folder not found (404). With an OAuth token of scope drive.file only folders created by this same OAuth client are visible: '
+            + 'create the folder with it (e.g. rclone mkdir) and use that folder id, or authorize with the full drive scope.');
+        }
+        throw err;
+      });
       return { ok: true, message: `Connected. Root folder: ${f.name}` };
     }
     if (config.type === 's3') {

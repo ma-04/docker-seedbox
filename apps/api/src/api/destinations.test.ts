@@ -112,4 +112,21 @@ describe('destinations', () => {
       expect(r.message).toContain('Shared Root');
     } finally { globalThis.fetch = real; }
   });
+
+  it('explains a 404 on the Drive root folder (drive.file scope only sees folders its own client created)', async () => {
+    const env = setup();
+    const gid = (await env.call(root, 'POST', '/api/admin/destinations', {
+      name: 'G404', type: 'gdrive', config: { clientId: 'c', clientSecret: 's', refreshToken: 'r-unique-404', rootFolderId: 'F404' },
+    })).json().id;
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (u: string) => String(u).includes('/token')
+      ? new Response(JSON.stringify({ access_token: 'at', expires_in: 3600 }))
+      : new Response('{"error":{"code":404,"message":"File not found: F404."}}', { status: 404 })) as typeof fetch;
+    try {
+      const r = (await env.call(root, 'POST', `/api/admin/destinations/${gid}/test`)).json();
+      expect(r.ok).toBe(false);
+      expect(r.message).toContain('drive.file');
+      expect(r.message).toContain('created by this same OAuth client');
+    } finally { globalThis.fetch = real; }
+  });
 });
