@@ -65,3 +65,46 @@ worker+api, and of vpn+qbittorrent, mid-download.
 header (`X-Requested-With: seedbox`), local `/dl` links revoked when the job is deleted, qBittorrent WebUI refused to
 ordinary containers (`ctl /webui`), and the kill switch holding after a sidecar restart while the worker is stopped
 (`ctl /stop`, `/start`).
+
+## c) Live suite: a real deployment (opt-in)
+
+`e2e/live/` + `playwright.live.config.ts` drive the real UI in Chromium against a **real** installation made by
+`./setup.sh` (public DNS, Let's Encrypt, a real WireGuard VPN, a real Google Drive, a real S3/B2 bucket and the
+Cloudflare Worker). It is never run by CI and `e2e/run.sh` does not know it. It downloads **only** official, legal
+Linux ISO torrents (the current Ubuntu Server LTS from releases.ubuntu.com, the Debian netinst from cdimage.debian.org)
+and compares the result with the sha256 those projects publish.
+
+Everything environment specific comes from one git-ignored env file (default `../credentials/deploy.env`, or
+`LIVE_ENV_FILE=/path`); `e2e/live/env.example` lists the keys. No host name, address, id, bucket or key is committed.
+
+```sh
+cd e2e
+npx playwright test -c playwright.live.config.ts                # all numbered specs, in order
+npx playwright test -c playwright.live.config.ts 02 03          # selected specs
+```
+
+| Spec | What it checks |
+|---|---|
+| `01-tls-auth` | Let's Encrypt certificates on the app, auth and files hosts, HTTP -> HTTPS, unauthenticated -> Authelia, admin login, a normal user has no admin access (also through `/api/%61dmin/...`) |
+| `02-vpn` | both WireGuard configs uploaded through the UI, mode `required`, public IP is not the server's, "Rotate now" changes config and IP, and from inside the qbittorrent container: egress is the VPN, IPv6 and bypassing the tunnel are blocked |
+| `03-destinations` | shared Local, Google Drive (pasted rclone section, `anyone` sharing, Worker proxy) and S3/B2 (under the run prefix) created through the UI; "Test" shows OK |
+| `04-add-torrents` | with the VPN required and connected, adds the Ubuntu ISO -> Local, Debian -> Drive (admin) and -> B2 (normal user); the shared torrent is a single engine download |
+| `05-engine-limit` | Advanced -> a download limit is applied (speed drops) and reset |
+| `06-vpn-restart-midflight` | `compose restart vpn` mid-download: the server's own IP is never seen from the namespace, the VPN comes back and the download resumes |
+| `07-complete-and-verify` | jobs complete in the UI; local link: sha256 equals the published one, Range gives 206, a tampered signature is refused; Drive: shared folder opens unauthenticated, Worker link sha256; B2: presigned link sha256, object below the run prefix; the torrent was downloaded once |
+| `08-stack-restart` | `docker compose down && up -d`: healthy again, jobs and links intact, the VPN reconnects by itself and stays `required` |
+| `99-cleanup` | deletes the test jobs, the Drive folders this run created, the B2 objects under the run prefix and the big ISO from the server (the deployment, its destinations and the VPN stay) |
+
+Safety rules baked in: a run id is generated once (`e2e/.out/live/state.json`); every S3/B2 delete asserts the
+`<base>/<run-id>/` prefix first and only ever calls `rclone delete` on exactly that path (no `sync`, no `purge`, no
+bucket-root listing/deletion); Drive removals address only the job folders recorded for this run. Credentials are passed
+through the app's own UI/API over HTTPS; the env file and the rclone/WireGuard files are read on the machine running the
+tests and never copied to the server (the ssh probes only run `docker`, `curl` and `compose` commands).
+
+Notes for the credentials you feed it:
+
+- A Drive OAuth token with the `drive.file` scope (what many rclone remotes use) can only see folders that **this OAuth
+  client created**: pointing the destination at a folder made elsewhere fails with `File not found`. Create the root
+  folder with the same remote (`rclone mkdir remote:seedbox-root`, id from `rclone lsjson`) or use a `drive`-scope token.
+- Commercial VPNs rarely forward ports: expect only outgoing peer connections and modest torrent speeds; a 3 GB ISO can
+  take a while. Timeouts are generous (30 minutes per test).
