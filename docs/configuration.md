@@ -23,6 +23,8 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `QBT_URL` | worker | `http://vpn:8080` (fixed in compose). |
 | `VPN_URL` | api, worker | `http://vpn:8000` (fixed in compose). |
 | `PORT` | api | `3000` (fixed in compose). |
+| `VPN_DEFAULT_MODE` | vpn | `required` (default, fail closed) or `off`. Mode of the VPN sidecar after every (re)start, until the worker applies the admin's `vpn.mode` (within seconds). |
+| `API_IP`, `WORKER_IP` | compose | Static addresses of `api`/`worker` inside `LAN_CIDRS` (defaults `172.31.250.250`/`.251`). They are the only addresses allowed to use qBittorrent's WebUI without a password; change them together with `LAN_CIDRS`. |
 | `LAN_CIDRS` | vpn, qbittorrent | Subnet of the internal network, default `172.31.250.0/24`. Change it only if it collides with another Docker network or your LAN. |
 | `LOG_LEVEL` | all | `info`. |
 
@@ -56,6 +58,9 @@ Open **Admin** after logging in as a member of `admins`.
 | `limits.maxTorrentBytes` | 0 | Reject larger torrents; 0 = unlimited. |
 | `limits.minFreeDiskBytes` | 2 GiB | Refuse new downloads below this free space. |
 | `seeding.ratio` | 0 | Stop seeding at this ratio; 0 = remove as soon as the upload finishes. |
+| `seeding.maxMinutes` | 0 | With `seeding.ratio` > 0: stop seeding after this many minutes even if the ratio is not reached; 0 = no cap. |
+| `limits.metadataTimeoutMinutes` | 30 | A magnet that gets no metadata (no peers) within this time fails and frees the user's job slot; 0 = never. |
+| `cleanup.failedGraceMinutes` | 60 | After an upload failed, keep the downloaded data this long so "Retry" re-uploads without downloading again. |
 | `google.oauthClientId` / `google.oauthClientSecret` | unset | Reserved for the planned per-user Google Drive connect (not a supported feature yet). |
 
 ### VPN
@@ -64,7 +69,7 @@ Admin -> VPN: paste or upload one or more WireGuard configs (`wg-quick` format, 
 
 ### Destinations
 
-Admin -> Destinations creates shared destinations visible to every user. Files land in `<prefix>/<user>/<torrent name>/...`.
+Admin -> Destinations creates shared destinations visible to every user. Files land in `<prefix>/<user>-<id>/<torrent name> [<8 hex of the infohash>]/...`.
 
 **Google Drive (shared account).** The seedbox uploads to one Drive account/folder you control.
 
