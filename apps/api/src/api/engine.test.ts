@@ -160,7 +160,7 @@ describe('engine settings', () => {
     const { buildApp } = await import('./app.js');
     const base = setup();
     const app = buildApp({ db: base.db, config: base.config, vpn: base.vpn, fetchImpl });
-    const r = await app.inject({ method: 'PUT', url: URL, payload: { downloadLimitKBps: 1 }, headers: { 'x-gateway-secret': 'test-gateway-secret', 'remote-user': 'root', 'remote-groups': 'admins' } });
+    const r = await app.inject({ method: 'PUT', url: URL, payload: { downloadLimitKBps: 1 }, headers: { 'x-gateway-secret': 'test-gateway-secret', 'x-requested-with': 'seedbox', 'remote-user': 'root', 'remote-groups': 'admins' } });
     expect(r.statusCode).toBe(200);
     expect(seen[0]!.url).toMatch(/\/api\/v2\/app\/setPreferences$/);
     expect(new URLSearchParams(seen[0]!.body).get('json')).toBe('{"dl_limit":1024}');

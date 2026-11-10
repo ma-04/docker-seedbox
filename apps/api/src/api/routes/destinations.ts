@@ -7,11 +7,13 @@ import { z } from 'zod';
 import { encryptConfig, getDestination } from '../../lib/destinations.js';
 import type { TestResultDto } from '../../lib/dto.js';
 import { getAccessToken, getFile } from '../../lib/gdrive.js';
+import { assertPublicEndpoint, NetGuardError } from '../../lib/netguard.js';
 import { now, type DestinationConfig, type DestinationRow, type DestinationType, type UserRow } from '../../lib/types.js';
 import type { Ctx } from '../context.js';
 import { applyConfigPatch, validateConfig } from '../destconfig.js';
 import { conflict, forbidden, idParam, notFound, parse, validation } from '../errors.js';
 import { ACTIVE_SQL, destinationDto } from '../mappers.js';
+import { enforce, RATE } from '../ratelimit.js';
 import { parseRcloneConfig } from '../rclone.js';
 
 const createSchema = z.object({
@@ -29,8 +31,33 @@ const updateSchema = z.object({
   isDefault: z.boolean().optional(),
 });
 
-export async function testDestination(ctx: Ctx, type: DestinationType, config: DestinationConfig): Promise<TestResultDto> {
+/** Short, non-leaky failure category for users (no internal addresses, no upstream text). */
+export function errorCategory(err: unknown): string {
+  const e = err as { name?: string; code?: string; message?: string; $metadata?: { httpStatusCode?: number }; cause?: { code?: string } };
+  const text = `${e?.name ?? ''} ${e?.code ?? e?.cause?.code ?? ''} ${e?.message ?? ''}`;
+  const status = e?.$metadata?.httpStatusCode;
+  if (/NoSuchBucket/i.test(text)) return 'bucket not found';
+  if (/CERT|SSL|TLS|self[- ]signed|EPROTO|altnames/i.test(text)) return 'tls error';
+  if (/InvalidAccessKeyId|SignatureDoesNotMatch|AccessDenied|Forbidden|Unauthorized|InvalidToken|token refresh failed/i.test(text) || status === 401 || status === 403) return 'auth failed';
+  if (/Abort|Timeout|ETIMEDOUT|timed out/i.test(text)) return 'timeout';
+  return 'unreachable';
+}
+
+/** Run the SSRF guard over every user-controlled URL of a config. Throws NetGuardError (safe message). */
+export async function guardConfig(ctx: Ctx, config: DestinationConfig, allowPrivate: boolean): Promise<void> {
+  if (config.type !== 's3') return;
+  const opts = { allowPrivate, lookup: ctx.lookup };
+  await assertPublicEndpoint(config.endpoint, opts);
+  if (config.publicBaseUrl) await assertPublicEndpoint(config.publicBaseUrl, opts);
+}
+
+/**
+ * `shared` = admin-managed destination (private addresses and http allowed). `detailed` = the
+ * caller is an admin and may see the raw error text; everyone else only gets a short category.
+ */
+export async function testDestination(ctx: Ctx, type: DestinationType, config: DestinationConfig, who: { shared: boolean; detailed: boolean }): Promise<TestResultDto> {
   try {
+    await guardConfig(ctx, config, who.shared);
     if (config.type === 'gdrive') {
       const creds = { clientId: config.clientId, clientSecret: config.clientSecret, refreshToken: config.refreshToken };
       await getAccessToken(creds, ctx.config.google);
@@ -58,12 +85,14 @@ export async function testDestination(ctx: Ctx, type: DestinationType, config: D
     await rm(probe, { force: true });
     return { ok: true, message: `Folder ${dir} is writable` };
   } catch (err) {
+    if (err instanceof NetGuardError) return { ok: false, message: `${type} test failed: ${err.message}` };
+    if (!who.detailed) return { ok: false, message: `${type} test failed: ${errorCategory(err)}` };
     const msg = String((err as Error).message ?? err).replace(/\s+/g, ' ').slice(0, 200);
     return { ok: false, message: `${type} test failed: ${msg}` };
   }
 }
 
-export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
+function makeHelpers(ctx: Ctx) {
   const { db, config } = ctx;
   const secret = config.appSecret;
   const own = (user: UserRow, id: number): DestinationRow => {
@@ -78,6 +107,13 @@ export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
   };
   const cfgOf = (row: DestinationRow) => getDestination(db, secret, row.id)!.config;
 
+  async function guardOrReject(cfg: DestinationConfig, shared: boolean): Promise<void> {
+    try { await guardConfig(ctx, cfg, shared); } catch (e) {
+      if (e instanceof NetGuardError) throw validation(e.message);
+      throw e;
+    }
+  }
+
   function remove(row: DestinationRow): void {
     const active = db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE destination_id = ? AND state IN ${ACTIVE_SQL}`).get(row.id) as { n: number };
     if (active.n > 0) throw conflict('Destination has active jobs; cancel them first');
@@ -88,7 +124,7 @@ export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
     })();
   }
 
-  function insert(ownerId: number | null, body: z.infer<typeof createSchema>, admin: boolean): DestinationRow {
+  async function insert(ownerId: number | null, body: z.infer<typeof createSchema>, admin: boolean): Promise<DestinationRow> {
     let raw: Record<string, unknown> = { ...body.config };
     if (admin && body.rcloneConfig) {
       const rc = parseRcloneConfig(body.rcloneConfig);
@@ -97,6 +133,7 @@ export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
     }
     if (body.type === 's3' && !raw.endpoint && typeof raw.region === 'string' && raw.region) raw.endpoint = `https://s3.${raw.region}.amazonaws.com`;
     const cfg = validateConfig(body.type, raw);
+    await guardOrReject(cfg, ownerId === null);
     const isDefault = ownerId === null && body.isDefault ? 1 : 0;
     return db.transaction(() => {
       if (isDefault) db.prepare('UPDATE destinations SET is_default = 0 WHERE owner_user_id IS NULL').run();
@@ -106,8 +143,9 @@ export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
     })();
   }
 
-  function update(row: DestinationRow, body: z.infer<typeof updateSchema>, allowDefault: boolean): DestinationRow {
+  async function update(row: DestinationRow, body: z.infer<typeof updateSchema>, allowDefault: boolean): Promise<DestinationRow> {
     const newConfig = body.config ? applyConfigPatch(cfgOf(row), body.config) : null;
+    if (newConfig) await guardOrReject(newConfig, row.owner_user_id === null);
     db.transaction(() => {
       if (allowDefault && body.isDefault === true) db.prepare('UPDATE destinations SET is_default = 0 WHERE owner_user_id IS NULL').run();
       db.prepare('UPDATE destinations SET name = ?, enabled = ?, is_default = ?, config_enc = ? WHERE id = ?').run(
@@ -118,7 +156,12 @@ export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
     return db.prepare('SELECT * FROM destinations WHERE id = ?').get(row.id) as DestinationRow;
   }
 
-  // ---- user routes
+  return { own, shared, cfgOf, insert, update, remove, secret };
+}
+
+export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
+  const { db } = ctx;
+  const { own, cfgOf, insert, update, remove, secret } = makeHelpers(ctx);
   app.get('/api/destinations', async (req) => {
     const rows = db.prepare('SELECT * FROM destinations WHERE (owner_user_id IS NULL AND enabled = 1) OR owner_user_id = ? ORDER BY owner_user_id IS NOT NULL, name')
       .all(req.user.id) as DestinationRow[];
@@ -128,7 +171,8 @@ export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
   app.post('/api/destinations', async (req, reply) => {
     const body = parse(createSchema, req.body);
     if (body.type !== 's3') throw forbidden('Only S3 destinations can be created here');
-    const row = insert(req.user.id, { ...body, rcloneConfig: undefined }, false);
+    enforce(ctx.limiter, req.user.id, 'dest-create', RATE.destinationCreate);
+    const row = await insert(req.user.id, { ...body, rcloneConfig: undefined }, false);
     return reply.code(201).send(destinationDto(secret, row, false));
   });
 
@@ -136,7 +180,7 @@ export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
     const row = own(req.user, parse(idParam, (req.params as { id: string }).id));
     const body = parse(updateSchema, req.body);
     if (body.config && row.type !== 's3') throw forbidden('Only S3 destination settings can be edited');
-    return destinationDto(secret, update(row, body, false), false);
+    return destinationDto(secret, await update(row, body, false), false);
   });
 
   app.delete('/api/destinations/:id', async (req, reply) => {
@@ -145,29 +189,36 @@ export function registerDestinations(app: FastifyInstance, ctx: Ctx): void {
   });
 
   app.post('/api/destinations/:id/test', async (req) => {
+    enforce(ctx.limiter, req.user.id, 'dest-test', RATE.destinationTest);
     const row = own(req.user, parse(idParam, (req.params as { id: string }).id));
-    return testDestination(ctx, row.type, cfgOf(row));
+    return testDestination(ctx, row.type, cfgOf(row), { shared: false, detailed: !!req.user.is_admin });
   });
+}
 
-  // ---- admin routes
+/** Admin routes: register ONLY inside the requireAdmin plugin (see app.ts). */
+export function registerAdminDestinations(app: FastifyInstance, ctx: Ctx): void {
+  const { db } = ctx;
+  const { shared, cfgOf, insert, update, remove, secret } = makeHelpers(ctx);
   app.get('/api/admin/destinations', async () => {
     const rows = db.prepare('SELECT * FROM destinations WHERE owner_user_id IS NULL ORDER BY name').all() as DestinationRow[];
     return rows.map((r) => destinationDto(secret, r, false));
   });
   app.post('/api/admin/destinations', async (req, reply) => {
-    const row = insert(null, parse(createSchema, req.body), true);
+    enforce(ctx.limiter, req.user.id, 'dest-create', RATE.destinationCreate);
+    const row = await insert(null, parse(createSchema, req.body), true);
     return reply.code(201).send(destinationDto(secret, row, false));
   });
   app.patch('/api/admin/destinations/:id', async (req) => {
     const row = shared(parse(idParam, (req.params as { id: string }).id));
-    return destinationDto(secret, update(row, parse(updateSchema, req.body), true), false);
+    return destinationDto(secret, await update(row, parse(updateSchema, req.body), true), false);
   });
   app.delete('/api/admin/destinations/:id', async (req, reply) => {
     remove(shared(parse(idParam, (req.params as { id: string }).id)));
     return reply.code(204).send();
   });
   app.post('/api/admin/destinations/:id/test', async (req) => {
+    enforce(ctx.limiter, req.user.id, 'dest-test', RATE.destinationTest);
     const row = shared(parse(idParam, (req.params as { id: string }).id));
-    return testDestination(ctx, row.type, cfgOf(row));
+    return testDestination(ctx, row.type, cfgOf(row), { shared: true, detailed: true });
   });
 }
