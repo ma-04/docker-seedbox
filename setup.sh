@@ -490,12 +490,13 @@ cmd_doctor() {
 
   say ""; say "Containers"
   if dc ps -a >/dev/null 2>&1; then
-    local svc state health
-    while IFS='|' read -r svc state health; do
+    local svc state health code
+    while IFS='|' read -r svc state health code; do
       [ -n "$svc" ] || continue
       if [ "$state" = running ] && { [ "$health" = healthy ] || [ -z "$health" ]; }; then ok "$svc: $state ${health:+($health)}"
+      elif [ "$state" = exited ] && [ "$code" = 0 ]; then ok "$svc: finished (exit 0; one-shot service)"
       else bad "$svc: $state ${health:+($health)} - see: (cd deploy && docker compose logs --tail 50 $svc)"; fi
-    done < <(dc ps -a --format '{{.Service}}|{{.State}}|{{.Health}}' 2>/dev/null)
+    done < <(dc ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}' 2>/dev/null)
     [ -n "$(dc ps -a -q 2>/dev/null)" ] || bad "No containers: start with ./setup.sh or (cd deploy && docker compose up -d)"
   else
     bad "docker compose ps failed (invalid configuration?)"
