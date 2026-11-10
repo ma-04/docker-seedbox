@@ -55,6 +55,21 @@ export function buildRcloneCommand(config: DestinationConfig, src: string, remot
   return { args: rcloneArgs(src, target, extra), env, secrets: secrets.filter(Boolean) };
 }
 
+/** rclone/S3 errors that mean "the server rejected our credentials". */
+export const S3_AUTH_ERROR = /InvalidAccessKeyId|SignatureDoesNotMatch|AccessDenied|InvalidToken|ExpiredToken|AuthorizationHeaderMalformed|StatusCode:?\s*40[13]\b|\b40[13] (?:Forbidden|Unauthorized)/i;
+
+/**
+ * Cheap read-only call against the bucket root (same env/secrets as the copy), used after a failed S3 copy to find out
+ * whether the real cause is rejected credentials. rclone's own copy error can be misleading in that case (a failed
+ * object HEAD during path resolution is reported as "is a file not a directory").
+ */
+export function s3ProbeCommand(cmd: RcloneCommand, bucket: string): RcloneCommand {
+  return {
+    ...cmd,
+    args: ['lsf', `DST:${bucket}`, '--max-depth', '1', '--max-count', '1', '--config', '', '--use-json-log', '--retries', '1', '--low-level-retries', '1', '--s3-no-check-bucket'],
+  };
+}
+
 export function rcloneArgs(src: string, target: string, extra: string[] = []): string[] {
   return [
     'copy', src, target,

@@ -37,6 +37,9 @@ test.describe('6. cancel and retry', () => {
     const row = jobRow(page, added.id);
     await expectJobState(row, 'failed', 120_000);
     await expect(row.getByRole('alert')).not.toBeEmpty();
+    // the error names the real cause (rejected credentials), not a side effect such as "is a file not a directory"
+    await expect(row.getByRole('alert')).toContainText(/credentials|access key|signature|denied|forbidden/i);
+    await expect(row.getByRole('alert')).not.toContainText(/not a directory/i);
     expect(JSON.stringify((await api(page, 'GET', `/api/jobs/${added.id}`)).json)).not.toContain('definitely-wrong-secret');
 
     // admin fixes the destination (through the API; the edit form is covered by unit tests)

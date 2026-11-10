@@ -9,10 +9,10 @@ import type { Db } from '../lib/db.js';
 import { fullRemotePath, getDestination, jobRemoteDir } from '../lib/destinations.js';
 import * as gdriveLib from '../lib/gdrive.js';
 import { getSetting } from '../lib/settings.js';
-import { now, type GDriveConfig, type JobRow, type TorrentRow, type UserRow } from '../lib/types.js';
+import { now, type DestinationConfig, type GDriveConfig, type JobRow, type TorrentRow, type UserRow } from '../lib/types.js';
 import type { Downloader } from '../downloaders/types.js';
 import { assertPublicEndpoint } from '../lib/netguard.js';
-import { buildRcloneCommand, redact, runRclone, RcloneAborted, type RcloneProc, type SpawnFn } from './rclone.js';
+import { buildRcloneCommand, redact, runRclone, RcloneAborted, RcloneError, S3_AUTH_ERROR, s3ProbeCommand, type RcloneCommand, type RcloneProc, type SpawnFn } from './rclone.js';
 
 
 /** SSRF guard called right before every S3 upload (same call shape as `assertPublicEndpoint`). */
@@ -98,6 +98,24 @@ async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   try { return await run; } finally { if (folderLocks.get(key) === tail) folderLocks.delete(key); }
 }
 
+/**
+ * After a failed S3 copy: ask the bucket root a plain question with the same credentials. If the server rejects
+ * them, report that instead of rclone's copy-time message (which can be unrelated, e.g. "is a file not a directory").
+ */
+async function explainS3Failure(deps: UploadDeps, cfg: { bucket: string }, cmd: RcloneCommand, original: string, secrets: string[], signal: AbortSignal): Promise<string> {
+  if (signal.aborted) return original;
+  try {
+    await runRclone({ spawn: deps.spawn, bin: deps.rcloneBin, cmd: s3ProbeCommand(cmd, cfg.bucket), signal, killGraceMs: deps.killGraceMs, stallMs: 20_000, onStats: () => undefined });
+    return original;
+  } catch (e) {
+    const probe = redact(e instanceof Error ? e.message : String(e), secrets);
+    if (S3_AUTH_ERROR.test(probe)) {
+      return `The S3 server rejected the credentials (wrong access key or secret key, or no permission on the bucket). Check the destination settings. Detail: ${probe.replace(/^rclone failed \([^)]*\):?\s*/, '').slice(0, 300)}`;
+    }
+    return original;
+  }
+}
+
 function failJob(deps: UploadDeps, jobId: number, message: string): void {
   deps.db.prepare("UPDATE jobs SET state = 'failed', error = ?, upload_speed = 0, updated_at = ? WHERE id = ? AND state = 'uploading'")
     .run(message.slice(0, 800), now(), jobId);
@@ -109,6 +127,8 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as JobRow | undefined;
   if (!job || job.state !== 'uploading') return;
   let secrets: string[] = [];
+  let s3Config: Extract<DestinationConfig, { type: 's3' }> | undefined;
+  let cmdForProbe: RcloneCommand | undefined;
   try {
     const torrent = db.prepare('SELECT * FROM torrents WHERE id = ?').get(job.torrent_id) as TorrentRow;
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(job.user_id) as UserRow;
@@ -152,6 +172,8 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
       }
       const cmd = buildRcloneCommand(dest.config, source, remotePath, { gdriveFolderId: gdrive?.jobFolder });
       secrets = cmd.secrets;
+      cmdForProbe = cmd;
+      if (dest.config.type === 's3') s3Config = dest.config;
       let last = 0;
       await runRclone({
         spawn: deps.spawn, bin: deps.rcloneBin, cmd, signal, killGraceMs: deps.killGraceMs, stallMs: deps.stallMs,
@@ -182,7 +204,10 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
       log.info({ jobId }, 'upload aborted');
       return;
     }
-    const msg = redact(err instanceof Error ? err.message : String(err), secrets);
+    let msg = redact(err instanceof Error ? err.message : String(err), secrets);
+    if (err instanceof RcloneError && s3Config && !S3_AUTH_ERROR.test(msg)) {
+      msg = await explainS3Failure(deps, s3Config, cmdForProbe!, msg, secrets, signal);
+    }
     log.warn({ jobId, err: msg }, 'upload failed');
     failJob(deps, jobId, msg);
   }

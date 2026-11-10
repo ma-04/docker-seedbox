@@ -551,6 +551,43 @@ describe('rclone destinations: Drive folders and SSRF guard', () => {
   });
 });
 
+describe('S3 failure diagnostics', () => {
+  const s3c = { type: 's3', endpoint: 'https://s3.example.test', region: 'r', accessKeyId: 'AKIAEXAMPLE0000', secretAccessKey: 'wrong-secret-key-123', bucket: 'b' } as const;
+  async function run(onSpawn: (args: string[], p: any) => void) {
+    const fs_ = fakeSpawn((_c, args, _e, p) => onSpawn(args, p));
+    const s = setup({ spawn: fs_.spawn, endpointGuard: async () => undefined });
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    const j = addJob(s.db, u, t, addDest(s.db, s3c, null));
+    writeFiles(join(s.content(H1), 'Pack'), { 'a.txt': 'A' });
+    await s.worker.tick();
+    s.complete(H1, 'Pack', 1, join(s.content(H1), 'Pack'));
+    await s.worker.tick(); await s.worker.idle();
+    return { job: job(s.db, j), calls: fs_.calls };
+  }
+  const MISLEADING = '{"level":"error","msg":"error reading source root directory: directory not found: is a file not a directory"}';
+  const AUTH = '{"level":"error","msg":"operation error S3: ListObjectsV2, https response error StatusCode: 403, api error SignatureDoesNotMatch: The request signature we calculated does not match"}';
+
+  it('a copy that fails with a misleading message is reported as an auth failure when the bucket probe is rejected', async () => {
+    const r = await run((args, p) => (args[0] === 'copy' ? p.finish(1, [MISLEADING]) : p.finish(1, [AUTH])));
+    expect(r.calls.map((c) => c.args[0])).toEqual(['copy', 'lsf']);
+    expect(r.job.state).toBe('failed');
+    expect(r.job.error).toMatch(/rejected the credentials/);
+    expect(r.job.error).toMatch(/SignatureDoesNotMatch/);
+    expect(r.job.error).not.toMatch(/is a file not a directory/);
+    expect(r.job.error).not.toContain('wrong-secret-key-123');
+  });
+  it("keeps rclone's message when the probe succeeds (the credentials are fine)", async () => {
+    const r = await run((args, p) => (args[0] === 'copy' ? p.finish(1, [MISLEADING]) : p.finish(0)));
+    expect(r.job.error).toMatch(/is a file not a directory/);
+  });
+  it('does not probe when the copy error already is an auth error', async () => {
+    const r = await run((_a, p) => p.finish(1, [AUTH]));
+    expect(r.calls).toHaveLength(1);
+    expect(r.job.error).toMatch(/SignatureDoesNotMatch/);
+  });
+});
+
 describe('worker start', () => {
   it('retries the first VPN reconcile soon when the sidecar is not up yet', async () => {
     const env = makeEnv();
