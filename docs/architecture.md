@@ -253,6 +253,7 @@ a whitelist is the only safe surface. If the engine is unreachable the API answe
 | `LAN_CIDRS` | vpn, qbittorrent | compose subnet, default `172.31.250.0/24` |
 | `LAN_IP_RANGE`, `VPN_IPV4`, `API_IP`, `WORKER_IP` | compose | fixed addresses of `vpn`/`api`/`worker` (`172.31.250.2`/`.3`/`.4`) and the range for everything else (`172.31.250.128/25`); all derived from `LAN_CIDRS` by `setup.sh`; compose passes `API_IP`,`WORKER_IP` to qbittorrent as `QBT_TRUSTED_IPS` |
 | `QBT_TRUSTED_IPS` | qbittorrent | comma-separated addresses allowed to use the WebUI without a password (`/32` implied); empty = nobody |
+| `VPN_MTU` | vpn | WireGuard interface MTU 576-1500; unset = 1280; a config `MTU =` wins |
 | `VPN_DEFAULT_MODE` | vpn | `required` (default) \| `off`; mode right after a container start |
 | `LOG_LEVEL` | all | `info` |
 
@@ -319,7 +320,7 @@ sysctls. Sysctl `net.ipv6.conf.all.disable_ipv6=1` (namespaced) is set as belt a
 The exact compose blocks for `vpn` and `qbittorrent` are in `services/vpn/README.md`.
 
 ```
-GET  /status      -> { mode, connected, name, publicIp, lastHandshakeSec, since }
+GET  /status      -> { mode, connected, name, publicIp, lastHandshakeSec, since, mtu }
 POST /connect     { name, config }   -> brings the tunnel up (replacing any current one)
 POST /disconnect
 POST /mode        { mode: "off" | "required" }
@@ -337,6 +338,15 @@ open; the worker then applies the admin's `vpn.mode` right at its start. `POST /
 already has changes nothing (the worker re-checks regularly and `off` would tear a live tunnel down); the mode
 and the last config are otherwise in memory only and are re-applied by the worker. A failed route swap during
 `/connect` restores the previous tunnel's routes.
+
+MTU: the wg interface gets the config's `MTU =` if present, else `VPN_MTU`, else **1280**. Docker's bridge
+reports 1500 and hides the real uplink MTU (cloud VMs 1460, PPPoE 1492, overlays lower); with WireGuard's
+customary 1420 full-size packets are then black-holed and bulk TCP stalls while small requests work (found on a
+live 1460-MTU VM). 1280 is the IPv6 minimum and a common VPN-client default. `/status.mtu` reports the effective
+value. As defence in depth the ruleset clamps the MSS of SYNs leaving through `wg*` to the route MTU (a separate
+postrouting chain with policy accept; it cannot admit anything the output chain drops). Active path-MTU probing is
+not done: probes from the namespace are blocked by the kill switch except to the endpoint, so a static
+conservative default is used instead.
 
 Kill switch (always on in `required` mode, including before the first `/connect` and during
 rotation): one nftables table, replaced atomically and installed before the API listens. OUTPUT

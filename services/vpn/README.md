@@ -53,6 +53,7 @@ sidecar: Alpine + `wireguard-tools` + `iproute2` + `nftables` + a ~500-line stat
   traffic; then the routes are swung with `ip route replace` and the old interface removed. The
   kill switch is never open during the switch. On handshake failure the new interface is removed,
   the old tunnel stays, and `/connect` answers `502`.
+* **MTU** — config `MTU =` > `VPN_MTU` > 1280 (see the table below for why). The ruleset also clamps TCP MSS on `wg*` (`tcp option maxseg size set rt mtu`, postrouting chain, accept policy: it never opens anything the kill-switch output chain drops).
 * **Routing** — like `wg-quick`: `0.0.0.0/0` becomes `0.0.0.0/1` + `128.0.0.0/1` on the wg
   interface; the endpoint and `LAN_CIDRS` keep the original gateway. qBittorrent is not bound to
   an interface name; it uses whichever route is default.
@@ -82,6 +83,7 @@ sidecar: Alpine + `wireguard-tools` + `iproute2` + `nftables` + a ~500-line stat
 |---|---|---|
 | `VPN_CONTROL_TOKEN` | required | Bearer token for `:8000` |
 | `LAN_CIDRS` | `172.31.250.0/24` | comma-separated; reachable in every mode and state (must contain the compose subnet) |
+| `VPN_MTU` | `1280` | wg interface MTU (576-1500); a config `MTU =` line overrides it. 1280 survives uplinks whose real MTU the Docker bridge hides (cloud 1460, PPPoE 1492); lower it if bulk transfers stall only with the VPN on. `GET /status` reports the effective `mtu` |
 | `VPN_DEFAULT_MODE` | `required` | `required` (fail closed) or `off` right after (re)start |
 | `PUBLIC_IP_URL` | `https://api.ipify.org` | plain-text IP service, fetched through the tunnel; empty disables |
 | `VPN_FALLBACK_DNS` | `1.1.1.1` | resolver used when the config has no IPv4 `DNS =` |
@@ -117,6 +119,7 @@ services:
     environment:
       VPN_CONTROL_TOKEN: ${VPN_CONTROL_TOKEN:?set VPN_CONTROL_TOKEN}
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
+      VPN_MTU: ${VPN_MTU:-}
       VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-required}   # fail closed after restarts until the worker applies vpn.mode
       # PUBLIC_IP_URL: https://api.ipify.org
     tmpfs: [/tmp]                     # (not read_only: /etc/resolv.conf must stay writable)
@@ -165,7 +168,7 @@ Notes for the compose file as a whole:
 `Authorization: Bearer $VPN_CONTROL_TOKEN` on every request (401 otherwise).
 
 ```
-GET  /status      -> { mode, connected, name, publicIp, lastHandshakeSec, since }
+GET  /status      -> { mode, connected, name, publicIp, lastHandshakeSec, since, mtu }
 POST /connect     { name, config }     raw wg-quick text; 400 invalid/forbidden, 502 no handshake
 POST /disconnect
 POST /mode        { mode: "off" | "required" }

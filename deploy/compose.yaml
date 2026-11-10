@@ -180,6 +180,7 @@ services:
       VPN_CONTROL_TOKEN: ${VPN_CONTROL_TOKEN:?run ./setup.sh to generate secrets}
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
       VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-required}   # fail closed after any restart until the worker applies vpn.mode
+      VPN_MTU: ${VPN_MTU:-}              # empty = 1280 unless the WireGuard config sets MTU =; see docs/configuration.md
       LOG_LEVEL: ${LOG_LEVEL:-info}
     tmpfs: ["/tmp"]                   # not read_only: /etc/resolv.conf must stay writable
     security_opt: ["no-new-privileges:true"]

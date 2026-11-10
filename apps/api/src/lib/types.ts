@@ -76,6 +76,8 @@ export type TorrentSource = { magnet: string } | { torrentB64: string };
 export interface VpnStatus {
   mode: 'off' | 'required'; connected: boolean; name: string | null; publicIp: string | null;
   lastHandshakeSec: number | null; since: number | null;
+  /** Effective MTU of the active tunnel interface (absent on older sidecars, null when no tunnel). */
+  mtu?: number | null;
 }
 
 export const now = (): number => Math.floor(Date.now() / 1000);

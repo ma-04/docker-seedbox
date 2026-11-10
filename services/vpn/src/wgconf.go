@@ -18,7 +18,7 @@ type WGConfig struct {
 	PrivateKey   string
 	Addresses    []netip.Prefix // IPv4 only
 	DNS          []netip.Addr   // IPv4 only
-	MTU          int
+	MTU          int            // 0 = not set in the file (see resolveMTU)
 	PublicKey    string
 	PresharedKey string
 	AllowedIPs   []netip.Prefix // IPv4 only
@@ -52,7 +52,7 @@ func ParseWGConfig(text string) (*WGConfig, error) {
 	if len(text) > 16*1024 {
 		return nil, errors.New("config too large")
 	}
-	c := &WGConfig{MTU: 1420, Keepalive: 25}
+	c := &WGConfig{Keepalive: 25}
 	section := ""
 	peers := 0
 	var sawAllowed bool
@@ -120,8 +120,8 @@ func ParseWGConfig(text string) (*WGConfig, error) {
 			}
 		case "interface.mtu":
 			n, err := strconv.Atoi(v)
-			if err != nil || n < 576 || n > 1500 {
-				return nil, errors.New("invalid MTU")
+			if err != nil || !validMTU(n) {
+				return nil, fmt.Errorf("invalid MTU (must be %d-%d)", minMTU, maxMTU)
 			}
 			c.MTU = n
 		case "peer.publickey":
@@ -186,3 +186,40 @@ func ParseWGConfig(text string) (*WGConfig, error) {
 }
 
 func validName(n string) bool { return nameRe.MatchString(n) }
+
+const (
+	minMTU = 576
+	maxMTU = 1500
+	// defaultMTU is deliberately conservative. The Docker bridge always reports 1500, hiding a smaller real uplink MTU
+	// (cloud VMs commonly 1460, PPPoE 1492, overlay networks lower). WireGuard adds 60 bytes (IPv4 outer) so the
+	// usual 1420 only works if the real path is >= 1480; otherwise full-size packets are black-holed and bulk TCP
+	// stalls while small requests still work. 1280 is the IPv6 minimum MTU and what several VPN clients default
+	// to; the throughput cost versus 1420 is ~10%.
+	defaultMTU = 1280
+)
+
+func validMTU(n int) bool { return n >= minMTU && n <= maxMTU }
+
+// parseMTUEnv parses VPN_MTU ("" = unset -> 0).
+func parseMTUEnv(v string) (int, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || !validMTU(n) {
+		return 0, fmt.Errorf("VPN_MTU must be an integer %d-%d", minMTU, maxMTU)
+	}
+	return n, nil
+}
+
+// resolveMTU: explicit MTU in the uploaded config > VPN_MTU (envMTU, 0 = unset) > defaultMTU.
+func resolveMTU(cfgMTU, envMTU int) int {
+	switch {
+	case cfgMTU != 0:
+		return cfgMTU
+	case envMTU != 0:
+		return envMTU
+	}
+	return defaultMTU
+}

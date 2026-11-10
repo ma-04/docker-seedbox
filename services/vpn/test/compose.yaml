@@ -48,6 +48,7 @@ services:
     environment:
       VPN_CONTROL_TOKEN: test-token-0123456789
       LAN_CIDRS: 172.31.250.0/24
+      VPN_MTU: ${VPN_MTU:-}                     # unset = 1280; run.sh asserts precedence
       VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-}   # unset/empty must mean "required" (fail closed); run.sh asserts it
       PUBLIC_IP_URL: http://172.31.252.20/
       HANDSHAKE_TIMEOUT_SEC: "8"

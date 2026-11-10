@@ -56,12 +56,13 @@ read -r S1_PRIV S1_PUB < <(gen)
 read -r S2_PRIV S2_PUB < <(gen)
 export CLIENT_PUB=$C_PUB WG1_PRIV=$S1_PRIV WG2_PRIV=$S2_PRIV
 # Config A: hostname endpoint + IPv6 default route; config B: IP endpoint. DNS = the server's tunnel address.
-mkconf() { # name tunnel-net server-pub endpoint
+mkconf() { # name tunnel-net server-pub endpoint [extra Interface line, e.g. "MTU = 1380"]
 cat > "$WORK/$1.conf" <<CONF
 [Interface]
 PrivateKey = $C_PRIV
 Address = $2.2/32, fd99::2/128
 DNS = $2.1
+${5:-}
 [Peer]
 PublicKey = $3
 AllowedIPs = 0.0.0.0/0, ::/0
@@ -69,7 +70,7 @@ Endpoint = $4
 CONF
 }
 mkconf A 10.99.1 "$S1_PUB" wg1:51820
-mkconf B 10.99.2 "$S2_PUB" 172.31.251.12:51820
+mkconf B 10.99.2 "$S2_PUB" 172.31.251.12:51820 "MTU = 1380"
 { cat "$WORK/A.conf"; echo "PostUp = touch /tmp/pwned"; } > "$WORK/evil.conf"
 
 $DC up -d echo-direct echo-behind wg1 wg2 lan-client lan-intruder >/dev/null
@@ -115,6 +116,10 @@ OUT=$(connect A A); echo "$OUT" | head -1
 check "HTTP 200" has '^HTTP 200$'
 check "connected=true, name=A" jqok '.connected and .name=="A"'
 check "recent handshake (<=10s)" jqok '.lastHandshakeSec<=10'
+wgmtu() { $DC exec -T vpn cat /sys/class/net/wg0/mtu; }
+check "no MTU in config and no VPN_MTU: wg0 MTU = 1280 (default)" test "$(wgmtu)" = 1280
+check "status.mtu = 1280" test "$(status | jqs .mtu)" = 1280
+check "MSS clamp rule installed on wg*" sh_ "$DC exec -T -u 0 vpn nft list chain inet sbvpn mss | grep -q 'maxseg size set rt mtu'"
 check "echo behind WG1 reachable, source = wg1" retry 10 sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.11$'"
 checkno "direct echo still blocked" probe curl -sS -m 3 http://172.31.251.20/
 check "IPv6 stripped from tunnel (no :: in allowed-ips)" bash -c "! $DC exec -T vpn wg show wg0 allowed-ips | grep -q ::"
@@ -133,6 +138,7 @@ checkno "no leak so far" probe test -s /tmp/leaks
 section "4. rotation A -> B"
 OUT=$(connect B B); echo "$OUT" | head -1
 check "connected=true, name=B" jqok '.connected and .name=="B"'
+check "config MTU = 1380: wg interface MTU = 1380 (status.mtu too)" sh_ "test \"\$($DC exec -T vpn sh -c 'cat /sys/class/net/wg*/mtu')\" = 1380 && test \"\$(status | jqs .mtu)\" = 1380"
 check "traffic now exits via wg2 (source 172.31.252.12)" retry 10 sh_ "probe curl -sS -m 5 http://172.31.252.20/ | grep -q '^behind 172.31.252.12$'"
 check "exactly one wg interface remains" test "$($DC exec -T vpn sh -c 'ip -o link | grep -c "wg[0-9]"')" = 1
 checkno "direct echo blocked after switch" probe curl -sS -m 3 http://172.31.251.20/
@@ -228,6 +234,13 @@ checkno "fresh namespace: direct echo blocked" $P2 curl -sS -m 3 http://172.31.2
 checkno "fresh namespace: DNS blocked" $P2 nslookup example.com
 VPN_DEFAULT_MODE= $DC up -d --force-recreate --wait vpn >/dev/null 2>&1
 check "VPN_DEFAULT_MODE unset/empty = required (fail closed)" test "$(status | jqs '.mode+" "+(.connected|tostring)')" = "required false"
+VPN_MTU=1350 $DC up -d --force-recreate --wait vpn >/dev/null 2>&1
+OUT=$(connect A A)   # A has no MTU line: VPN_MTU applies
+check "VPN_MTU=1350 and no config MTU: wg interface MTU = 1350" sh_ "test \"\$($DC exec -T vpn sh -c 'cat /sys/class/net/wg*/mtu')\" = 1350 && test \"\$(status | jqs .mtu)\" = 1350"
+OUT=$(connect B B)
+check "config MTU = 1380 beats VPN_MTU=1350" sh_ "test \"\$($DC exec -T vpn sh -c 'cat /sys/class/net/wg*/mtu')\" = 1380"
+VPN_MTU=99 $DC up -d --force-recreate vpn >/dev/null 2>&1; sleep 3
+check "invalid VPN_MTU (99) is refused at start" sh_ "docker logs sbvpn-vpn-1 2>&1 | grep -q 'VPN_MTU must be'"
 VPN_DEFAULT_MODE=off $DC up -d --force-recreate --wait vpn >/dev/null 2>&1
 P2="docker run --rm --network container:sbvpn-vpn-1 -u 1000 sbvpn-tools"
 check "default off after recreate: direct echo reachable" retry 10 $P2 curl -sS -m 4 http://172.31.251.20/

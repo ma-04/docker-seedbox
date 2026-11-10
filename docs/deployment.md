@@ -128,3 +128,5 @@ The `downloads` volume is transient working space; `qbt-config` holds qBittorren
 ## Troubleshooting
 
 `./setup.sh doctor` first. Typical problems: DNS not propagated; ports 80/443 busy (use `external` mode); no WireGuard kernel support in an LXC/VPS container; cookie domain not a parent of both hosts; plain-http access in `none` mode.
+
+**Downloads stall or crawl only when the VPN is on** (small requests work, large transfers hang): a path-MTU problem. Set `VPN_MTU` in `deploy/.env` lower than the default 1280 (try 1200, then 1100), then `docker compose up -d vpn` (a config's own `MTU =` line overrides `VPN_MTU`). See [configuration.md](configuration.md#vpn).

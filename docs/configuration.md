@@ -25,6 +25,7 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `PORT` | api | `3000` (fixed in compose). |
 | `LAN_CIDRS` | vpn, qbittorrent | Subnet of the internal network, default `172.31.250.0/24`. Change it only if it collides with another Docker network or your LAN, and then change the four address variables below with it: `./setup.sh` derives them all from `LAN_CIDRS` (edit `LAN_CIDRS` in `deploy/.env`, re-run `./setup.sh`). |
 | `LAN_IP_RANGE`, `VPN_IPV4`, `API_IP`, `WORKER_IP` | compose | Fixed addresses for `vpn`/`api`/`worker` (defaults `.2`/`.3`/`.4` of the default subnet); other containers get addresses from `LAN_IP_RANGE` (default `172.31.250.128/25`). All must be inside `LAN_CIDRS`. `API_IP` and `WORKER_IP` are the only addresses allowed to use qBittorrent's WebUI without a password (`QBT_TRUSTED_IPS`). |
+| `VPN_MTU` | vpn | MTU of the WireGuard interface, 576-1500. Unset = `1280`. An `MTU =` line in an uploaded WireGuard config takes precedence over this. See [VPN](#vpn). |
 | `VPN_DEFAULT_MODE` | vpn | `required` (default, fail closed) or `off`. Mode of the VPN sidecar after every (re)start, until the worker applies the admin's `vpn.mode` (within seconds). |
 | `LOG_LEVEL` | all | `info`. |
 
@@ -66,6 +67,10 @@ Open **Admin** after logging in as a member of `admins`.
 ### VPN
 
 Admin -> VPN: paste or upload one or more WireGuard configs (`wg-quick` format, e.g. from your provider). IPv6 (`::/0`) is stripped from `AllowedIPs`. Set `vpn.mode` to `required` before adding torrents you want protected. The server needs a WireGuard-capable kernel (check with `./setup.sh doctor`); no `/dev/net/tun` is required. Rotation switches to the next enabled config.
+
+**MTU.** The tunnel interface MTU is, in order: the config's own `MTU =` line (576-1500), else `VPN_MTU`, else `1280`. The default is deliberately conservative: Docker's bridge reports 1500 even when the host's real uplink is smaller (cloud VMs often 1460, PPPoE 1492, overlays less), and WireGuard's usual 1420 then black-holes full-size packets, so small requests work while bulk TCP stalls or crawls. 1280 is the IPv6 minimum MTU and a common VPN-client default; it costs roughly 10% of peak throughput versus 1420. Raise `VPN_MTU` (e.g. 1420) only if you know your path allows it. TCP MSS on the tunnel is also clamped to the interface MTU. The effective value is shown on the VPN page (`mtu` in the sidecar's `GET /status`).
+
+**qBittorrent shows "firewalled"** (`connection_status: firewalled` in `transfer/info`): expected behind a VPN without provider port forwarding. Downloads and uploads over outbound connections work normally; only incoming peer connections are missing.
 
 ### Destinations
 

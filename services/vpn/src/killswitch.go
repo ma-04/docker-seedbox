@@ -40,6 +40,10 @@ func buildRuleset(mode string, lan []netip.Prefix, endpoints []netip.AddrPort, w
 	b.WriteString("add table inet sbvpn\ndelete table inet sbvpn\ntable inet sbvpn {\n")
 	b.WriteString("  chain input {\n    type filter hook input priority -10; policy accept;\n")
 	fmt.Fprintf(&b, "    iifname \"wg*\" tcp dport { %s } drop\n  }\n", webPorts)
+	// Defence in depth for path-MTU problems: clamp the MSS of every SYN / SYN-ACK leaving through a tunnel to the
+	// route MTU. Postrouting is a separate accept-policy chain; it never lets anything out that output dropped.
+	b.WriteString("  chain mss {\n    type filter hook postrouting priority mangle; policy accept;\n")
+	b.WriteString("    oifname \"wg*\" tcp flags syn tcp option maxseg size set rt mtu\n  }\n")
 	if mode == "required" {
 		b.WriteString("  chain output {\n    type filter hook output priority -10; policy drop;\n")
 		b.WriteString("    ip daddr 127.0.0.11 meta skuid != 0 drop\n")

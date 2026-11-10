@@ -16,6 +16,7 @@ function StatusCard() {
     ['Connected', s.reachable ? (s.connected ? 'yes' : 'no') : 'unknown'],
     ['Active config', activeName ?? 'none'],
     ['Public IP', s.publicIp ?? '-'],
+    ['MTU', s.mtu == null ? '-' : String(s.mtu)],
     ['Last handshake', s.lastHandshakeSec == null ? '-' : `${formatDuration(s.lastHandshakeSec)} ago`],
     ['Reachable', s.reachable ? 'yes' : 'no'],
   ];

@@ -24,6 +24,7 @@ func logf(format string, a ...any) { log.Printf(format, a...) }
 type Server struct {
 	token, webPorts, pubURL, fallbackDNS string
 	lan                                  []netip.Prefix
+	envMTU                               int // VPN_MTU, 0 = unset
 	handshakeTimeout                     time.Duration
 	origNS, origResolv                   string
 
@@ -35,6 +36,7 @@ type Server struct {
 	name     string
 	since    int64
 	endpoint netip.AddrPort
+	mtu      int
 	gen      int
 	pubIP    string
 	pubGen   int
@@ -49,17 +51,18 @@ type statusDTO struct {
 	PublicIP         *string `json:"publicIp"`
 	LastHandshakeSec *int64  `json:"lastHandshakeSec"`
 	Since            *int64  `json:"since"`
+	MTU              *int    `json:"mtu"`
 }
 
 func (s *Server) status() statusDTO {
 	s.mu.Lock()
-	mode, iface, name, since, ip := s.mode, s.iface, s.name, s.since, s.pubIP
+	mode, iface, name, since, ip, mtu := s.mode, s.iface, s.name, s.since, s.pubIP, s.mtu
 	s.mu.Unlock()
 	d := statusDTO{Mode: mode}
 	if iface == "" {
 		return d
 	}
-	d.Name, d.Since = &name, &since
+	d.Name, d.Since, d.MTU = &name, &since, &mtu
 	if age, ok := handshakeAge(iface); ok {
 		d.LastHandshakeSec = &age
 		d.Connected = age <= 180
@@ -133,7 +136,8 @@ func (s *Server) connect(name string, cfg *WGConfig) (err error) {
 			return fail(err)
 		}
 	}
-	if _, err = run("", "ip", "link", "set", newIf, "mtu", strconv.Itoa(cfg.MTU), "up"); err != nil {
+	mtu := resolveMTU(cfg.MTU, s.envMTU)
+	if _, err = run("", "ip", "link", "set", newIf, "mtu", strconv.Itoa(mtu), "up"); err != nil {
 		return fail(err)
 	}
 	if _, err = run("", "ip", routeArgs(ep.Addr().String()+"/32", gw, dev)...); err != nil {
@@ -174,7 +178,7 @@ func (s *Server) connect(name string, cfg *WGConfig) (err error) {
 		}
 	}
 	s.mu.Lock()
-	s.iface, s.name, s.since, s.endpoint = newIf, name, time.Now().Unix(), ep
+	s.iface, s.name, s.since, s.endpoint, s.mtu = newIf, name, time.Now().Unix(), ep, mtu
 	s.gen++
 	s.pubIP = ""
 	s.mu.Unlock()
@@ -252,7 +256,7 @@ var errHandshake = errors.New("handshake failed")
 func (s *Server) teardown() {
 	s.mu.Lock()
 	iface, ep := s.iface, s.endpoint
-	s.iface, s.name, s.since, s.pubIP = "", "", 0, ""
+	s.iface, s.name, s.since, s.pubIP, s.mtu = "", "", 0, "", 0
 	s.gen++
 	s.mu.Unlock()
 	if iface != "" {
@@ -451,6 +455,7 @@ func main() {
 	if token == "" {
 		log.Fatal("VPN_CONTROL_TOKEN is required")
 	}
+	var err error
 	s := &Server{token: token, pubURL: env("PUBLIC_IP_URL", "https://api.ipify.org"), fallbackDNS: env("VPN_FALLBACK_DNS", "1.1.1.1")}
 	for _, c := range strings.Split(env("LAN_CIDRS", "172.31.250.0/24"), ",") {
 		p, err := netip.ParsePrefix(strings.TrimSpace(c))
@@ -458,6 +463,9 @@ func main() {
 			log.Fatalf("invalid LAN_CIDRS entry %q", c)
 		}
 		s.lan = append(s.lan, p.Masked())
+	}
+	if s.envMTU, err = parseMTUEnv(os.Getenv("VPN_MTU")); err != nil {
+		log.Fatal(err)
 	}
 	s.webPorts = "8000, " + env("WEBUI_PORT", "8080")
 	if n, err := strconv.Atoi(env("HANDSHAKE_TIMEOUT_SEC", "20")); err == nil && n > 0 {
@@ -487,7 +495,7 @@ func main() {
 	}
 	s.mode = mode
 	go s.publicIPLoop()
-	logf("vpn control listening on %s (mode=%s, lan=%v)", addr, mode, s.lan)
+	logf("vpn control listening on %s (mode=%s, lan=%v, default mtu=%d)", addr, mode, s.lan, resolveMTU(0, s.envMTU))
 	srv := &http.Server{Addr: addr, Handler: s.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }
