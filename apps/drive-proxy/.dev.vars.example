@@ -1,0 +1,8 @@
+# Copy to .dev.vars for `wrangler dev`. Placeholder values only.
+GDRIVE_CLIENT_ID=1234567890-example.apps.googleusercontent.com
+GDRIVE_CLIENT_SECRET=example-client-secret
+GDRIVE_REFRESH_TOKEN=1//example-refresh-token
+SIGNING_KEY=test-signing-key
+ROOT_FOLDER_ID=example-root-folder-id
+# ALLOWED_ORIGINS=https://seedbox.example.com
+# CACHE_TTL_SECONDS=300

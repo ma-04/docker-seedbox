@@ -1,0 +1,133 @@
+/** qBittorrent Web API v2 client (fetch). The WebUI whitelists the compose subnet, so no login is normally needed. */
+import type { DownloadAddInput, Downloader, DownloadState, DownloadStatus } from './types.js';
+
+export interface QbtOptions {
+  baseUrl: string;
+  username?: string;
+  password?: string;
+  category?: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+interface QbtTorrent {
+  hash: string; name: string; size?: number; total_size?: number; progress: number; dlspeed: number; state: string;
+  ratio: number; content_path: string; save_path: string;
+}
+
+const META = new Set(['metaDL', 'forcedMetaDL']);
+const ERROR = new Set(['error', 'missingFiles']);
+const UPLOAD = new Set(['uploading', 'stalledUP', 'pausedUP', 'stoppedUP', 'queuedUP', 'checkingUP', 'forcedUP']);
+
+/** Map a qBittorrent state string (4.x and 5.x names) to the worker's vocabulary. */
+export function mapQbtState(state: string, progress: number): DownloadState {
+  if (ERROR.has(state)) return 'error';
+  if (META.has(state)) return 'metadata-pending';
+  if (state === 'moving') return 'downloading';
+  if (UPLOAD.has(state) || progress >= 1) return 'completed';
+  return 'downloading';
+}
+
+export class QbittorrentDownloader implements Downloader {
+  readonly kind = 'torrent';
+  private readonly base: string;
+  private readonly category: string;
+  private readonly f: typeof fetch;
+  private readonly timeoutMs: number;
+  private cookie: string | null = null;
+  private categoryReady = false;
+
+  constructor(private readonly opts: QbtOptions) {
+    this.base = opts.baseUrl.replace(/\/+$/, '');
+    this.category = opts.category ?? 'seedbox';
+    this.f = opts.fetchImpl ?? fetch;
+    this.timeoutMs = opts.timeoutMs ?? 20_000;
+  }
+
+  private async raw(path: string, init: { method?: string; body?: BodyInit; headers?: Record<string, string> } = {}): Promise<Response> {
+    const headers: Record<string, string> = { ...init.headers };
+    if (this.cookie) headers.cookie = this.cookie;
+    return this.f(`${this.base}/api/v2${path}`, { ...init, headers, signal: AbortSignal.timeout(this.timeoutMs) });
+  }
+
+  private async login(): Promise<boolean> {
+    const { username, password } = this.opts;
+    if (!username || !password) return false;
+    const res = await this.raw('/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', referer: this.base },
+      body: new URLSearchParams({ username, password }).toString(),
+    });
+    const text = (await res.text()).trim();
+    if (!res.ok || text !== 'Ok.') return false;
+    const sid = /(?:^|,\s*)(SID=[^;,\s]+)/.exec(res.headers.get('set-cookie') ?? '');
+    this.cookie = sid ? sid[1]! : this.cookie;
+    return true;
+  }
+
+  /** Request with a single login-and-retry on 403. Body must be re-creatable, hence a factory. */
+  private async call(path: string, init: () => { method?: string; body?: BodyInit; headers?: Record<string, string> } = () => ({})): Promise<Response> {
+    let res = await this.raw(path, init());
+    if (res.status === 403 && (await this.login())) res = await this.raw(path, init());
+    if (!res.ok && res.status !== 409) throw new Error(`qBittorrent ${path.split('?')[0]} failed (${res.status})`);
+    return res;
+  }
+
+  private form(data: Record<string, string>) {
+    return () => ({
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(data).toString(),
+    });
+  }
+
+  private async ensureCategory(): Promise<void> {
+    if (this.categoryReady) return;
+    await this.call('/torrents/createCategory', this.form({ category: this.category, savePath: '' })); // 409 = already exists
+    this.categoryReady = true;
+  }
+
+  async add(input: DownloadAddInput): Promise<void> {
+    await this.ensureCategory();
+    const build = () => {
+      const fd = new FormData();
+      if ('magnet' in input.source) fd.append('urls', input.source.magnet);
+      else fd.append('torrents', new Blob([new Uint8Array(input.source.torrent)], { type: 'application/x-bittorrent' }), `${input.id}.torrent`);
+      fd.append('category', this.category);
+      fd.append('savepath', input.savePath);
+      fd.append('autoTMM', 'false');
+      fd.append('contentLayout', 'Original');
+      fd.append('paused', 'false');
+      return { method: 'POST', body: fd };
+    };
+    const res = await this.call('/torrents/add', build);
+    const text = (await res.text()).trim();
+    if (/^fails/i.test(text)) {
+      // qBittorrent answers "Fails." both for invalid input and for an already-present torrent.
+      if (await this.status(input.id)) return;
+      throw new Error('qBittorrent rejected the torrent');
+    }
+  }
+
+  async status(ref: string): Promise<DownloadStatus | null> {
+    const res = await this.call(`/torrents/info?hashes=${encodeURIComponent(ref.toLowerCase())}`);
+    const list = (await res.json()) as QbtTorrent[];
+    const t = list.find((x) => x.hash.toLowerCase() === ref.toLowerCase());
+    if (!t) return null;
+    return {
+      state: mapQbtState(t.state, t.progress),
+      name: t.name,
+      totalSize: t.size ?? t.total_size ?? 0,
+      progress: t.progress,
+      dlSpeed: t.dlspeed,
+      ratio: t.ratio,
+      contentPath: t.content_path,
+      savePath: t.save_path,
+      rawState: t.state,
+    };
+  }
+
+  async remove(ref: string, deleteData: boolean): Promise<void> {
+    await this.call('/torrents/delete', this.form({ hashes: ref.toLowerCase(), deleteFiles: deleteData ? 'true' : 'false' }));
+  }
+}

@@ -1,0 +1,86 @@
+import { describe, expect, it } from 'vitest';
+import { getSetting } from '../lib/settings.js';
+import { alice, fakeVpn, root, setup } from './testutil.js';
+
+const WG = `[Interface]
+PrivateKey = SUPERSECRETPRIVATEKEY=
+Address = 10.0.0.2/32
+DNS = 10.0.0.1
+
+[Peer]
+PublicKey = PUBKEY=
+AllowedIPs = 0.0.0.0/0
+Endpoint = vpn.example.test:51820
+`;
+
+describe('admin vpn', () => {
+  it('validates configs, never returns config text, and tracks active', async () => {
+    const vpn = fakeVpn();
+    const env = setup(vpn);
+    const bad = await env.call(root, 'POST', '/api/admin/vpn/configs', { name: 'bad', config: '[Interface]\nPrivateKey=x\nPostUp = rm -rf /' });
+    expect(bad.statusCode).toBe(400);
+    const created = await env.call(root, 'POST', '/api/admin/vpn/configs', { name: 'one', config: WG });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ name: 'one', endpointHost: 'vpn.example.test', enabled: true, active: false });
+    expect(created.body).not.toContain('SUPERSECRET');
+    expect((await env.call(root, 'POST', '/api/admin/vpn/configs', { name: 'one', config: WG })).statusCode).toBe(409);
+    const raw = env.db.prepare('SELECT config_enc FROM vpn_configs').get() as { config_enc: string };
+    expect(raw.config_enc).not.toContain('SUPERSECRET');
+
+    const id = created.json().id;
+    const rot = await env.call(root, 'POST', '/api/admin/vpn/rotate', {});
+    expect(rot.json()).toMatchObject({ id, active: true });
+    expect(vpn.calls).toContain('connect:one');
+    const list = await env.call(root, 'GET', '/api/admin/vpn/configs');
+    expect(list.body).not.toContain('SUPERSECRET');
+    expect(list.json()[0].active).toBe(true);
+
+    const dis = await env.call(root, 'PATCH', `/api/admin/vpn/configs/${id}`, { enabled: false });
+    expect(dis.json()).toMatchObject({ enabled: false, active: false });
+    expect(vpn.calls).toContain('disconnect');
+    expect(getSetting(env.db, 'vpn.activeConfigId')).toBeNull();
+    expect((await env.call(root, 'POST', '/api/admin/vpn/rotate', {})).statusCode).toBe(409);
+    expect((await env.call(root, 'DELETE', `/api/admin/vpn/configs/${id}`)).statusCode).toBe(204);
+    expect((await env.call(alice, 'GET', '/api/admin/vpn/configs')).statusCode).toBe(403);
+  });
+
+  it('status falls back when the sidecar is unreachable', async () => {
+    const env = setup(fakeVpn({ status: async () => { throw new Error('down'); } }));
+    const r = (await env.call(root, 'GET', '/api/admin/vpn/status')).json();
+    expect(r).toMatchObject({ reachable: false, connected: false, name: null, mode: 'off', activeConfigId: null });
+    const ok = setup();
+    expect((await ok.call(root, 'GET', '/api/admin/vpn/status')).json()).toMatchObject({ reachable: true, connected: true });
+  });
+});
+
+describe('admin settings', () => {
+  it('omits google keys, validates, and syncs vpn mode', async () => {
+    const vpn = fakeVpn();
+    const env = setup(vpn);
+    const g = (await env.call(root, 'GET', '/api/admin/settings')).json();
+    expect(g['limits.maxActiveJobsPerUser']).toBe(5);
+    expect(Object.keys(g).some((k) => k.startsWith('google.'))).toBe(false);
+
+    expect((await env.call(root, 'PUT', '/api/admin/settings', { 'limits.maxActiveJobsPerUser': 'many' })).statusCode).toBe(400);
+    expect((await env.call(root, 'PUT', '/api/admin/settings', { 'vpn.rotationMinutes': 0 })).statusCode).toBe(400);
+    expect((await env.call(root, 'PUT', '/api/admin/settings', { 'vpn.mode': 'required' })).statusCode).toBe(409);
+
+    // google keys and activeConfigId are ignored
+    const ignored = await env.call(root, 'PUT', '/api/admin/settings', { 'google.oauthClientSecret': 'x', 'vpn.activeConfigId': 9, 'limits.maxActiveJobsPerUser': 7 });
+    expect(ignored.json()['limits.maxActiveJobsPerUser']).toBe(7);
+    expect(getSetting(env.db, 'google.oauthClientSecret')).toBe('');
+    expect(getSetting(env.db, 'vpn.activeConfigId')).toBeNull();
+
+    await env.call(root, 'POST', '/api/admin/vpn/configs', { name: 'one', config: WG });
+    const ok = await env.call(root, 'PUT', '/api/admin/settings', { 'vpn.mode': 'required' });
+    expect(ok.json()['vpn.mode']).toBe('required');
+    expect(vpn.calls).toContain('mode:required');
+    expect((await env.call(alice, 'PUT', '/api/admin/settings', {})).statusCode).toBe(403);
+  });
+
+  it('ignores vpn.setMode failures', async () => {
+    const env = setup(fakeVpn({ setMode: async () => { throw new Error('x'); } }));
+    await env.call(root, 'POST', '/api/admin/vpn/configs', { name: 'one', config: WG });
+    expect((await env.call(root, 'PUT', '/api/admin/settings', { 'vpn.mode': 'required' })).statusCode).toBe(200);
+  });
+});
