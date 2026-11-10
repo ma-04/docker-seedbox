@@ -24,8 +24,8 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `VPN_URL` | api, worker | `http://vpn:8000` (fixed in compose). |
 | `PORT` | api | `3000` (fixed in compose). |
 | `VPN_DEFAULT_MODE` | vpn | `required` (default, fail closed) or `off`. Mode of the VPN sidecar after every (re)start, until the worker applies the admin's `vpn.mode` (within seconds). |
-| `API_IP`, `WORKER_IP` | compose | Static addresses of `api`/`worker` inside `LAN_CIDRS` (defaults `172.31.250.250`/`.251`). They are the only addresses allowed to use qBittorrent's WebUI without a password; change them together with `LAN_CIDRS`. |
-| `LAN_CIDRS` | vpn, qbittorrent | Subnet of the internal network, default `172.31.250.0/24`. Change it only if it collides with another Docker network or your LAN. |
+| `API_IP`, `WORKER_IP` | compose | Static addresses of `api`/`worker` inside `LAN_CIDRS` (defaults `172.31.250.253`/`.254`). They are the only addresses allowed to use qBittorrent's WebUI without a password; change them together with `LAN_CIDRS`. |
+| `LAN_CIDRS` | vpn, qbittorrent | Subnet of the internal network, default `172.31.250.0/24`. Change it only if it collides with another Docker network or your LAN, and then change `API_IP` and `WORKER_IP` with it (they must be inside it): `./setup.sh` derives all three from `LAN_CIDRS` (edit `LAN_CIDRS` in `deploy/.env`, re-run `./setup.sh`). |
 | `LOG_LEVEL` | all | `info`. |
 
 ### Deployment variables (compose / setup.sh)
@@ -65,7 +65,7 @@ Open **Admin** after logging in as a member of `admins`.
 
 ### VPN
 
-Admin -> VPN: paste or upload one or more WireGuard configs (`wg-quick` format, e.g. from your provider). IPv6 (`::/0`) is stripped from `AllowedIPs`. Set `vpn.mode` to `required` before adding torrents you want protected. The server needs `/dev/net/tun` (check with `./setup.sh doctor`). Rotation switches to the next enabled config.
+Admin -> VPN: paste or upload one or more WireGuard configs (`wg-quick` format, e.g. from your provider). IPv6 (`::/0`) is stripped from `AllowedIPs`. Set `vpn.mode` to `required` before adding torrents you want protected. The server needs a WireGuard-capable kernel (check with `./setup.sh doctor`); no `/dev/net/tun` is required. Rotation switches to the next enabled config.
 
 ### Destinations
 

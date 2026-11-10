@@ -51,11 +51,17 @@ else
   set_key WebUI 'AuthSubnetWhitelistEnabled' true
 fi
 
+# A WebUI password stored by an earlier run/admin would be a credential somebody knows: drop it so the random
+# temporary password (verified in qBittorrent 5.3.0: WebUI::WebUI(tempPasswordHash), src/app/application.cpp)
+# is the only one. A stored Password_PBKDF2 takes precedence over the temporary one (src/webui/webui.cpp).
+awk '!/^Password_PBKDF2=/' "$CONF" > "$CONF.tmp" && cat "$CONF.tmp" > "$CONF" && rm -f "$CONF.tmp"
+
 # Always enforced (the WebUI is only reachable inside the compose network and is never routed by the gateway).
 set_key WebUI 'Address' '*'
 set_key WebUI 'Port' "${QBT_WEBUI_PORT:-8080}"
 set_key WebUI 'AuthSubnetWhitelist' "$TRUSTED"
-# Loopback is shared only with the vpn sidecar (same network namespace); siblings arrive with their own address.
+# Loopback is shared only with the vpn sidecar (same network namespace): siblings arrive with their own address,
+# the tunnel side is dropped by the sidecar's firewall. Keeping it open lets the image HEALTHCHECK work.
 set_key WebUI 'LocalHostAuth' false
 set_key WebUI 'HostHeaderValidation' false
 set_key WebUI 'ServerDomains' '*'
@@ -81,5 +87,7 @@ if ! grep -q 'Session.DefaultSavePath=' "$CONF"; then
 fi
 
 mkdir -p /downloads/incomplete
-chown "$PUID:$PGID" /downloads /downloads/incomplete /config 2>/dev/null || true
+# /config is small and was partly created by this script as root: fix the whole tree. /downloads can be huge: top level only.
+chown -R "$PUID:$PGID" /config 2>/dev/null || true
+chown "$PUID:$PGID" /downloads /downloads/incomplete 2>/dev/null || true
 exec /entrypoint.sh "$@"

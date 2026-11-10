@@ -109,6 +109,8 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
     const dest = getDestination(db, deps.config.appSecret, job.destination_id);
     if (!dest) throw new Error('Destination no longer exists');
     if (torrent.state !== 'downloaded') throw new Error('Downloaded data is no longer available');
+    // A staging dir left by a crashed copy means "not delivered": discard it.
+    if (dest.config.type === 'local') await rm(stagingDir(deps.config.downloadsDir, jobId), { recursive: true, force: true });
     await moving.get(torrent.id); // another local job is moving the data right now
 
     let source: string;
@@ -188,6 +190,9 @@ async function uploadLocal(deps: UploadDeps, job: JobRow, torrent: TorrentRow, s
   const isDir = (await stat(source)).isDirectory();
   const dstPath = isDir ? target : join(target, basename(source)); // single files land inside <target>/
   if (signal.aborted) throw new RcloneAborted();
+  // The data already sits exactly where this job wants it (crash after the rename, or the same user re-added the
+  // same torrent): copying a file onto itself would truncate it.
+  if (resolve(source) === dstPath) return;
 
   const targetExisted = await exists(target);
   const existed = await exists(dstPath);
@@ -215,15 +220,29 @@ async function uploadLocal(deps: UploadDeps, job: JobRow, torrent: TorrentRow, s
     }
   }
 
+  // Copy into a staging dir on the same volume and rename into place only when everything is written, so a crash or
+  // cancel can never leave a partial target that crash recovery would mistake for a delivered job.
+  const staging = stagingDir(config.downloadsDir, job.id);
+  await rm(staging, { recursive: true, force: true });
+  await mkdir(staging, { recursive: true });
+  const staged = join(staging, 'item');
   try {
-    await copyTree(source, dstPath, signal);
+    await copyTree(source, staged, signal);
+    if (signal.aborted) throw new RcloneAborted();
+    if (existed) { // an earlier copy by the same user: swap it out, never merge
+      await rename(dstPath, join(staging, 'old'));
+    }
+    await rename(staged, dstPath);
   } catch (e) {
-    // Do not leave a half-copied folder behind (it would be served as if complete and block a later move).
+    if (existed) await rename(join(staging, 'old'), dstPath).catch(() => undefined); // put the previous copy back
     if (!targetExisted) await rm(target, { recursive: true, force: true }).catch(() => undefined);
-    else if (!existed) await rm(dstPath, { recursive: true, force: true }).catch(() => undefined);
     throw e;
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }
 }
+
+export const stagingDir = (downloadsDir: string, jobId: number): string => resolve(downloadsDir, 'library', '.staging', String(jobId));
 
 /** Recursive copy that stops promptly when `signal` aborts (also in the middle of a large file). */
 async function copyTree(src: string, dst: string, signal: AbortSignal): Promise<void> {

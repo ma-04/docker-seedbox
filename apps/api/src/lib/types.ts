@@ -80,4 +80,4 @@ export interface VpnStatus {
 
 export const now = (): number => Math.floor(Date.now() / 1000);
 /** Lossy by design (`Bob` and `bob` collide): never use it alone as a directory; see userDirName in destinations.ts. */
-export const userSlug = (username: string): string => username.toLowerCase().replace(/[^a-z0-9._-]/g, '_').slice(0, 64) || 'user';
+export const userSlug = (username: string): string => username.toLowerCase().replace(/[^a-z0-9._-]/g, '_').replace(/^\.+/, '_').slice(0, 64) || 'user';

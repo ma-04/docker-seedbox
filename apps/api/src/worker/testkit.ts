@@ -85,7 +85,7 @@ export class FakeVpn implements VpnClient {
     this.status_ = { ...this.status_, connected: true, name, lastHandshakeSec: 1 };
     return this.status_;
   }
-  async disconnect(): Promise<void> { this.disconnects++; }
+  async disconnect(): Promise<void> { this.disconnects++; this.status_ = { ...this.status_, connected: false, name: null, lastHandshakeSec: null }; }
   async setMode(m: 'off' | 'required'): Promise<void> { if (this.fail) throw new Error('unreachable'); this.modes.push(m); this.status_ = { ...this.status_, mode: m }; }
 }
 

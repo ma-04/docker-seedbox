@@ -43,8 +43,10 @@ function isPrivateV4(ip: string): boolean {
 }
 
 export const fallbackEndpointGuard: EndpointGuard = async (url, { allowPrivate }) => {
+  // rclone treats an endpoint without a scheme (`s3.example.com:9000`) as https; check what it will really connect to.
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`;
   let u: URL;
-  try { u = new URL(url); } catch { throw new Error('Invalid endpoint URL'); }
+  try { u = new URL(withScheme); } catch { throw new Error('Invalid endpoint URL'); }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('Endpoint must be an http(s) URL');
   if (allowPrivate) return;
   const host = u.hostname.replace(/^\[|\]$/g, '');

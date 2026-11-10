@@ -219,7 +219,7 @@ a whitelist is the only safe surface. If the engine is unreachable the API answe
 | `VPN_URL` | api, worker | `http://vpn:8000` |
 | `PORT` | api | `3000` |
 | `LAN_CIDRS` | vpn, qbittorrent | compose subnet, default `172.31.250.0/24` |
-| `API_IP`, `WORKER_IP` | compose | static addresses of `api`/`worker` in `LAN_CIDRS` (`172.31.250.250`/`.251`); compose passes them to qbittorrent as `QBT_TRUSTED_IPS` |
+| `API_IP`, `WORKER_IP` | compose | static addresses of `api`/`worker` in `LAN_CIDRS` (`172.31.250.253`/`.254`); compose passes them to qbittorrent as `QBT_TRUSTED_IPS` |
 | `QBT_TRUSTED_IPS` | qbittorrent | comma-separated addresses allowed to use the WebUI without a password (`/32` implied); empty = nobody |
 | `VPN_DEFAULT_MODE` | vpn | `required` (default) \| `off`; mode right after a container start |
 | `LOG_LEVEL` | all | `info` |

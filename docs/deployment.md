@@ -5,7 +5,7 @@
 ## Requirements
 
 - Linux host with Docker Engine and Compose v2 (`docker compose version`).
-- For the VPN: `/dev/net/tun` and a WireGuard-capable kernel (5.6+ has it built in). `./setup.sh doctor` checks both.
+- For the VPN: a WireGuard-capable kernel (5.6+ has it built in; the sidecar needs `NET_ADMIN` but no `/dev/net/tun`). `./setup.sh doctor` checks for the kernel module.
 - Three DNS names. `seedbox.example.com` is used below:
 
 | Record | Purpose |
@@ -127,4 +127,4 @@ The `downloads` volume is transient working space; `qbt-config` holds qBittorren
 
 ## Troubleshooting
 
-`./setup.sh doctor` first. Typical problems: DNS not propagated; ports 80/443 busy (use `external` mode); `/dev/net/tun` missing in an LXC/VPS container; cookie domain not a parent of both hosts; plain-http access in `none` mode.
+`./setup.sh doctor` first. Typical problems: DNS not propagated; ports 80/443 busy (use `external` mode); no WireGuard kernel support in an LXC/VPS container; cookie domain not a parent of both hosts; plain-http access in `none` mode.

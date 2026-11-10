@@ -348,6 +348,51 @@ describe('local destination: a second job for the same torrent', () => {
     expect(existsSync(join(s.config.downloadsDir, 'library', 'bob-2', 'Pack [aaaaaaaa]', 'a.txt'))).toBe(true);
   });
 
+  it('a job whose data already sits at its own target (library_path = target) is not copied onto itself', async () => {
+    const s = setup();
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    const j = addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    const dir = join(s.config.downloadsDir, 'library', 'alice-1', 'Pack [aaaaaaaa]');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'big.bin'), Buffer.alloc(2 * 1024 * 1024, 7)); // >= 1 MiB: would take the truncating stream branch
+    s.db.prepare("UPDATE torrents SET state = 'downloaded', name = 'Pack', library_path = ? WHERE id = ?").run(dir, t);
+    s.db.prepare("UPDATE jobs SET state = 'uploading' WHERE id = ?").run(j);
+    await s.worker.tick(); await s.worker.idle();
+    expect(job(s.db, j).state).toBe('completed');
+    expect(files(s.db, j)).toEqual([{ path: 'big.bin', size: 2 * 1024 * 1024 }]);
+    expect(readFileSync(join(dir, 'big.bin')).length).toBe(2 * 1024 * 1024);
+  });
+
+  it('a crash mid-copy (staging dir left, source gone) is NOT treated as delivered', async () => {
+    const s = setup();
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    const j = addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    writeFiles(join(s.config.downloadsDir, 'library', '.staging', String(j), 'item'), { 'half.bin': 'partial' });
+    s.db.prepare("UPDATE torrents SET state = 'downloaded', name = 'Pack' WHERE id = ?").run(t);
+    s.db.prepare("UPDATE jobs SET state = 'uploading' WHERE id = ?").run(j);
+    await s.worker.tick(); await s.worker.idle();
+    expect(job(s.db, j).state).toBe('failed');
+    expect(existsSync(join(s.config.downloadsDir, 'library', '.staging', String(j)))).toBe(false);
+    expect(existsSync(join(s.config.downloadsDir, 'library', 'alice-1'))).toBe(false);
+  });
+
+  it('copy lands atomically: nothing at the target until complete, staging removed afterwards', async () => {
+    const s = setup();
+    setSetting(s.db, 'seeding.ratio', 1); // force copy
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    const j = addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    writeFiles(join(s.content(H1), 'Pack'), { 'a.txt': 'A', 'd/b.txt': 'B' });
+    await s.worker.tick();
+    s.complete(H1, 'Pack', 2, join(s.content(H1), 'Pack'));
+    await s.worker.tick(); await s.worker.idle();
+    expect(job(s.db, j).state).toBe('completed');
+    expect(readFileSync(join(s.config.downloadsDir, 'library', 'alice-1', 'Pack [aaaaaaaa]', 'd/b.txt'), 'utf8')).toBe('B');
+    expect(existsSync(join(s.config.downloadsDir, 'library', '.staging', String(j)))).toBe(false);
+  });
+
   it('cancelling a running local copy aborts it and removes the partial target', async () => {
     const s = setup({ maxUploads: 2 });
     setSetting(s.db, 'seeding.ratio', 1); // force copy

@@ -49,14 +49,16 @@ export function truncateUtf8(s: string, maxBytes: number): string {
  * no leading dots (hidden/`..`), no trailing dots or spaces (Windows/SMB), at most `maxBytes` UTF-8 bytes.
  */
 export function safeSegment(name: string, maxBytes = MAX_SEGMENT_BYTES): string {
+  // Order matters: trim BEFORE neutralising leading dots, otherwise " .." becomes ".." and escapes the directory.
+  // Bidi/format characters are replaced too (they can disguise a name in listings).
   // eslint-disable-next-line no-control-regex
   let s = name.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '_') // lone surrogates
-    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '_').replace(/[\/\\]/g, '_').replace(/^\.+/, '_').trim();
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/g, '_').replace(/[\/\\]/g, '_')
+    .trim().replace(/^\.+/, '_');
   s = truncateUtf8(s, maxBytes).replace(/[. ]+$/, '');
-  return s === '' ? 'untitled' : s;
+  return s === '' || s === '.' || s === '..' ? 'untitled' : s;
 }
 
-/** Per-user directory on shared destinations: `<slug>-<userId>`; the id makes `Bob`/`bob` and `a b`/`a_b` distinct. */
 export const userDirName = (user: Pick<UserRow, 'id' | 'username'>): string => `${userSlug(user.username)}-${user.id}`;
 
 /** ` [<first 8 hex of the infohash>]`: two different torrents with the same name never share a folder. */
@@ -76,7 +78,9 @@ export function jobDirName(infohash: string, torrentName: string): string {
  */
 export function jobRemoteDir(dest: Pick<DestinationRow, 'owner_user_id'>, user: Pick<UserRow, 'id' | 'username'>, infohash: string, torrentName: string): string {
   const dir = jobDirName(infohash, torrentName);
-  return dest.owner_user_id === null ? `${userDirName(user)}/${dir}` : dir;
+  const out = dest.owner_user_id === null ? `${userDirName(user)}/${dir}` : dir;
+  if (out.split('/').some((seg) => seg === '' || seg === '.' || seg === '..')) throw new Error('Unsafe remote path');
+  return out;
 }
 
 const trimSlashes = (s: string | undefined): string => (s ?? '').replace(/^\/+|\/+$/g, '');

@@ -225,7 +225,7 @@ export class Worker {
       if (!INFOHASH.test(t.infohash)) { this.failTorrent(t, 'Invalid infohash'); continue; }
       try {
         const savePath = await this.addToDownloader(t);
-        db.prepare("UPDATE torrents SET state = 'downloading', save_path = ?, error = NULL, started_at = ?, library_path = NULL WHERE id = ? AND state = 'pending'")
+        db.prepare("UPDATE torrents SET state = 'downloading', save_path = ?, error = NULL, started_at = ?, library_path = NULL, cleanup_pending = 0 WHERE id = ? AND state = 'pending'")
           .run(savePath, this.nowSec(), t.id);
         this.addFailures.delete(t.id);
         this.missingSince.delete(t.id);
@@ -366,7 +366,8 @@ export class Worker {
    */
   private async sweepFailed(): Promise<void> {
     const { db, downloader } = this.d;
-    const rows = db.prepare('SELECT * FROM torrents WHERE cleanup_pending = 1 ORDER BY id').all() as TorrentRow[];
+    // Only errored (or since retired) torrents: a torrent that is pending/downloading again is not ours to delete.
+    const rows = db.prepare("SELECT * FROM torrents WHERE cleanup_pending = 1 AND state IN ('error','removed') ORDER BY id").all() as TorrentRow[];
     for (const t of rows) {
       await this.step(`sweep:${t.id}`, async () => {
         const hasActive = (): boolean => !!db.prepare(`SELECT 1 FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE} LIMIT 1`).get(t.id);
@@ -374,7 +375,7 @@ export class Worker {
         await downloader.remove(t.infohash, true);
         await this.rmData(t);
         db.prepare(
-          `UPDATE torrents SET cleanup_pending = 0 WHERE id = ? AND state = 'error'
+          `UPDATE torrents SET cleanup_pending = 0 WHERE id = ? AND state IN ('error','removed')
              AND NOT EXISTS (SELECT 1 FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE})`,
         ).run(t.id, t.id);
       });

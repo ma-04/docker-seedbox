@@ -34,6 +34,21 @@ describe('safeSegment', () => {
   });
 });
 
+describe('path traversal', () => {
+  it.each([' ..', '..  ', '. .', '../../data', '\u202e..', '.', ' . ', '...'])('name %j never yields a dot segment', (n) => {
+    const seg = safeSegment(n);
+    expect(['.', '..', '']).not.toContain(seg);
+    expect(seg).not.toMatch(/[\\/]/);
+    const dir = jobRemoteDir(shared, { id: 1, username: 'u' }, H, n);
+    for (const part of dir.split('/')) expect(['.', '..', '']).not.toContain(part);
+  });
+  it('username .. cannot yield a dot directory', () => {
+    expect(userSlug('..')).toBe('_');
+    expect(userDirName({ id: 3, username: '..' })).toBe('_-3');
+    expect(jobRemoteDir(shared, { id: 3, username: '..' }, H, 'x').split('/')[0]).toBe('_-3');
+  });
+});
+
 describe('userSlug / user directory', () => {
   it('slug stays lossy, the directory is made unique by the user id', () => {
     expect(userSlug('Bob')).toBe(userSlug('bob'));

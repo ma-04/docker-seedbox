@@ -21,6 +21,12 @@ describe('fallbackEndpointGuard', () => {
     await expect(fallbackEndpointGuard('http://10.0.0.5:9000', { allowPrivate: true })).resolves.toBeUndefined();
   });
 
+  it('scheme-less endpoints are checked as https (what rclone connects to)', async () => {
+    await expect(fallbackEndpointGuard('10.0.0.5:9000', { allowPrivate: false })).rejects.toThrow(/private/);
+    await expect(fallbackEndpointGuard('1.1.1.1:9000', { allowPrivate: false })).resolves.toBeUndefined();
+    await expect(fallbackEndpointGuard('minio:9000', { allowPrivate: true })).resolves.toBeUndefined();
+  });
+
   it('only http(s), valid URLs', async () => {
     await expect(fallbackEndpointGuard('file:///etc/passwd', { allowPrivate: true })).rejects.toThrow(/http/);
     await expect(fallbackEndpointGuard('not a url', { allowPrivate: true })).rejects.toThrow(/Invalid/);

@@ -33,7 +33,7 @@ Commands:
   install (default)   configure, pull/build images and start the stack
   add-user            add an Authelia user (--admin-user NAME --admin-password PW --admin-email MAIL [--group admins])
   update              pull newer images and restart (add --build to rebuild from this clone)
-  doctor              diagnose DNS, containers, /dev/net/tun, WireGuard and disk space
+  doctor              diagnose DNS, containers, the WireGuard kernel module and disk space
 
 Install options (each also readable from the environment as SEEDBOX_<NAME>, e.g. SEEDBOX_DOMAIN):
   --domain DOMAIN        app host, e.g. seedbox.example.com (auth./files. subdomains are derived)
@@ -118,6 +118,17 @@ env_put() { # env_put KEY VALUE : replace the line (or append). Edits in place, 
     { cat "$ENV_FILE"; printf '%s=%s\n' "$k" "$v"; } >"$tmp"
   fi
   cat "$tmp" >"$ENV_FILE"; rm -f "$tmp"
+}
+lan_ips() { # lan_ips CIDR -> "<api ip> <worker ip>" = the last two usable addresses of the subnet (IPv4, /8../29)
+  local cidr=$1 a b c d bits n mask bcast
+  printf '%s' "$cidr" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$' || return 1
+  IFS=. read -r a b c d <<<"${cidr%/*}"; bits=${cidr#*/}
+  [ "$bits" -ge 8 ] && [ "$bits" -le 29 ] || return 1
+  n=$(( (a << 24) | (b << 16) | (c << 8) | d )); mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+  bcast=$(( (n & mask) | (~mask & 0xFFFFFFFF) ))
+  printf '%d.%d.%d.%d %d.%d.%d.%d\n' \
+    $(( ((bcast - 2) >> 24) & 255 )) $(( ((bcast - 2) >> 16) & 255 )) $(( ((bcast - 2) >> 8) & 255 )) $(( (bcast - 2) & 255 )) \
+    $(( ((bcast - 1) >> 24) & 255 )) $(( ((bcast - 1) >> 16) & 255 )) $(( ((bcast - 1) >> 8) & 255 )) $(( (bcast - 1) & 255 ))
 }
 env_ensure() { # env_ensure KEY VALUE : only if currently unset/empty (secrets!)
   [ -n "$(env_get "$1")" ] || env_put "$1" "$2"
@@ -332,6 +343,12 @@ cmd_install() {
   fi
   [ -n "$(env_get SEEDBOX_REGISTRY)" ] || env_put SEEDBOX_REGISTRY ghcr.io/ma-04
   [ -n "$(env_get SEEDBOX_VERSION)" ] || env_put SEEDBOX_VERSION latest
+  # One source of truth: LAN_CIDRS. The static addresses of api/worker (the only ones qBittorrent's WebUI trusts)
+  # must lie inside it, so they are always re-derived from it.
+  local lan lan_api lan_worker
+  lan=$(env_get LAN_CIDRS); lan=${lan:-172.31.250.0/24}
+  read -r lan_api lan_worker < <(lan_ips "$lan") || die "LAN_CIDRS '$lan' is not a valid IPv4 CIDR (/8 to /29)"
+  env_put LAN_CIDRS "$lan"; env_put API_IP "$lan_api"; env_put WORKER_IP "$lan_worker"
 
   # Secrets: generated once, never overwritten.
   env_ensure APP_SECRET "$(gen_hex 32)"
@@ -486,7 +503,7 @@ cmd_doctor() {
   if have curl; then
     local scheme code
     scheme=$(env_get PUBLIC_SCHEME); scheme=${scheme:-https}
-    for h in "$(env_get APP_HOST)" "$(env_get AUTH_HOST)"; do
+    for h in "$(env_get APP_HOST)" "$(env_get AUTH_HOST)" "$(env_get FILES_HOST)"; do
       code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$scheme://$h/healthz" 2>/dev/null || true)
       if [ "$code" = 200 ]; then ok "$scheme://$h/healthz -> 200"; else bad "$scheme://$h/healthz -> ${code:-no response} (DNS, firewall, certificate or proxy mapping?)"; fi
     done
@@ -495,10 +512,11 @@ cmd_doctor() {
   fi
 
   say ""; say "VPN prerequisites"
-  if [ -c /dev/net/tun ]; then ok "/dev/net/tun exists"; else bad "/dev/net/tun missing (modprobe tun; LXC/OpenVZ guests need the device passed through)"; fi
+  # The sidecar uses the kernel's WireGuard through netlink (NET_ADMIN); it needs no /dev/net/tun.
   if [ -d /sys/module/wireguard ]; then ok "WireGuard kernel module loaded/built in"
+  elif have modinfo && modinfo wireguard >/dev/null 2>&1; then ok "WireGuard kernel module available (loads on demand)"
   elif have modprobe && modprobe -n wireguard >/dev/null 2>&1; then ok "WireGuard kernel module available (loads on demand)"
-  else meh "No WireGuard kernel module found (kernel >= 5.6 includes it). Check: sudo modprobe wireguard"; fi
+  else meh "Could not confirm WireGuard kernel support (kernel >= 5.6 includes it; containers/VMs may hide it). If the VPN fails to connect: sudo modprobe wireguard"; fi
 
   say ""; say "Disk"
   local root avail_kb
