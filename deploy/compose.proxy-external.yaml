@@ -1,0 +1,24 @@
+# Proxy mode 2: "external". You already run a reverse proxy.
+#
+#  * nginx-proxy (+ acme-companion): set PROXY_NETWORK to the Docker network it uses; the
+#    VIRTUAL_HOST / LETSENCRYPT_HOST variables below are picked up automatically.
+#  * Traefik / Caddy / anything else: put it on PROXY_NETWORK and point it at gateway:8080
+#    (see docs/deployment.md for labels and a Caddyfile). The nginx-proxy variables are harmless.
+#
+# Selected by setup.sh (COMPOSE_FILE=compose.yaml:compose.proxy-external.yaml).
+
+services:
+  gateway:
+    environment:
+      VIRTUAL_HOST: ${APP_HOST},${AUTH_HOST},${FILES_HOST}
+      VIRTUAL_PORT: "8080"
+      LETSENCRYPT_HOST: ${APP_HOST},${AUTH_HOST},${FILES_HOST}
+      LETSENCRYPT_EMAIL: ${ACME_EMAIL:-}
+    networks:
+      - default
+      - proxy
+
+networks:
+  proxy:
+    name: ${PROXY_NETWORK:?set PROXY_NETWORK to the network of your reverse proxy}
+    external: true

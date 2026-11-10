@@ -1,0 +1,84 @@
+name: Release images
+
+# Publishes the five images to GHCR as ghcr.io/<owner>/docker-seedbox-<name>:
+#   push to main  -> :latest, :edge, :sha-<short>
+#   tag vX.Y.Z    -> :X.Y.Z, :X.Y, :X
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write       # provenance / attestation
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: api, context: ., file: apps/api/Dockerfile }
+          - { image: web, context: ., file: apps/web/Dockerfile }
+          - { image: gateway, context: services/gateway, file: services/gateway/Dockerfile }
+          - { image: vpn, context: services/vpn, file: services/vpn/Dockerfile }
+          - { image: qbittorrent, context: services/qbittorrent, file: services/qbittorrent/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lower-case image name
+        id: name
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/docker-seedbox-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.ref }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=sha,prefix=sha-,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+          labels: |
+            org.opencontainers.image.licenses=AGPL-3.0-only
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.name.outputs.ref }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  compose:
+    name: Validate compose files and scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck
+        run: shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh
+      - name: docker compose config (every proxy mode)
+        working-directory: deploy
+        env:
+          APP_HOST: seedbox.example.com
+          AUTH_HOST: auth.seedbox.example.com
+          FILES_HOST: files.seedbox.example.com
+          COOKIE_DOMAIN: seedbox.example.com
+          APP_SECRET: ci
+          GATEWAY_SECRET: ci
+          VPN_CONTROL_TOKEN: ci
+          AUTHELIA_SESSION_SECRET: ci
+          AUTHELIA_STORAGE_ENCRYPTION_KEY: ci
+          AUTHELIA_JWT_SECRET: ci
+          PROXY_NETWORK: proxy
+          COMPOSE_PROFILES: authelia
+        run: |
+          for mode in bundled external none; do
+            COMPOSE_FILE="compose.yaml:compose.proxy-$mode.yaml" docker compose config -q
+          done
+      - name: setup.sh non-interactive smoke test
+        run: |
+          ./setup.sh --domain seedbox.example.com --admin-email admin@example.com \
+            --proxy none --yes --no-start
+          test -s deploy/authelia/users/users_database.yml
+          test "$(stat -c %a deploy/.env)" = 600
+
+  images:
+    name: Build ${{ matrix.image }} image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: api, context: ., file: apps/api/Dockerfile }
+          - { image: web, context: ., file: apps/web/Dockerfile }
+          - { image: gateway, context: services/gateway, file: services/gateway/Dockerfile }
+          - { image: vpn, context: services/vpn, file: services/vpn/Dockerfile }
+          - { image: qbittorrent, context: services/qbittorrent, file: services/qbittorrent/Dockerfile }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max

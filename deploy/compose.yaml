@@ -1,0 +1,192 @@
+# docker-seedbox - main stack. Normally driven by ./setup.sh, which writes deploy/.env
+# (including COMPOSE_FILE, which selects the reverse-proxy override), so from this directory:
+#
+#   docker compose up -d
+#
+# Images: pre-built from GHCR by default; `docker compose build` builds them from this clone.
+# Docs: docs/deployment.md, docs/configuration.md
+
+name: seedbox   # override with COMPOSE_PROJECT_NAME
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-app-env: &app-env
+  APP_SECRET: ${APP_SECRET:?run ./setup.sh to generate secrets}
+  GATEWAY_SECRET: ${GATEWAY_SECRET:?run ./setup.sh to generate secrets}
+  VPN_CONTROL_TOKEN: ${VPN_CONTROL_TOKEN:?run ./setup.sh to generate secrets}
+  APP_HOST: ${APP_HOST:?APP_HOST is required}
+  AUTH_HOST: ${AUTH_HOST:?AUTH_HOST is required}
+  FILES_HOST: ${FILES_HOST:?FILES_HOST is required}
+  PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
+  ADMIN_GROUP: ${ADMIN_GROUP:-admins}
+  DATA_DIR: /data
+  DOWNLOADS_DIR: /downloads
+  QBT_URL: http://vpn:8080
+  VPN_URL: http://vpn:8000
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  # ---------------------------------------------------------------- gateway
+  # The only entrypoint. Routes by Host, enforces login, serves local downloads.
+  # The proxy override file (compose.proxy-*.yaml) decides how it is exposed.
+  gateway:
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-gateway:${SEEDBOX_VERSION:-latest}
+    build: { context: ../services/gateway }
+    restart: unless-stopped
+    environment:
+      AUTH_MODE: ${AUTH_MODE:-authelia}
+      APP_HOST: ${APP_HOST:?APP_HOST is required}
+      AUTH_HOST: ${AUTH_HOST:?AUTH_HOST is required}
+      FILES_HOST: ${FILES_HOST:?FILES_HOST is required}
+      GATEWAY_SECRET: ${GATEWAY_SECRET:?run ./setup.sh to generate secrets}
+    volumes:
+      - downloads:/downloads:ro
+    read_only: true
+    tmpfs:
+      - /tmp:uid=101,gid=101
+      - /etc/nginx/conf.d:uid=101,gid=101
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    depends_on:
+      api: { condition: service_healthy }
+      web: { condition: service_healthy }
+    logging: *logging
+
+  # ---------------------------------------------------------------- authelia
+  # Login portal (AUTH_MODE=authelia). Not started when COMPOSE_PROFILES lacks "authelia".
+  authelia:
+    image: authelia/authelia:4.39.28
+    profiles: ["authelia"]
+    restart: unless-stopped
+    environment:
+      X_AUTHELIA_CONFIG_FILTERS: template
+      APP_HOST: ${APP_HOST:?APP_HOST is required}
+      AUTH_HOST: ${AUTH_HOST:?AUTH_HOST is required}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:?COOKIE_DOMAIN is required}
+      AUTH_POLICY: ${AUTH_POLICY:-one_factor}
+      AUTHELIA_SESSION_SECRET: ${AUTHELIA_SESSION_SECRET:?run ./setup.sh to generate secrets}
+      AUTHELIA_STORAGE_ENCRYPTION_KEY: ${AUTHELIA_STORAGE_ENCRYPTION_KEY:?run ./setup.sh to generate secrets}
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET: ${AUTHELIA_JWT_SECRET:?run ./setup.sh to generate secrets}
+    volumes:
+      - ./authelia/configuration.yml:/config/configuration.yml:ro
+      - ./authelia/users:/users          # users_database.yml lives here (setup.sh add-user)
+      - authelia:/data                   # SQLite + notification.txt
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+
+  # ---------------------------------------------------------------- web
+  web:
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-web:${SEEDBOX_VERSION:-latest}
+    build: { context: .., dockerfile: apps/web/Dockerfile }
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:uid=101,gid=101"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    logging: *logging
+
+  # ---------------------------------------------------------------- api
+  api:
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-api:${SEEDBOX_VERSION:-latest}
+    build: { context: .., dockerfile: apps/api/Dockerfile }
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      PORT: "3000"
+    volumes:
+      - data:/data
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      # /api/health needs the gateway secret like every other request.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health',{headers:{'x-gateway-secret':process.env.GATEWAY_SECRET}}).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+
+  # ---------------------------------------------------------------- worker
+  # Same image as api; drives qBittorrent, runs rclone uploads, rotates the VPN.
+  worker:
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-api:${SEEDBOX_VERSION:-latest}
+    build: { context: .., dockerfile: apps/api/Dockerfile }
+    command: ["node", "dist/worker.js"]
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+    volumes:
+      - data:/data
+      - downloads:/downloads
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    depends_on:
+      api: { condition: service_healthy }
+      qbittorrent: { condition: service_healthy }
+    logging: *logging
+
+  # ================================================================ BEGIN vpn
+  # Owned by services/vpn - keep in sync with that image's requirements.
+  # WireGuard client + kill switch + control API; owns the network namespace of qbittorrent.
+  vpn:
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-vpn:${SEEDBOX_VERSION:-latest}
+    build: { context: ../services/vpn }
+    restart: unless-stopped
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: "1"
+    environment:
+      VPN_CONTROL_TOKEN: ${VPN_CONTROL_TOKEN:?run ./setup.sh to generate secrets}
+      LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --header \"Authorization: Bearer $$VPN_CONTROL_TOKEN\" http://127.0.0.1:8000/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *logging
+  # ================================================================ END vpn
+
+  # ================================================================ BEGIN qbittorrent
+  # Owned by services/qbittorrent (wraps the official qbittorrent-nox image).
+  # Shares the vpn container's network namespace: no VPN, no traffic.
+  qbittorrent:
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-qbittorrent:${SEEDBOX_VERSION:-latest}
+    build: { context: ../services/qbittorrent }
+    restart: unless-stopped
+    network_mode: service:vpn
+    environment:
+      LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
+    volumes:
+      - qbt-config:/config
+      - downloads:/downloads
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      vpn: { condition: service_healthy, restart: true }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+  # ================================================================ END qbittorrent
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${LAN_CIDRS:-172.31.250.0/24}
+
+volumes:
+  data:
+  downloads:
+  authelia:
+  qbt-config:
