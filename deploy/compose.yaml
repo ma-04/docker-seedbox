@@ -26,8 +26,33 @@ x-app-env: &app-env
   QBT_URL: http://vpn:8080
   VPN_URL: http://vpn:8000
   LOG_LEVEL: ${LOG_LEVEL:-info}
+  HOME: /tmp          # rclone cache dir; the root filesystem is read-only
 
 services:
+  # ---------------------------------------------------------------- init
+  # One-shot, root: makes the named volumes writable by the unprivileged (uid 1000) services on
+  # first start, whichever container happens to touch a volume first. `library` is world-readable
+  # (the gateway runs as nginx, uid 101, and serves it read-only).
+  init:
+    image: busybox:1.37
+    restart: "no"
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        mkdir -p /downloads/incomplete /downloads/library
+        chown 1000:1000 /data /downloads /downloads/incomplete /downloads/library
+        chmod 755 /downloads /downloads/library
+    volumes:
+      - data:/data
+      - downloads:/downloads
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+
   # ---------------------------------------------------------------- gateway
   # The only entrypoint. Routes by Host, enforces login, serves local downloads.
   # The proxy override file (compose.proxy-*.yaml) decides how it is exposed.
@@ -97,10 +122,16 @@ services:
       PORT: "3000"
     volumes:
       - data:/data
+      - downloads:/downloads            # only for the local-destination "Test" (mkdir + write probe in library/)
     read_only: true
-    tmpfs: ["/tmp"]
+    tmpfs: ["/tmp:uid=1000,gid=1000"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
+    depends_on:
+      init: { condition: service_completed_successfully }
+    networks:
+      default:
+        ipv4_address: ${API_IP:-172.31.250.3}      # static: qBittorrent's WebUI trusts these addresses
     healthcheck:
       # /api/health needs the gateway secret like every other request.
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health',{headers:{'x-gateway-secret':process.env.GATEWAY_SECRET}}).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
@@ -122,41 +153,50 @@ services:
     volumes:
       - data:/data
       - downloads:/downloads
+    read_only: true
+    tmpfs: ["/tmp:uid=1000,gid=1000"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
+    networks:
+      default:
+        ipv4_address: ${WORKER_IP:-172.31.250.4}
     depends_on:
+      init: { condition: service_completed_successfully }
       api: { condition: service_healthy }
       qbittorrent: { condition: service_healthy }
     logging: *logging
 
   # ================================================================ BEGIN vpn
-  # Owned by services/vpn - keep in sync with that image's requirements.
+  # Owned by services/vpn (see its README) - keep in sync with that image's requirements.
   # WireGuard client + kill switch + control API; owns the network namespace of qbittorrent.
   vpn:
     image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-vpn:${SEEDBOX_VERSION:-latest}
     build: { context: ../services/vpn }
     restart: unless-stopped
-    cap_add: [NET_ADMIN]
-    devices: ["/dev/net/tun:/dev/net/tun"]
+    cap_add: [NET_ADMIN]              # the only privilege needed (kernel WireGuard, Linux >= 5.6)
     sysctls:
-      net.ipv4.conf.all.src_valid_mark: "1"
+      net.ipv6.conf.all.disable_ipv6: "1"
     environment:
       VPN_CONTROL_TOKEN: ${VPN_CONTROL_TOKEN:?run ./setup.sh to generate secrets}
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
+      VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-off}   # "required" = fail closed after restarts
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    tmpfs: ["/tmp"]                   # not read_only: /etc/resolv.conf must stay writable
     security_opt: ["no-new-privileges:true"]
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null --header \"Authorization: Bearer $$VPN_CONTROL_TOKEN\" http://127.0.0.1:8000/status"]
-      interval: 15s
+    networks:
+      default:
+        ipv4_address: ${VPN_IPV4:-172.31.250.2}   # static, inside LAN_CIDRS (the kill switch allows that subnet)
+    healthcheck:                      # also built into the image; shown for completeness
+      test: ["CMD", "/usr/local/bin/vpn-control", "healthcheck"]
+      interval: 5s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 3
     logging: *logging
   # ================================================================ END vpn
 
   # ================================================================ BEGIN qbittorrent
   # Owned by services/qbittorrent (wraps the official qbittorrent-nox image).
-  # Shares the vpn container's network namespace: no VPN, no traffic.
+  # Shares the vpn container's network namespace: no VPN, no traffic. No ports, no networks.
   qbittorrent:
     image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-qbittorrent:${SEEDBOX_VERSION:-latest}
     build: { context: ../services/qbittorrent }
@@ -169,10 +209,13 @@ services:
       - downloads:/downloads
     security_opt: ["no-new-privileges:true"]
     depends_on:
-      vpn: { condition: service_healthy, restart: true }
+      init: { condition: service_completed_successfully }
+      vpn:
+        condition: service_healthy
+        restart: true                 # re-attach to the new namespace when vpn is recreated/restarted
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
-      interval: 15s
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8080/api/v2/app/version"]
+      interval: 10s
       timeout: 5s
       retries: 5
       start_period: 20s
@@ -184,6 +227,7 @@ networks:
     ipam:
       config:
         - subnet: ${LAN_CIDRS:-172.31.250.0/24}
+          ip_range: ${LAN_IP_RANGE:-172.31.250.128/25}   # dynamic addresses; the low half is reserved for vpn/api/worker
 
 volumes:
   data:

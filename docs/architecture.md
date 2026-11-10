@@ -19,7 +19,7 @@ This file is the contract between components. Change it before changing an inter
 | `qbittorrent` | `qbittorrentofficial/qbittorrent-nox` | Torrent engine, `network_mode: service:vpn`. | none |
 | `apps/drive-proxy` | Cloudflare Worker (not in compose) | Signed-URL download proxy for the shared Google Drive. | — |
 
-Volumes: `data` (SQLite, api+worker), `downloads` (qbittorrent+worker rw, gateway ro),
+Volumes: `data` (SQLite, api+worker), `downloads` (qbittorrent+worker+api rw, gateway ro; the api only writes a probe file for the local-destination test),
 `authelia`, `qbt-config`. No container mounts the Docker socket. Nothing but `gateway`
 is reachable from outside the compose network.
 

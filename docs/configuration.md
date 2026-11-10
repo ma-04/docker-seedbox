@@ -24,6 +24,8 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `VPN_URL` | api, worker | `http://vpn:8000` (fixed in compose). |
 | `PORT` | api | `3000` (fixed in compose). |
 | `LAN_CIDRS` | vpn, qbittorrent | Subnet of the internal network, default `172.31.250.0/24`. Change it only if it collides with another Docker network or your LAN. |
+| `LAN_IP_RANGE`, `VPN_IPV4`, `API_IP`, `WORKER_IP` | compose | Fixed addresses for `vpn`/`api`/`worker` (defaults `.2`/`.3`/`.4` of the default subnet); other containers get addresses from `LAN_IP_RANGE` (default `172.31.250.128/25`). If you change `LAN_CIDRS`, change all four together. |
+| `VPN_DEFAULT_MODE` | vpn | `off` (default) or `required`: the sidecar's mode right after a container start; the worker re-applies the admin's `vpn.mode`. |
 | `LOG_LEVEL` | all | `info`. |
 
 ### Deployment variables (compose / setup.sh)
