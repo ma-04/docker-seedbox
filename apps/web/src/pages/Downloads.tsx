@@ -6,6 +6,8 @@ import { endpoints, type JobDto } from '../lib/api';
 import { formatAge, formatBytes, formatSpeed } from '../lib/format';
 import { useDestinations } from '../lib/hooks';
 import { safeHttpUrl } from '../lib/url';
+import { BrowserIntegration } from '../components/BrowserIntegration';
+import { clearPendingIncoming, peekPendingIncoming } from '../lib/magnet';
 import { displayName, filterJobs, isActive, mergeJob, type JobFilter } from '../lib/jobs';
 
 const FILTERS: { id: JobFilter; label: string }[] = [
@@ -40,10 +42,24 @@ function AddForm() {
   const [destId, setDestId] = useState<number | null>(null);
   const [drag, setDrag] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const destRef = useRef<HTMLSelectElement>(null);
+  // A magnet handed over by /add (browser protocol handler). Pre-filled only, never submitted automatically.
+  const [incoming] = useState(peekPendingIncoming);
+  const [prefillDone, setPrefillDone] = useState(false);
+  const [notice, setNotice] = useState(incoming?.magnet ? { name: incoming.magnet.name, infohash: incoming.magnet.infohash } : null);
+
+  useEffect(() => { clearPendingIncoming(); }, []);
+  useEffect(() => { if (incoming?.magnet) setMagnet(incoming.magnet.uri); }, [incoming]);
 
   useEffect(() => {
-    if (destId === null && options.length) setDestId((options.find((d) => d.isDefault) ?? options[0])!.id);
-  }, [options, destId]);
+    if (!options.length) return;
+    if (incoming?.magnet && !prefillDone) {
+      const wanted = incoming.destinationId !== null ? options.find((d) => d.id === incoming.destinationId) : undefined;
+      setDestId((wanted ?? options.find((d) => d.isDefault) ?? options[0])!.id);
+      setPrefillDone(true);
+      destRef.current?.focus();
+    } else if (destId === null) setDestId((options.find((d) => d.isDefault) ?? options[0])!.id);
+  }, [options, destId, incoming, prefillDone]);
 
   const add = useMutation({
     mutationFn: () => {
@@ -54,7 +70,7 @@ function AddForm() {
     },
     onSuccess: (job) => {
       qc.setQueryData<JobDto[]>(['jobs'], (old) => mergeJob(old, job));
-      setMagnet(''); setFile(null);
+      setMagnet(''); setFile(null); setNotice(null);
       if (fileRef.current) fileRef.current.value = '';
       toast('ok', 'Download added');
     },
@@ -71,9 +87,15 @@ function AddForm() {
     <form data-testid="add-form" onSubmit={submit} className="card mb-6 space-y-3" aria-label="Add torrent"
       onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)} onDrop={onDrop}>
       <h2 className="text-base font-semibold">Add a torrent</h2>
+      {incoming?.error && <div data-testid="magnet-error"><ErrorNote error={new Error(incoming.error)} /></div>}
+      {notice && (
+        <p data-testid="magnet-prefill" role="status" className="rounded-md bg-brand-100 px-3 py-2 text-sm text-brand-700 dark:bg-brand-700/30 dark:text-brand-100">
+          Magnet link received from your browser{notice.name ? <>: <strong data-testid="magnet-prefill-name">{notice.name}</strong></> : ''}. Check it, pick a destination and press Add download.
+        </p>
+      )}
       <div className={cx('grid gap-3 md:grid-cols-2', drag && 'rounded-md outline outline-2 outline-dashed outline-brand-500')}>
         <Field label="Magnet link" hint="Paste a magnet: link.">
-          {(id) => <textarea id={id} data-testid="magnet-input" rows={3} className="input font-mono" placeholder="magnet:?xt=urn:btih:..." value={magnet} onChange={(e) => setMagnet(e.target.value)} />}
+          {(id) => <textarea id={id} data-testid="magnet-input" rows={3} className="input font-mono" placeholder="magnet:?xt=urn:btih:..." value={magnet} onChange={(e) => { setMagnet(e.target.value); setNotice(null); }} />}
         </Field>
         <Field label="Torrent file" hint={file ? `Selected: ${file.name}` : 'Choose or drop a .torrent file here.'}>
           {(id) => (
@@ -87,7 +109,7 @@ function AddForm() {
         <div className="min-w-[12rem] flex-1 md:max-w-xs">
           <Field label="Destination">
             {(id) => (
-              <select id={id} data-testid="destination-select" className="input" value={destId ?? ''} onChange={(e) => setDestId(Number(e.target.value))} disabled={!options.length}>
+              <select id={id} ref={destRef} data-testid="destination-select" className="input" value={destId ?? ''} onChange={(e) => setDestId(Number(e.target.value))} disabled={!options.length}>
                 {options.map((d) => <option key={d.id} value={d.id}>{d.name}{d.shared ? ' (shared)' : ''}</option>)}
               </select>
             )}
@@ -197,6 +219,7 @@ export default function Downloads() {
     <>
       <PageHeader title="Downloads" />
       <AddForm />
+      <BrowserIntegration />
       <div role="tablist" aria-label="Filter downloads" className="mb-3 flex gap-1">
         {FILTERS.map((f) => (
           <button key={f.id} role="tab" type="button" aria-selected={filter === f.id} onClick={() => setFilter(f.id)}

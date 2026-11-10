@@ -95,3 +95,13 @@ Admin -> Destinations creates shared destinations visible to every user. Files l
 *Backblaze B2 via its S3 API:* create a bucket, then an Application Key limited to that bucket (read/write). Use endpoint `https://s3.<region>.backblazeb2.com` (the region, e.g. `us-west-004`, is shown with the bucket's endpoint), the key's `keyID` as access key id and `applicationKey` as secret. B2 presigned links are valid for at most 7 days. Tip: use a dedicated bucket or prefix for the seedbox so lifecycle rules cannot touch your other data.
 
 **Local folder.** Stored in the `downloads` volume under `library/` and served by the gateway at `https://FILES_HOST/dl/<path>?exp=&sig=` with Range support. `publicBaseUrl` defaults to `https://FILES_HOST`; `linkTtlSeconds` of 0 never expires. This uses the server's disk, so mind `limits.minFreeDiskBytes`. To keep files outside Docker volumes, replace the `downloads` named volume with a bind mount in a `compose.override.yaml` (the gateway reads it as uid 101, so it must be world-readable).
+
+## Browser integration
+
+The Downloads page can register the app as your browser's handler for `magnet:` links, so clicking a magnet link on any site opens the seedbox with the form pre-filled.
+
+- **Enable.** Open Downloads and press "Open magnet links with this app" (a banner the first time, a small "Browser integration" link afterwards; use it to re-register). The browser asks you to confirm. This needs HTTPS (a secure context) and the same origin as the app, which the standard deployment provides.
+- **Chrome / Edge / Firefox (desktop).** A prompt appears at the address bar; choose Allow/Add. Remove or change it in the browser settings: Chrome and Edge `Settings -> Privacy and security -> Site settings -> Additional permissions -> Protocol handlers`; Firefox `Settings -> General -> Applications` (the `magnet` row).
+- **Installed PWA.** The app ships a web manifest with a `magnet` protocol handler, so a Chromium browser that has the app installed ("Install docker-seedbox") also offers it for magnet links.
+- **Safari and some mobile browsers** do not support this API; the page hides the button and shows a hint. Paste the link into the form instead.
+- **Safety.** A magnet link only pre-fills the form (after validating it) and never starts a download by itself: you review it and press "Add download". If you are logged out, you are sent to the login page first and returned to the same link afterwards. Browsers cannot report whether the handler is registered, so the page only remembers (in `localStorage`) that you registered or dismissed the banner.

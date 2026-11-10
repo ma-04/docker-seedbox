@@ -13,6 +13,7 @@ A self-hosted, multi-user **torrent-to-cloud seedbox** in a handful of container
 - **VPN**: WireGuard sidecar with a kill switch; upload several configs and rotate manually, on an interval, or on failure. qBittorrent shares the VPN's network namespace, so no tunnel means no traffic.
 - **Limits**: active jobs per user, maximum torrent size, minimum free disk, seeding ratio.
 - **Live progress** in the browser (server-sent events).
+- **Magnet links**: optionally register the app as your browser's `magnet:` handler (Chrome, Edge, Firefox; installed PWA); links pre-fill the add form and are never started automatically. See [Browser integration](docs/configuration.md#browser-integration).
 - **Small attack surface**: one entry point (the gateway), no Docker socket mounts in the app stack, secrets encrypted at rest, signed download links.
 - **Reuses open source**: Authelia, nginx, nginx-proxy + acme-companion, qBittorrent, rclone, WireGuard.
 

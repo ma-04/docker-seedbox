@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <!-- use-credentials: the manifest sits behind the login, so the request must carry the session cookie -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
     <title>docker-seedbox</title>
   </head>
   <body>

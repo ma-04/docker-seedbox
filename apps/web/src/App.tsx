@@ -7,6 +7,7 @@ import AdminSettings from './pages/admin/AdminSettings';
 import AdminUsers from './pages/admin/AdminUsers';
 import AdminVpn from './pages/admin/AdminVpn';
 import Downloads from './pages/Downloads';
+import AddHandler from './pages/AddHandler';
 import Storage from './pages/Storage';
 import type { MeDto } from './lib/api';
 
@@ -62,6 +63,7 @@ export default function App() {
     <Routes>
       <Route element={<Layout me={me.data} />}>
         <Route index element={<Downloads />} />
+        <Route path="add" element={<AddHandler />} />
         <Route path="storage" element={<Storage />} />
         <Route path="admin">
           <Route index element={<Navigate to={isAdmin ? 'destinations' : '/'} replace />} />
