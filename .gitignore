@@ -1,0 +1,15 @@
+credentials/
+.env
+.env.*
+!.env.example
+.DS_Store
+node_modules/
+dist/
+*.db
+*.db-*
+.wrangler/
+.dev.vars
+playwright-report/
+test-results/
+deploy/**/secrets/
+*.local.env
