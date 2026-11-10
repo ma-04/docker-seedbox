@@ -37,6 +37,42 @@ test.describe('9. admin', () => {
     await close();
   });
 
+  test('random listen port round-trips through qBittorrent (listen_port 0) and can be switched off again', async ({ browser }, testInfo) => {
+    const { page, close } = await userPage(browser, testInfo, 'admin');
+    await page.getByRole('link', { name: 'Settings' }).click();
+    const open = async () => {
+      const details = page.getByTestId('engine-settings');
+      if (!(await details.evaluate((d) => (d as HTMLDetailsElement).open))) await details.locator('summary').click();
+      return details.getByRole('form', { name: 'Torrent engine settings' });
+    };
+    let form = await open();
+    const random = form.getByLabel('Use a random listen port');
+    const port = form.getByLabel('Listen port (1024-65535)');
+    if (await random.isChecked()) { await random.uncheck(); await form.getByTestId('engine-save').click(); await expect(page.getByText('Engine settings saved')).toBeVisible(); }
+    await expect(port).toBeEnabled();
+
+    await random.check();
+    await expect(port).toBeDisabled();
+    await form.getByTestId('engine-save').click();
+    await expect(page.getByText('Engine settings saved')).toBeVisible();
+    await expect.poll(async () => (await qbtPreferences()).listen_port).toBe(0);
+    expect((await api(page, 'GET', '/api/admin/engine/settings')).json).toMatchObject({ randomPort: true, listenPort: 0 });
+
+    await page.reload();
+    form = await open();
+    await expect(form.getByLabel('Use a random listen port')).toBeChecked();
+    await expect(form.getByLabel('Listen port (1024-65535)')).toBeDisabled();
+
+    await form.getByLabel('Use a random listen port').uncheck();
+    await expect(form.getByLabel('Listen port (1024-65535)')).toBeEnabled();
+    await expect(form.getByLabel('Listen port (1024-65535)')).toHaveValue('6881');
+    await form.getByTestId('engine-save').click();
+    await expect(page.getByText('Engine settings saved')).toBeVisible();
+    await expect.poll(async () => (await qbtPreferences()).listen_port).toBe(6881);
+    expect((await api(page, 'GET', '/api/admin/engine/settings')).json).toMatchObject({ randomPort: false, listenPort: 6881 });
+    await close();
+  });
+
   test('a disabled user is blocked and can be re-enabled', async ({ browser }, testInfo) => {
     const admin = await userPage(browser, testInfo, 'admin');
     const carol = await userPage(browser, testInfo, 'carol');

@@ -33,6 +33,30 @@ http.createServer(async (req, res) => {
       }
       return send(200, { ok: true });
     }
+    // POST /stop | /start {"services": ["worker"]} : pause the worker so a test can observe the sidecar before it reconciles.
+    if (req.method === 'POST' && (url.pathname === '/stop' || url.pathname === '/start')) {
+      const { services } = JSON.parse((await readBody(req)) || '{}');
+      if (!Array.isArray(services) || !services.length || !services.every((s) => s === 'worker')) return send(400, { error: 'bad services' });
+      for (const s of services) {
+        const r = await sh([url.pathname.slice(1), await container(s)]);
+        if (!r.ok) return send(500, { error: r.stderr });
+      }
+      return send(200, { ok: true });
+    }
+    // GET /webui : qBittorrent's WebUI API as seen by an ordinary container on the compose network (this one is
+    // neither api nor worker, so it is not in QBT_TRUSTED_IPS). Fixed paths only.
+    if (req.method === 'GET' && url.pathname === '/webui') {
+      const path = url.searchParams.get('path') ?? '';
+      if (!['/api/v2/app/version', '/api/v2/torrents/info', '/api/v2/app/preferences'].includes(path)) return send(400, { error: 'bad path' });
+      const r = await new Promise((resolve) => {
+        const q = http.get({ host: 'vpn', port: 8080, path, timeout: 8000 }, (res) => {
+          let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ reachable: true, status: res.statusCode, body: b.slice(0, 200) }));
+        });
+        q.on('timeout', () => q.destroy(new Error('timeout')));
+        q.on('error', (e) => resolve({ reachable: false, status: 0, body: '', error: String(e.message) }));
+      });
+      return send(200, r);
+    }
     // GET /probe?url=http://host/ : curl from inside the qbittorrent container (uid 1000, the vpn namespace).
     if (req.method === 'GET' && url.pathname === '/probe') {
       const target = url.searchParams.get('url') ?? '';

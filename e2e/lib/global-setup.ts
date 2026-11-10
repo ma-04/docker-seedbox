@@ -45,6 +45,7 @@ async function resetState(admin: import('@playwright/test').Page): Promise<void>
   for (const c of (await api(admin, 'GET', '/api/admin/vpn/configs')).json as { id: number }[]) await api(admin, 'DELETE', `/api/admin/vpn/configs/${c.id}`);
   await api(admin, 'PUT', '/api/admin/settings', {
     'vpn.mode': 'off', 'vpn.rotation': 'manual', 'limits.maxActiveJobsPerUser': 5, 'limits.maxTorrentBytes': 0, 'seeding.ratio': 0,
+    'seeding.maxMinutes': 0, 'cleanup.failedGraceMinutes': 60, 'limits.metadataTimeoutMinutes': 30,
   });
   for (let pass = 0; pass < 2; pass++) { // first pass cancels live jobs, second deletes them
     for (const j of (await api(admin, 'GET', '/api/admin/jobs')).json as { id: number }[]) await api(admin, 'DELETE', `/api/admin/jobs/${j.id}`);

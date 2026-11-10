@@ -61,5 +61,7 @@ UI; `03-local-download` upload `.torrent` -> live progress -> files -> sha256 / 
 text leaks; `09-admin` engine settings read back from qBittorrent, disabling a user; `10-restart` restart of
 worker+api, and of vpn+qbittorrent, mid-download.
 
-`01-auth` contains one `test.fixme` for the percent-encoded admin path (`/api/%61dmin/...`); set
-`E2E_ADMIN_BYPASS_FIXED=1` once the authorisation fix is merged.
+`11-hardening` SSRF (a normal user cannot create an S3 destination on `vpn`, a private or a metadata address), CSRF
+header (`X-Requested-With: seedbox`), local `/dl` links revoked when the job is deleted, qBittorrent WebUI refused to
+ordinary containers (`ctl /webui`), and the kill switch holding after a sidecar restart while the worker is stopped
+(`ctl /stop`, `/start`).

@@ -61,7 +61,6 @@ test.describe('1. authentication', () => {
   });
 
   test('percent-encoded admin path does not bypass authorisation', async ({ browser }, testInfo) => {
-    test.fixme(!process.env.E2E_ADMIN_BYPASS_FIXED, 'known bypass /api/%61dmin/...; un-fixme once the authorisation fix PR is merged (set E2E_ADMIN_BYPASS_FIXED=1)');
     const { context, close } = await userPage(browser, testInfo, 'alice');
     const cookie = (await context.cookies()).filter((c) => c.domain.endsWith('seedbox.test')).map((c) => `${c.name}=${c.value}`).join('; ');
     for (const p of ['/api/%61dmin/users', '/api/admin%2Fusers', '/api/%41dmin/users']) {

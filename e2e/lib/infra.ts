@@ -61,3 +61,9 @@ export async function qbtPreferences(): Promise<Record<string, any>> {
   if (!p.reachable || p.status !== 200) throw new Error(`qbt unreachable: ${p.error || p.status}`);
   return JSON.parse(p.body);
 }
+
+/** Pause / resume the worker container (to observe the sidecar before the worker reconciles it). */
+export const stopWorker = (): Promise<void> => ctl('/stop', { method: 'POST', body: { services: ['worker'] } });
+export const startWorker = (): Promise<void> => ctl('/start', { method: 'POST', body: { services: ['worker'] } });
+/** qBittorrent's WebUI API requested by a container that is neither api nor worker. */
+export const webuiFromSibling = (path: string): Promise<Probe> => ctl(`/webui?path=${encodeURIComponent(path)}`);
