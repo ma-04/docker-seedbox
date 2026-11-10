@@ -1,7 +1,9 @@
 /** Deliver a downloaded torrent's files to a job's destination (rclone for gdrive/s3, filesystem for local). */
 import type { Logger } from 'pino';
-import { cp, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { copyFile, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import type { Config } from '../lib/config.js';
 import type { Db } from '../lib/db.js';
 import { fullRemotePath, getDestination, jobRemoteDir } from '../lib/destinations.js';
@@ -9,7 +11,10 @@ import * as gdriveLib from '../lib/gdrive.js';
 import { getSetting } from '../lib/settings.js';
 import { now, type GDriveConfig, type JobRow, type TorrentRow, type UserRow } from '../lib/types.js';
 import type { Downloader } from '../downloaders/types.js';
+import { fallbackEndpointGuard, type EndpointGuard } from './netguard-fallback.js';
 import { buildRcloneCommand, redact, runRclone, RcloneAborted, type RcloneProc, type SpawnFn } from './rclone.js';
+
+export type { EndpointGuard };
 
 export interface GDriveOps {
   ensureFolderPath: typeof gdriveLib.ensureFolderPath;
@@ -25,6 +30,11 @@ export interface UploadDeps {
   rcloneBin: string;
   log: Logger;
   gdrive: GDriveOps;
+  /** SSRF guard for S3 endpoints; user-owned destinations are checked with allowPrivate=false. */
+  endpointGuard?: EndpointGuard;
+  /** rclone abort/stall tuning (tests). */
+  killGraceMs?: number;
+  stallMs?: number;
   /** Lets the owner of the upload kill rclone on shutdown. */
   onProc?: (jobId: number, proc: RcloneProc) => void;
 }
@@ -50,15 +60,36 @@ export async function walkSource(src: string): Promise<{ isDir: boolean; files: 
 
 const exists = (p: string): Promise<boolean> => stat(p).then(() => true, () => false);
 
-/** Where the torrent's content lives on disk. */
+/**
+ * Where the torrent's content lives on disk. Every candidate must stay inside `incomplete/<infohash>` (a hostile
+ * torrent name such as `../../library` must not make the worker upload or move something else); the library copy
+ * recorded by an earlier local job that moved the data is the last resort.
+ */
 async function resolveSource(deps: UploadDeps, torrent: TorrentRow): Promise<string> {
   const st = await deps.downloader.status(torrent.infohash).catch(() => null);
+  const root = resolve(deps.config.downloadsDir, 'incomplete', torrent.infohash);
+  const inside = (p: string): boolean => { const r = resolve(p); return r === root || r.startsWith(root + sep); };
   const candidates = [
     st?.contentPath,
-    join(torrent.save_path ?? join(deps.config.downloadsDir, 'incomplete', torrent.infohash), torrent.name ?? ''),
-  ].filter((p): p is string => !!p && p !== '');
+    join(torrent.save_path ?? root, torrent.name ?? ''),
+  ].filter((p): p is string => !!p && p !== '' && inside(p));
   for (const c of candidates) if (await exists(c)) return c;
+  const lib = resolve(deps.config.downloadsDir, 'library');
+  if (torrent.library_path && resolve(torrent.library_path).startsWith(lib + sep) && (await exists(torrent.library_path))) return torrent.library_path;
   throw new Error('Downloaded files not found on disk');
+}
+
+/** Torrent id -> a local move in progress. Later jobs for the same torrent wait for it, then copy from the library. */
+const moving = new Map<number, Promise<void>>();
+
+/** Per destination+user critical section for creating Drive folders (in-process; the worker is the only writer). */
+const folderLocks = new Map<string, Promise<unknown>>();
+async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = folderLocks.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => undefined).then(fn);
+  const tail = run.catch(() => undefined);
+  folderLocks.set(key, tail);
+  try { return await run; } finally { if (folderLocks.get(key) === tail) folderLocks.delete(key); }
 }
 
 function failJob(deps: UploadDeps, jobId: number, message: string): void {
@@ -78,6 +109,7 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
     const dest = getDestination(db, deps.config.appSecret, job.destination_id);
     if (!dest) throw new Error('Destination no longer exists');
     if (torrent.state !== 'downloaded') throw new Error('Downloaded data is no longer available');
+    await moving.get(torrent.id); // another local job is moving the data right now
 
     let source: string;
     let delivered = false;
@@ -86,13 +118,15 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
     } catch (e) {
       // Crash recovery: a previous run may already have moved the files into the library (rename).
       const prior = dest.config.type === 'local' && torrent.name
-        ? resolve(deps.config.downloadsDir, 'library', fullRemotePath(dest.config, jobRemoteDir(dest.row, user, torrent.name)))
+        ? resolve(deps.config.downloadsDir, 'library', fullRemotePath(dest.config, jobRemoteDir(dest.row, user, torrent.infohash, torrent.name)))
         : null;
       if (!prior || !(await exists(prior))) throw e;
       source = prior;
       delivered = true;
     }
-    const remotePath = jobRemoteDir(dest.row, user, torrent.name ?? basename(source));
+    const remotePath = jobRemoteDir(dest.row, user, torrent.infohash, torrent.name ?? basename(source));
+    const userOwned = dest.row.owner_user_id !== null;
+    const fromLibrary = !!torrent.library_path && resolve(source) === resolve(torrent.library_path);
     db.prepare('UPDATE jobs SET remote_path = ?, upload_progress = 0, upload_speed = 0, folder_url = NULL, error = NULL, updated_at = ? WHERE id = ?')
       .run(remotePath, now(), jobId);
 
@@ -100,13 +134,19 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
     let folderUrl: string | null = null;
 
     if (dest.config.type === 'local') {
-      if (!delivered) await uploadLocal(deps, job, torrent, source, fullRemotePath(dest.config, remotePath), signal);
+      if (!delivered) await uploadLocal(deps, job, torrent, source, fullRemotePath(dest.config, remotePath), signal, fromLibrary);
     } else {
-      const cmd = buildRcloneCommand(dest.config, source, remotePath);
+      let gdrive: { userFolder: string | null; jobFolder: string } | undefined;
+      if (dest.config.type === 's3') {
+        await (deps.endpointGuard ?? fallbackEndpointGuard)(dest.config.endpoint, { allowPrivate: !userOwned });
+      } else if (dest.config.type === 'gdrive') {
+        gdrive = await resolveGDriveFolders(deps, dest.config, dest.row.id, userOwned, remotePath, user);
+      }
+      const cmd = buildRcloneCommand(dest.config, source, remotePath, { gdriveFolderId: gdrive?.jobFolder });
       secrets = cmd.secrets;
       let last = 0;
       await runRclone({
-        spawn: deps.spawn, bin: deps.rcloneBin, cmd, signal,
+        spawn: deps.spawn, bin: deps.rcloneBin, cmd, signal, killGraceMs: deps.killGraceMs, stallMs: deps.stallMs,
         onProc: (p) => deps.onProc?.(jobId, p),
         onStats: (s) => {
           const t = Date.now();
@@ -116,7 +156,7 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
             .run(Math.min(0.99, s.bytes / s.totalBytes), Math.round(s.speed), now(), jobId);
         },
       });
-      if (dest.config.type === 'gdrive') folderUrl = await shareGDrive(deps, dest.config, dest.row.owner_user_id !== null, remotePath, user);
+      if (dest.config.type === 'gdrive' && gdrive) folderUrl = await shareGDrive(deps, dest.config, userOwned, gdrive, user);
     }
 
     db.transaction(() => {
@@ -140,49 +180,95 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
   }
 }
 
-async function uploadLocal(deps: UploadDeps, job: JobRow, torrent: TorrentRow, source: string, relTarget: string, signal: AbortSignal): Promise<void> {
+async function uploadLocal(deps: UploadDeps, job: JobRow, torrent: TorrentRow, source: string, relTarget: string, signal: AbortSignal, fromLibrary: boolean): Promise<void> {
   const { db, config } = deps;
   const root = resolve(config.downloadsDir, 'library');
   const target = resolve(root, relTarget);
   if (target === root || !target.startsWith(root + sep)) throw new Error('Refusing to write outside the library folder');
   const isDir = (await stat(source)).isDirectory();
-  const dstDir = target; // single files land inside <target>/
+  const dstPath = isDir ? target : join(target, basename(source)); // single files land inside <target>/
   if (signal.aborted) throw new RcloneAborted();
 
-  const others = (db.prepare(
-    "SELECT COUNT(*) AS n FROM jobs WHERE torrent_id = ? AND id != ? AND state IN ('queued','downloading','uploading')",
-  ).get(torrent.id, job.id) as { n: number }).n;
-  const canMove = others === 0 && getSetting(db, 'seeding.ratio') <= 0;
-
+  const targetExisted = await exists(target);
+  const existed = await exists(dstPath);
   await mkdir(isDir ? dirname(target) : target, { recursive: true });
-  if (isDir) {
-    if (canMove && !(await exists(dstDir))) {
-      try { await rename(source, dstDir); return; } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e; }
+
+  // Move (rename) only when this job is the last one that needs the data and nothing seeds it. The decision is one
+  // conditional UPDATE that also records where the data went, so a job added meanwhile copies from there instead of
+  // finding the data gone.
+  if (!fromLibrary && !existed && getSetting(db, 'seeding.ratio') <= 0) {
+    let release!: () => void;
+    moving.set(torrent.id, new Promise<void>((r) => { release = r; }));
+    let moved = false;
+    try {
+      const claimed = db.prepare(
+        `UPDATE torrents SET library_path = ? WHERE id = ?
+           AND NOT EXISTS (SELECT 1 FROM jobs WHERE torrent_id = ? AND id != ? AND state IN ('queued','downloading','uploading'))`,
+      ).run(dstPath, torrent.id, torrent.id, job.id).changes === 1;
+      if (claimed) {
+        try { await rename(source, dstPath); moved = true; return; } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e; }
+      }
+    } finally {
+      if (!moved) db.prepare('UPDATE torrents SET library_path = NULL WHERE id = ? AND library_path = ?').run(torrent.id, dstPath);
+      moving.delete(torrent.id);
+      release();
     }
-    await cp(source, dstDir, { recursive: true, force: true });
-  } else {
-    const file = join(target, basename(source));
-    if (canMove && !(await exists(file))) {
-      try { await rename(source, file); return; } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e; }
-    }
-    await cp(source, file, { force: true });
+  }
+
+  try {
+    await copyTree(source, dstPath, signal);
+  } catch (e) {
+    // Do not leave a half-copied folder behind (it would be served as if complete and block a later move).
+    if (!targetExisted) await rm(target, { recursive: true, force: true }).catch(() => undefined);
+    else if (!existed) await rm(dstPath, { recursive: true, force: true }).catch(() => undefined);
+    throw e;
   }
 }
 
-/** Resolve the Drive folder and (optionally) share the per-user folder. Sharing failures never fail the job. */
-async function shareGDrive(deps: UploadDeps, cfg: GDriveConfig, userOwned: boolean, remotePath: string, user: UserRow): Promise<string | null> {
+/** Recursive copy that stops promptly when `signal` aborts (also in the middle of a large file). */
+async function copyTree(src: string, dst: string, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw new RcloneAborted();
+  const st = await stat(src);
+  if (st.isDirectory()) {
+    await mkdir(dst, { recursive: true });
+    for (const e of await readdir(src, { withFileTypes: true })) {
+      if (e.isDirectory() || e.isFile()) await copyTree(join(src, e.name), join(dst, e.name), signal);
+    }
+    return;
+  }
+  try {
+    if (st.size < 1024 * 1024) await copyFile(src, dst);
+    else await pipeline(createReadStream(src), createWriteStream(dst), { signal });
+  } catch (e) {
+    if (signal.aborted) throw new RcloneAborted();
+    throw e;
+  }
+}
+
+/**
+ * Create/resolve the per-user and job folders in Drive BEFORE rclone runs, under a per destination+user mutex, so rclone
+ * never creates parents itself (two concurrent uploads for one user would otherwise create duplicate same-named folders).
+ */
+async function resolveGDriveFolders(deps: UploadDeps, cfg: GDriveConfig, destId: number, userOwned: boolean, remotePath: string, user: UserRow): Promise<{ userFolder: string | null; jobFolder: string }> {
   const creds = { clientId: cfg.clientId, clientSecret: cfg.clientSecret, refreshToken: cfg.refreshToken };
   const segs = remotePath.split('/');
+  return withLock(`${destId}:${user.id}`, async () => {
+    const userFolder = userOwned ? null : await deps.gdrive.ensureFolderPath(creds, deps.config.google, cfg.rootFolderId, segs.slice(0, 1));
+    const jobFolder = await deps.gdrive.ensureFolderPath(creds, deps.config.google, userFolder ?? cfg.rootFolderId, userOwned ? segs : segs.slice(1));
+    return { userFolder, jobFolder };
+  });
+}
+
+/** Share the per-user folder (shared destinations) and return the link. Sharing failures never fail the job. */
+async function shareGDrive(deps: UploadDeps, cfg: GDriveConfig, userOwned: boolean, folders: { userFolder: string | null; jobFolder: string }, user: UserRow): Promise<string | null> {
+  const creds = { clientId: cfg.clientId, clientSecret: cfg.clientSecret, refreshToken: cfg.refreshToken };
   try {
-    if (userOwned) {
-      return gdriveLib.folderUrl(await deps.gdrive.ensureFolderPath(creds, deps.config.google, cfg.rootFolderId, segs));
-    }
+    if (userOwned || !folders.userFolder) return gdriveLib.folderUrl(folders.jobFolder);
     if (cfg.sharing === 'none') return null;
-    const userFolder = await deps.gdrive.ensureFolderPath(creds, deps.config.google, cfg.rootFolderId, segs.slice(0, 1));
-    if (cfg.sharing === 'anyone') await deps.gdrive.shareFolder(creds, deps.config.google, userFolder, 'anyone');
-    else if (user.email) await deps.gdrive.shareFolder(creds, deps.config.google, userFolder, { email: user.email });
+    if (cfg.sharing === 'anyone') await deps.gdrive.shareFolder(creds, deps.config.google, folders.userFolder, 'anyone');
+    else if (user.email) await deps.gdrive.shareFolder(creds, deps.config.google, folders.userFolder, { email: user.email });
     else return null;
-    return gdriveLib.folderUrl(userFolder);
+    return gdriveLib.folderUrl(folders.userFolder);
   } catch (err) {
     deps.log.warn({ err: redact(err instanceof Error ? err.message : String(err)) }, 'sharing the Drive folder failed');
     return null;

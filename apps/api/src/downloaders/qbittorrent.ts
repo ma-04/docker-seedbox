@@ -1,5 +1,5 @@
 /** qBittorrent Web API v2 client (fetch). The WebUI whitelists the compose subnet, so no login is normally needed. */
-import type { DownloadAddInput, Downloader, DownloadState, DownloadStatus } from './types.js';
+import { DownloaderUnavailableError, type DownloadAddInput, type Downloader, type DownloadState, type DownloadStatus } from './types.js';
 
 export interface QbtOptions {
   baseUrl: string;
@@ -47,7 +47,11 @@ export class QbittorrentDownloader implements Downloader {
   private async raw(path: string, init: { method?: string; body?: BodyInit; headers?: Record<string, string> } = {}): Promise<Response> {
     const headers: Record<string, string> = { ...init.headers };
     if (this.cookie) headers.cookie = this.cookie;
-    return this.f(`${this.base}/api/v2${path}`, { ...init, headers, signal: AbortSignal.timeout(this.timeoutMs) });
+    try {
+      return await this.f(`${this.base}/api/v2${path}`, { ...init, headers, signal: AbortSignal.timeout(this.timeoutMs) });
+    } catch (err) {
+      throw new DownloaderUnavailableError(`qBittorrent unreachable (${(err as Error).message})`, { cause: err });
+    }
   }
 
   private async login(): Promise<boolean> {
@@ -69,7 +73,10 @@ export class QbittorrentDownloader implements Downloader {
   private async call(path: string, init: () => { method?: string; body?: BodyInit; headers?: Record<string, string> } = () => ({})): Promise<Response> {
     let res = await this.raw(path, init());
     if (res.status === 403 && (await this.login())) res = await this.raw(path, init());
-    if (!res.ok && res.status !== 409) throw new Error(`qBittorrent ${path.split('?')[0]} failed (${res.status})`);
+    if (!res.ok && res.status !== 409) {
+      const msg = `qBittorrent ${path.split('?')[0]} failed (${res.status})`;
+      throw res.status >= 500 || res.status === 403 ? new DownloaderUnavailableError(msg) : new Error(msg);
+    }
     return res;
   }
 

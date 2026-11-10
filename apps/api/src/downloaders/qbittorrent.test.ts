@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mapQbtState, QbittorrentDownloader } from './qbittorrent.js';
+import { DownloaderUnavailableError } from './types.js';
 
 describe('mapQbtState', () => {
   it.each([
@@ -108,5 +109,19 @@ describe('QbittorrentDownloader preferences', () => {
   it('throws on upstream failure', async () => {
     const d = new QbittorrentDownloader({ baseUrl: 'http://qbt', fetchImpl: (async () => new Response('nope', { status: 500 })) as unknown as typeof fetch });
     await expect(d.getPreferences()).rejects.toThrow();
+  });
+});
+
+describe('unreachable downloader is distinguishable from a rejected torrent', () => {
+  it('network errors and 5xx/403 are DownloaderUnavailableError; a rejection is a plain Error', async () => {
+    const down = new QbittorrentDownloader({ baseUrl: 'http://qbt:8080', fetchImpl: (async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch });
+    await expect(down.status('a'.repeat(40))).rejects.toBeInstanceOf(DownloaderUnavailableError);
+    const err503 = new QbittorrentDownloader({ baseUrl: 'http://qbt:8080', fetchImpl: (async () => new Response('', { status: 503 })) as unknown as typeof fetch });
+    await expect(err503.status('a'.repeat(40))).rejects.toBeInstanceOf(DownloaderUnavailableError);
+    const q = fakeQbt({ addReply: 'Fails.' });
+    const rejected = new QbittorrentDownloader({ baseUrl: 'http://qbt:8080', fetchImpl: q.fetchImpl });
+    const e = await rejected.add({ id: 'a'.repeat(40), source: { magnet: 'magnet:?xt=urn:btih:x' }, savePath: '/x' }).catch((x) => x as Error);
+    expect(e).toBeInstanceOf(Error);
+    expect(e).not.toBeInstanceOf(DownloaderUnavailableError);
   });
 });

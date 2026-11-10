@@ -86,10 +86,10 @@ export class FakeVpn implements VpnClient {
     return this.status_;
   }
   async disconnect(): Promise<void> { this.disconnects++; }
-  async setMode(m: 'off' | 'required'): Promise<void> { if (this.fail) throw new Error('unreachable'); this.modes.push(m); }
+  async setMode(m: 'off' | 'required'): Promise<void> { if (this.fail) throw new Error('unreachable'); this.modes.push(m); this.status_ = { ...this.status_, mode: m }; }
 }
 
-export interface FakeProc extends RcloneProc { stderr: PassThrough; emitter: EventEmitter; killed: boolean; finish(code: number, lines?: string[]): void }
+export interface FakeProc extends RcloneProc { stderr: PassThrough; emitter: EventEmitter; killed: boolean; signals: string[]; finish(code: number, lines?: string[]): void }
 export function fakeSpawn(onSpawn?: (cmd: string, args: string[], env: NodeJS.ProcessEnv, proc: FakeProc) => void): { spawn: SpawnFn; calls: { cmd: string; args: string[]; env: NodeJS.ProcessEnv }[]; procs: FakeProc[] } {
   const calls: { cmd: string; args: string[]; env: NodeJS.ProcessEnv }[] = [];
   const procs: FakeProc[] = [];
@@ -97,8 +97,8 @@ export function fakeSpawn(onSpawn?: (cmd: string, args: string[], env: NodeJS.Pr
     const emitter = new EventEmitter();
     const stderr = new PassThrough();
     const proc = {
-      stderr, emitter, killed: false,
-      kill() { proc.killed = true; return true; },
+      stderr, emitter, killed: false, signals: [] as string[],
+      kill(sig?: string) { proc.killed = true; proc.signals.push(String(sig ?? 'SIGTERM')); return true; },
       on(ev: string, fn: (...a: any[]) => void) { emitter.on(ev, fn); return proc; },
       finish(code: number, lines: string[] = []) {
         for (const l of lines) stderr.write(l + '\n');

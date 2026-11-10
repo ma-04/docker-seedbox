@@ -61,12 +61,12 @@ describe('local destination state machine', () => {
     const row = job(s.db, j);
     expect(row.state).toBe('completed');
     expect(row.upload_progress).toBe(1);
-    expect(row.remote_path).toBe(`alice/${name}`);
+    expect(row.remote_path).toBe(`alice-1/${name} [aaaaaaaa]`);
     expect(files(s.db, j).map((f) => f.path)).toEqual([
       "it's a file.txt", 'sub dir/deeper/x y.txt', 'sub dir/ünï cødé #1 100%.bin', 'top.mkv',
     ]);
     expect(files(s.db, j).find((f) => f.path === 'top.mkv')!.size).toBe(4);
-    const lib = join(s.config.downloadsDir, 'library', 'alice', name);
+    const lib = join(s.config.downloadsDir, 'library', 'alice-1', `${name} [aaaaaaaa]`);
     expect(readFileSync(join(lib, 'sub dir/ünï cødé #1 100%.bin'), 'utf8')).toBe('bb');
     expect(torrent(s.db, t).state).toBe('removed');
     expect(s.dl.removed).toEqual([{ ref: H1, deleteData: true }]);
@@ -85,9 +85,9 @@ describe('local destination state machine', () => {
     await s.worker.tick();
     await s.worker.idle();
     expect(job(s.db, j).state).toBe('completed');
-    expect(job(s.db, j).remote_path).toBe('movie file.mkv');
+    expect(job(s.db, j).remote_path).toBe('movie file.mkv [aaaaaaaa]');
     expect(files(s.db, j)).toEqual([{ path: 'movie file.mkv', size: 3 }]);
-    expect(readFileSync(join(s.config.downloadsDir, 'library', 'pub', 'movie file.mkv', 'movie file.mkv'), 'utf8')).toBe('xyz');
+    expect(readFileSync(join(s.config.downloadsDir, 'library', 'pub', 'movie file.mkv [aaaaaaaa]', 'movie file.mkv'), 'utf8')).toBe('xyz');
   });
 
   it('two jobs on one torrent complete; the torrent is removed only after the second', async () => {
@@ -114,7 +114,7 @@ describe('local destination state machine', () => {
     await s.worker.tick();
     expect(torrent(s.db, t).state).toBe('removed');
     expect(s.dl.removed).toHaveLength(1);
-    for (const user of ['alice', 'bob']) expect(readFileSync(join(s.config.downloadsDir, 'library', user, 'Pack', 'd/b.txt'), 'utf8')).toBe('B');
+    for (const user of ['alice-1', 'bob-2']) expect(readFileSync(join(s.config.downloadsDir, 'library', user, 'Pack [aaaaaaaa]', 'd/b.txt'), 'utf8')).toBe('B');
     expect(files(s.db, j1)).toEqual(files(s.db, j2));
   });
 
@@ -162,21 +162,17 @@ describe('local destination state machine', () => {
     expect(torrent(s.db, t).state).toBe('removed');
   });
 
-  it('downloader error fails the jobs; a vanished torrent too', async () => {
+  it('downloader error fails the jobs', async () => {
     const s = setup();
     const u = addUser(s.db, 'alice');
-    const d = addDest(s.db, { type: 'local' });
-    const t1 = addTorrent(s.db, H1); const j1 = addJob(s.db, u, t1, d);
-    const t2 = addTorrent(s.db, H2); const j2 = addJob(s.db, u, t2, d);
+    const t1 = addTorrent(s.db, H1); const j1 = addJob(s.db, u, t1, addDest(s.db, { type: 'local' }));
     await s.worker.tick();
     s.dl.set(H1, { state: 'error', rawState: 'missingFiles' });
-    s.dl.items.delete(H2);
     await s.worker.tick();
     expect(torrent(s.db, t1).state).toBe('error');
     expect(job(s.db, j1)).toMatchObject({ state: 'failed' });
     expect(job(s.db, j1).error).toContain('missingFiles');
-    expect(torrent(s.db, t2).state).toBe('error');
-    expect(job(s.db, j2).state).toBe('failed');
+    expect(s.dl.removed).toEqual([{ ref: H1, deleteData: true }]);
   });
 
   it('torrent larger than limits.maxTorrentBytes -> error, jobs failed, removed with data', async () => {
@@ -213,7 +209,7 @@ describe('local destination state machine', () => {
     const u = addUser(s.db, 'alice');
     const t = addTorrent(s.db, H1);
     const j = addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
-    writeFiles(join(s.config.downloadsDir, 'library', 'alice', 'Pack'), { 'a.txt': 'A' });
+    writeFiles(join(s.config.downloadsDir, 'library', 'alice-1', 'Pack [aaaaaaaa]'), { 'a.txt': 'A' });
     s.db.prepare("UPDATE torrents SET state = 'downloaded', name = 'Pack' WHERE id = ?").run(t);
     s.db.prepare("UPDATE jobs SET state = 'uploading' WHERE id = ?").run(j);
     await s.worker.tick(); await s.worker.idle();
@@ -271,6 +267,8 @@ describe('gating', () => {
 describe('rclone destinations', () => {
   const gdrive = { type: 'gdrive', clientId: 'cid', clientSecret: 'super-secret-value-xyz', refreshToken: '1//refresh-token-value-123456', rootFolderId: 'ROOT', sharing: 'anyone' } as const;
 
+  const fakeGDrive = { ensureFolderPath: async (_c: unknown, _g: unknown, root: string, segs: string[]) => [root, ...segs].join('/'), shareFolder: async () => undefined };
+
   async function toUploading(s: ReturnType<typeof setup>, dest: number, username = 'alice', email: string | null = null) {
     const u = addUser(s.db, username, email);
     const t = addTorrent(s.db, H1);
@@ -286,7 +284,7 @@ describe('rclone destinations', () => {
       JSON.stringify({ level: 'error', msg: `Failed to copy: couldn't fetch token: refresh_token=${gdrive.refreshToken} secret ${gdrive.clientSecret}` }),
       JSON.stringify({ level: 'error', msg: 'Authorization: Bearer ya29.abcdefghijklmnopqrstuvwxyz0123456789ABCDEF' }),
     ]));
-    const s = setup({ spawn: fs_.spawn });
+    const s = setup({ spawn: fs_.spawn, gdrive: fakeGDrive });
     const { j } = await toUploading(s, addDest(s.db, gdrive));
     await s.worker.tick(); await s.worker.idle();
     const row = job(s.db, j);
@@ -310,12 +308,14 @@ describe('rclone destinations', () => {
     });
     const { j } = await toUploading(s, addDest(s.db, gdrive));
     await s.worker.tick(); await s.worker.idle();
-    expect(job(s.db, j)).toMatchObject({ state: 'completed', folder_url: 'https://drive.google.com/drive/folders/ROOT/alice', remote_path: 'alice/Pack' });
-    expect(shared).toEqual([['ROOT/alice', 'anyone']]);
+    expect(job(s.db, j)).toMatchObject({ state: 'completed', folder_url: 'https://drive.google.com/drive/folders/ROOT/alice-1', remote_path: 'alice-1/Pack [aaaaaaaa]' });
+    expect(shared).toEqual([['ROOT/alice-1', 'anyone']]);
     const call = fs_.calls[0]!;
     expect(call.args.join(' ')).not.toContain(gdrive.refreshToken);
     expect(call.args.join(' ')).not.toContain(gdrive.clientSecret);
-    expect(call.args.slice(0, 3)).toEqual(['copy', join(s.content(H1), 'Pack'), 'DST:alice/Pack']);
+    // rclone writes straight into the job folder the worker resolved: it never creates parents itself
+    expect(call.args.slice(0, 3)).toEqual(['copy', join(s.content(H1), 'Pack'), 'DST:']);
+    expect(call.env.RCLONE_CONFIG_DST_ROOT_FOLDER_ID).toBe('ROOT/alice-1/Pack [aaaaaaaa]');
     expect(call.env.RCLONE_CONFIG_DST_TYPE).toBe('drive');
   });
 
@@ -337,13 +337,13 @@ describe('rclone destinations', () => {
     const { j } = await toUploading(s, dest);
     await s.worker.tick(); await s.worker.idle();
     expect(job(s.db, j).state).toBe('completed');
-    expect(fs_.calls[0]!.args[2]).toBe('DST:bkt/pre/alice/Pack');
+    expect(fs_.calls[0]!.args[2]).toBe('DST:bkt/pre/alice-1/Pack [aaaaaaaa]');
     expect(fs_.calls[0]!.args).toContain('--s3-no-check-bucket');
   });
 
   it('cancelling mid-upload kills rclone and leaves the job cancelled', async () => {
     const fs_ = fakeSpawn(); // never exits on its own
-    const s = setup({ spawn: fs_.spawn });
+    const s = setup({ spawn: fs_.spawn, gdrive: fakeGDrive });
     const { j } = await toUploading(s, addDest(s.db, gdrive));
     await s.worker.tick();
     expect(job(s.db, j).state).toBe('uploading');
@@ -357,7 +357,7 @@ describe('rclone destinations', () => {
 
   it('runs at most 2 uploads at a time', async () => {
     const fs_ = fakeSpawn();
-    const s = setup({ spawn: fs_.spawn });
+    const s = setup({ spawn: fs_.spawn, gdrive: fakeGDrive });
     const d = addDest(s.db, { ...gdrive, sharing: 'none' });
     const u = addUser(s.db, 'alice');
     for (let i = 0; i < 3; i++) {

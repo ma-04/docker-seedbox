@@ -1,6 +1,6 @@
 /** The worker: one tick every 2 s, every step isolated, all state in SQLite. See docs/architecture.md § Worker loop. */
 import { spawn as nodeSpawn } from 'node:child_process';
-import { rm, statfs as fsStatfs } from 'node:fs/promises';
+import { rm, stat, statfs as fsStatfs } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Logger } from 'pino';
 import type { Config } from '../lib/config.js';
@@ -9,9 +9,9 @@ import { decryptJson } from '../lib/crypto.js';
 import { getSetting } from '../lib/settings.js';
 import { now, type JobRow, type TorrentRow, type TorrentSource } from '../lib/types.js';
 import type { VpnClient } from '../lib/vpn.js';
-import type { Downloader } from '../downloaders/types.js';
+import { DownloaderUnavailableError, type Downloader } from '../downloaders/types.js';
 import type { RcloneProc, SpawnFn } from './rclone.js';
-import { realGDrive, runUpload, type GDriveOps } from './upload.js';
+import { realGDrive, runUpload, type EndpointGuard, type GDriveOps } from './upload.js';
 import { reconcileVpn } from './vpn.js';
 
 export interface WorkerDeps {
@@ -28,10 +28,23 @@ export interface WorkerDeps {
   /** Free bytes on the downloads volume. */
   freeBytes?: (dir: string) => Promise<number>;
   gdrive?: GDriveOps;
+  /** SSRF guard for user-owned S3 endpoints; defaults to worker/netguard-fallback.ts. */
+  endpointGuard?: EndpointGuard;
+  /** Clock in ms (tests). */
+  nowMs?: () => number;
+  /** How often free disk is re-checked per downloading torrent. Default 60 s. */
+  diskCheckEveryMs?: number;
+  /** Test seams. */
+  hooks?: {
+    /** Called in cleanup after the torrent was removed from the downloader and its data deleted, before the DB transition. */
+    afterCleanupRemove?: (t: TorrentRow) => void | Promise<void>;
+  };
 }
 
 const ACTIVE = "('queued','downloading','uploading')";
 const MAX_ADD_FAILURES = 10;
+/** A torrent absent from the downloader this long, with a definitive re-add failure, is failed. */
+const MISSING_FAIL_AFTER_MS = 120_000;
 const INFOHASH = /^[0-9a-f]{40}$/;
 
 const defaultFree = async (dir: string): Promise<number> => {
@@ -53,6 +66,14 @@ export class Worker {
   private lastWarn = new Map<string, number>();
   private addFailures = new Map<number, number>();
   private lastProgress = new Map<number, number>();
+  /** Torrent id -> ms since which the downloader has not known it (continuous). */
+  private missingSince = new Map<number, number>();
+  private lastDiskCheck = new Map<number, number>();
+  private diskChecked = new Set<number>();
+  private vpnApplied = false;
+
+  private clock(): number { return (this.d.nowMs ?? Date.now)(); }
+  private nowSec(): number { return Math.floor(this.clock() / 1000); }
 
   constructor(deps: WorkerDeps) {
     this.d = { maxUploads: 2, tickMs: 2000, vpnEveryMs: 15_000, rcloneBin: process.env.RCLONE_BIN || 'rclone', ...deps };
@@ -62,6 +83,10 @@ export class Worker {
 
   start(): void {
     this.stopped = false;
+    // Apply vpn.mode before anything else: after a restart the sidecar boots fail-closed and qBittorrent has
+    // already resumed its torrents; do not wait for the first periodic reconcile.
+    this.lastVpn = Date.now();
+    this.vpnInflight = this.reconcileVpn().finally(() => { this.vpnInflight = null; });
     const loop = (): void => {
       if (this.stopped) return;
       this.ticking = this.tick().finally(() => {
@@ -99,9 +124,11 @@ export class Worker {
   }
 
   async tick(): Promise<void> {
+    await this.step('heal', () => this.healStranded());
     await this.step('add', () => this.addPending());
     await this.step('promote', () => this.promoteJobs());
     await this.step('sync', () => this.syncDownloading());
+    await this.step('sweep', () => this.sweepFailed());
     await this.step('uploads', () => this.startUploads());
     await this.step('cleanup', () => this.cleanup());
     if (Date.now() - this.lastVpn >= this.d.vpnEveryMs && !this.vpnInflight) {
@@ -115,7 +142,10 @@ export class Worker {
     try {
       const traffic = (this.db.prepare("SELECT COUNT(*) AS n FROM torrents WHERE state IN ('pending','downloading')").get() as { n: number }).n > 0;
       await reconcileVpn({ db: this.db, config: this.d.config, vpn: this.d.vpn, log: this.log }, traffic);
+      this.vpnApplied = true;
     } catch (err) {
+      // Not applied yet (sidecar still starting): retry in ~3 s instead of waiting a full interval.
+      if (!this.vpnApplied) this.lastVpn = Date.now() - this.d.vpnEveryMs + 3000;
       if (Date.now() - this.lastVpnWarn >= 60_000) {
         this.lastVpnWarn = Date.now();
         this.log.warn({ err: err instanceof Error ? err.message : String(err) }, 'vpn reconcile failed');
@@ -123,20 +153,60 @@ export class Worker {
     }
   }
 
+  // --- step 0: self-heal -----------------------------------------------------------------------------
+
+  /**
+   * A torrent that is removed/error although a job still wants it (the API inserted or retried a job while the
+   * worker was tearing the torrent down) goes back to `pending`: its data is re-downloaded rather than the job
+   * sitting in `queued` forever.
+   */
+  private healStranded(): void {
+    const r = this.db.prepare(
+      `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL,
+         started_at = NULL, library_path = NULL, cleanup_pending = 0
+       WHERE state IN ('removed','error')
+         AND EXISTS (SELECT 1 FROM jobs WHERE jobs.torrent_id = torrents.id AND jobs.state IN ${ACTIVE})`,
+    ).run();
+    if (r.changes > 0) this.log.warn({ torrents: r.changes }, 'torrents with active jobs were removed/failed; resetting them to pending');
+  }
+
   // --- step 1: pending torrents -> downloader -------------------------------------------------
 
+  private async addToDownloader(t: TorrentRow): Promise<string> {
+    const src = decryptJson<TorrentSource>(this.d.config.appSecret, t.source_enc);
+    const savePath = join(this.d.config.downloadsDir, 'incomplete', t.infohash);
+    await this.d.downloader.add({
+      id: t.infohash,
+      source: 'magnet' in src ? { magnet: src.magnet } : { torrent: Buffer.from(src.torrentB64, 'base64') },
+      savePath,
+    });
+    return savePath;
+  }
+
   private async addPending(): Promise<void> {
-    const { db, config, downloader } = this.d;
+    const { db, config } = this.d;
     const pending = db.prepare("SELECT * FROM torrents WHERE state = 'pending' ORDER BY id").all() as TorrentRow[];
     if (!pending.length) return;
 
     // Nobody wants it any more (cancelled before it started): nothing was added, just retire it.
+    // One conditional statement: a job the API inserts in the meantime keeps the torrent alive.
     const wanted: TorrentRow[] = [];
     for (const t of pending) {
-      const n = (db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE}`).get(t.id) as { n: number }).n;
-      const any = (db.prepare('SELECT COUNT(*) AS n FROM jobs WHERE torrent_id = ?').get(t.id) as { n: number }).n;
-      if (n > 0 || any === 0) wanted.push(t);
-      else db.prepare("UPDATE torrents SET state = 'removed' WHERE id = ?").run(t.id);
+      const r = db.prepare(
+        `UPDATE torrents SET state = 'removed' WHERE id = ? AND state = 'pending'
+           AND EXISTS (SELECT 1 FROM jobs WHERE torrent_id = ?)
+           AND NOT EXISTS (SELECT 1 FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE})`,
+      ).run(t.id, t.id, t.id);
+      if (r.changes === 0) wanted.push(t);
+    }
+    if (!wanted.length) return;
+
+    // Content already moved into the library by an earlier completed job: serve new jobs from there, no re-download.
+    for (let i = wanted.length - 1; i >= 0; i--) {
+      const t = wanted[i]!;
+      if (!t.library_path || !(await exists(t.library_path))) continue;
+      db.prepare("UPDATE torrents SET state = 'downloaded', progress = 1, dl_speed = 0, error = NULL, completed_at = ? WHERE id = ? AND state = 'pending'").run(now(), t.id);
+      wanted.splice(i, 1);
     }
     if (!wanted.length) return;
 
@@ -154,20 +224,18 @@ export class Worker {
     for (const t of wanted) {
       if (!INFOHASH.test(t.infohash)) { this.failTorrent(t, 'Invalid infohash'); continue; }
       try {
-        const src = decryptJson<TorrentSource>(config.appSecret, t.source_enc);
-        const savePath = join(config.downloadsDir, 'incomplete', t.infohash);
-        await downloader.add({
-          id: t.infohash,
-          source: 'magnet' in src ? { magnet: src.magnet } : { torrent: Buffer.from(src.torrentB64, 'base64') },
-          savePath,
-        });
-        db.prepare("UPDATE torrents SET state = 'downloading', save_path = ?, error = NULL WHERE id = ? AND state = 'pending'").run(savePath, t.id);
+        const savePath = await this.addToDownloader(t);
+        db.prepare("UPDATE torrents SET state = 'downloading', save_path = ?, error = NULL, started_at = ?, library_path = NULL WHERE id = ? AND state = 'pending'")
+          .run(savePath, this.nowSec(), t.id);
         this.addFailures.delete(t.id);
+        this.missingSince.delete(t.id);
+        this.diskChecked.delete(t.id);
       } catch (err) {
         const n = (this.addFailures.get(t.id) ?? 0) + 1;
         this.addFailures.set(t.id, n);
         this.warnOnce(`add:${t.id}`, `adding torrent ${t.id} failed (attempt ${n})`, err, 30_000);
-        if (n >= MAX_ADD_FAILURES) this.failTorrent(t, 'Could not add the torrent to the downloader');
+        // A downloader that is down/restarting is not the torrent's fault: keep it pending.
+        if (n >= MAX_ADD_FAILURES && !(err instanceof DownloaderUnavailableError)) this.failTorrent(t, 'Could not add the torrent to the downloader');
       }
     }
   }
@@ -188,15 +256,24 @@ export class Worker {
     const rows = db.prepare("SELECT * FROM torrents WHERE state = 'downloading' ORDER BY id").all() as TorrentRow[];
     for (const t of rows) {
       await this.step(`sync:${t.id}`, async () => {
+        // Throws (and is only logged) when the downloader is unreachable: that never fails a torrent.
         const st = await downloader.status(t.infohash);
-        if (!st) return this.failTorrent(t, 'The torrent disappeared from the downloader', false);
+        if (!st) return this.handleMissing(t);
+        this.missingSince.delete(t.id);
         if (st.state === 'error') return this.failTorrent(t, `The downloader reported an error (${st.rawState ?? 'error'})`);
-        if (st.state === 'metadata-pending') return;
+        if (st.state === 'metadata-pending') {
+          const limitMin = getSetting(db, 'limits.metadataTimeoutMinutes');
+          if (limitMin > 0 && t.started_at !== null && this.nowSec() - t.started_at > limitMin * 60) {
+            return this.failTorrent(t, `No metadata received after ${limitMin} minutes (no peers / metadata timeout)`);
+          }
+          return;
+        }
 
         const max = getSetting(db, 'limits.maxTorrentBytes');
         if (max > 0 && st.totalSize > max) {
           return this.failTorrent(t, `Torrent is ${formatBytes(st.totalSize)}, which exceeds the maximum allowed size of ${formatBytes(max)}`);
         }
+        if (st.state !== 'completed' && st.totalSize > 0 && (await this.diskTooSmall(t, st.totalSize, st.progress))) return;
         const done = st.state === 'completed';
         const progress = done ? 1 : st.progress;
         db.prepare(
@@ -208,24 +285,100 @@ export class Worker {
           this.lastProgress.set(t.id, progress);
           db.prepare(`UPDATE jobs SET updated_at = ? WHERE torrent_id = ? AND state IN ('queued','downloading')`).run(now(), t.id);
         }
-        if (done) this.lastProgress.delete(t.id);
+        if (done) { this.lastProgress.delete(t.id); this.diskChecked.delete(t.id); this.lastDiskCheck.delete(t.id); }
       });
     }
   }
 
-  /** Torrent -> error, its active jobs -> failed, drop it (and its data) from the downloader. */
-  private failTorrent(t: TorrentRow, message: string, removeFromDownloader = true): void {
-    this.log.warn({ torrentId: t.id, reason: message }, 'torrent failed');
-    this.db.transaction(() => {
-      this.db.prepare("UPDATE torrents SET state = 'error', error = ?, dl_speed = 0 WHERE id = ?").run(message, t.id);
-      this.db.prepare(`UPDATE jobs SET state = 'failed', error = ?, updated_at = ? WHERE torrent_id = ? AND state IN ${ACTIVE}`).run(message, now(), t.id);
-    })();
-    void this.discard(t, removeFromDownloader).catch((e) => this.warnOnce(`discard:${t.id}`, 'failed to clean up a torrent', e));
+  /**
+   * The downloader does not know a torrent we believe is downloading. qBittorrent restarting (compose restarts it
+   * whenever the vpn container restarts) can briefly return an empty list, so this is transient: re-add from the
+   * stored source (idempotent; qBittorrent re-checks existing data). Only a torrent missing continuously for > 120 s
+   * whose re-add is definitively rejected is failed; an unreachable downloader never fails anything.
+   */
+  private async handleMissing(t: TorrentRow): Promise<void> {
+    const nowMs = this.clock();
+    const since = this.missingSince.get(t.id) ?? nowMs;
+    this.missingSince.set(t.id, since);
+    try {
+      await this.addToDownloader(t);
+      this.warnOnce(`missing:${t.id}`, `torrent ${t.id} was missing from the downloader; re-added it`, undefined, 30_000);
+    } catch (err) {
+      if (err instanceof DownloaderUnavailableError) { this.missingSince.delete(t.id); throw err; }
+      if (nowMs - since > MISSING_FAIL_AFTER_MS) {
+        this.missingSince.delete(t.id);
+        return this.failTorrent(t, 'The torrent disappeared from the downloader and could not be added again');
+      }
+      this.warnOnce(`missing:${t.id}`, `torrent ${t.id} is missing from the downloader and re-adding it failed`, err, 30_000);
+    }
   }
 
-  private async discard(t: TorrentRow, fromDownloader: boolean): Promise<void> {
-    if (fromDownloader) await this.d.downloader.remove(t.infohash, true);
-    await this.rmData(t);
+  /**
+   * Disk guard. Once after metadata: remaining download plus the extra copies a local destination needs (seeding or
+   * other jobs force copy instead of move) must fit above limits.minFreeDiskBytes. Afterwards, periodically: free space
+   * below the floor fails the torrent (freeing its partial data) instead of filling the volume.
+   * Returns true when the torrent was failed.
+   */
+  private async diskTooSmall(t: TorrentRow, totalSize: number, progress: number): Promise<boolean> {
+    const { db } = this.d;
+    const first = !this.diskChecked.has(t.id);
+    const nowMs = this.clock();
+    if (!first && nowMs - (this.lastDiskCheck.get(t.id) ?? 0) < (this.d.diskCheckEveryMs ?? 60_000)) return false;
+    this.lastDiskCheck.set(t.id, nowMs);
+    let free: number;
+    try { free = await (this.d.freeBytes ?? defaultFree)(this.d.config.downloadsDir); } catch { return false; }
+    this.diskChecked.add(t.id);
+    const minFree = getSetting(db, 'limits.minFreeDiskBytes');
+    if (first) {
+      const jobs = db.prepare(
+        `SELECT COUNT(*) AS active, COALESCE(SUM(d.type = 'local'), 0) AS local FROM jobs j JOIN destinations d ON d.id = j.destination_id
+         WHERE j.torrent_id = ? AND j.state IN ${ACTIVE}`,
+      ).get(t.id) as { active: number; local: number };
+      const mustCopy = getSetting(db, 'seeding.ratio') > 0 || jobs.active > 1;
+      const copies = mustCopy ? jobs.local : Math.max(0, jobs.local - 1);
+      const need = totalSize * (1 - progress) + copies * totalSize;
+      if (need > free - minFree) {
+        this.failTorrent(t, `Not enough free disk space: ${formatBytes(need)} needed (${formatBytes(totalSize)} torrent${copies ? `, ${copies} extra cop${copies > 1 ? 'ies' : 'y'} in the library` : ''}) but only ${formatBytes(Math.max(0, free - minFree))} available above the ${formatBytes(minFree)} reserve`);
+        return true;
+      }
+    } else if (free < minFree) {
+      this.failTorrent(t, `Free disk space fell below the ${formatBytes(minFree)} reserve (${formatBytes(free)} left); the download was stopped`);
+      return true;
+    }
+    return false;
+  }
+
+  /** Torrent -> error, its active jobs -> failed. Removal from the downloader and data deletion is done by sweepFailed (retried until it works). */
+  private failTorrent(t: TorrentRow, message: string): void {
+    this.log.warn({ torrentId: t.id, reason: message }, 'torrent failed');
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE torrents SET state = 'error', error = ?, dl_speed = 0, cleanup_pending = 1 WHERE id = ?").run(message, t.id);
+      this.db.prepare(`UPDATE jobs SET state = 'failed', error = ?, updated_at = ? WHERE torrent_id = ? AND state IN ${ACTIVE}`).run(message, now(), t.id);
+    })();
+    this.missingSince.delete(t.id);
+    this.lastProgress.delete(t.id);
+  }
+
+  /**
+   * Remove errored torrents (and their data) from the downloader, retrying every tick until it succeeds. A torrent
+   * that a retry has meanwhile given an active job again is left alone (heal/addPending re-use it); the worker is
+   * sequential, so a re-add never interleaves with a removal started here.
+   */
+  private async sweepFailed(): Promise<void> {
+    const { db, downloader } = this.d;
+    const rows = db.prepare('SELECT * FROM torrents WHERE cleanup_pending = 1 ORDER BY id').all() as TorrentRow[];
+    for (const t of rows) {
+      await this.step(`sweep:${t.id}`, async () => {
+        const hasActive = (): boolean => !!db.prepare(`SELECT 1 FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE} LIMIT 1`).get(t.id);
+        if (hasActive()) { db.prepare('UPDATE torrents SET cleanup_pending = 0 WHERE id = ?').run(t.id); return; }
+        await downloader.remove(t.infohash, true);
+        await this.rmData(t);
+        db.prepare(
+          `UPDATE torrents SET cleanup_pending = 0 WHERE id = ? AND state = 'error'
+             AND NOT EXISTS (SELECT 1 FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE})`,
+        ).run(t.id, t.id);
+      });
+    }
   }
 
   private async rmData(t: Pick<TorrentRow, 'infohash'>): Promise<void> {
@@ -258,7 +411,7 @@ export class Worker {
       entry.done = runUpload({
         db, config: this.d.config, downloader: this.d.downloader, log: this.log,
         spawn: this.d.spawn ?? ((cmd, args, opts) => nodeSpawn(cmd, args, { env: opts.env, stdio: ['ignore', 'ignore', 'pipe'] })),
-        rcloneBin: this.d.rcloneBin, gdrive: this.d.gdrive ?? realGDrive,
+        rcloneBin: this.d.rcloneBin, gdrive: this.d.gdrive ?? realGDrive, endpointGuard: this.d.endpointGuard,
         onProc: (_id, proc) => { entry.proc = proc; },
       }, c.id, ac.signal).catch((e) => this.log.error({ err: String(e) }, 'upload crashed'))
         .finally(() => { this.uploads.delete(c.id); });
@@ -271,29 +424,54 @@ export class Worker {
   private async cleanup(): Promise<void> {
     const { db, downloader } = this.d;
     const rows = db.prepare("SELECT * FROM torrents WHERE state IN ('downloading','downloaded') ORDER BY id").all() as TorrentRow[];
+    const activeCount = (id: number): number =>
+      (db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE}`).get(id) as { n: number }).n;
     for (const t of rows) {
       await this.step(`cleanup:${t.id}`, async () => {
-        const active = (db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE}`).get(t.id) as { n: number }).n;
-        if (active > 0) return;
+        if (activeCount(t.id) > 0) return;
         const total = (db.prepare('SELECT COUNT(*) AS n FROM jobs WHERE torrent_id = ?').get(t.id) as { n: number }).n;
         // A torrent row without jobs may be mid-creation by the API; give it a minute.
         if (total === 0 && now() - t.added_at < 60) return;
         if (t.state === 'downloaded') {
+          // After a failed upload keep the data for a while so "Retry" re-uploads without re-downloading.
+          const graceMin = getSetting(db, 'cleanup.failedGraceMinutes');
+          if (graceMin > 0) {
+            const lastFail = (db.prepare("SELECT MAX(updated_at) AS t FROM jobs WHERE torrent_id = ? AND state = 'failed'").get(t.id) as { t: number | null }).t;
+            if (lastFail !== null && this.nowSec() - lastFail < graceMin * 60) return;
+          }
           const target = getSetting(db, 'seeding.ratio');
           if (target > 0) {
             const st = await downloader.status(t.infohash);
-            if (st && st.ratio < target) return; // keep seeding
+            const maxMin = getSetting(db, 'seeding.maxMinutes');
+            const capped = maxMin > 0 && t.completed_at !== null && this.nowSec() - t.completed_at > maxMin * 60;
+            if (st && st.ratio < target && !capped) return; // keep seeding
           }
         }
         await downloader.remove(t.infohash, true);
         await this.rmData(t);
-        db.prepare("UPDATE torrents SET state = 'removed', dl_speed = 0 WHERE id = ?").run(t.id);
+        await this.d.hooks?.afterCleanupRemove?.(t);
+        // Decided now, in one transaction, after the slow work: a job the API added meanwhile means the data is gone,
+        // so the torrent goes back to `pending` (re-download) instead of staying stranded.
+        const outcome = db.transaction((): 'removed' | 'reset' => {
+          if (activeCount(t.id) > 0) {
+            db.prepare(
+              `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL,
+                 started_at = NULL, library_path = NULL WHERE id = ?`,
+            ).run(t.id);
+            return 'reset';
+          }
+          db.prepare("UPDATE torrents SET state = 'removed', dl_speed = 0 WHERE id = ?").run(t.id);
+          return 'removed';
+        }).immediate();
         this.lastProgress.delete(t.id);
-        this.log.info({ torrentId: t.id }, 'torrent removed');
+        if (outcome === 'reset') this.log.warn({ torrentId: t.id }, 'a job arrived while the torrent was being removed; it will be downloaded again');
+        else this.log.info({ torrentId: t.id }, 'torrent removed');
       });
     }
   }
 }
+
+const exists = (p: string): Promise<boolean> => stat(p).then(() => true, () => false);
 
 function formatBytes(n: number): string {
   const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];

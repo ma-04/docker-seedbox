@@ -53,6 +53,12 @@ export interface DestinationRow {
 export interface TorrentRow {
   id: number; infohash: string; name: string | null; source_enc: string; total_size: number; state: TorrentState;
   progress: number; dl_speed: number; save_path: string | null; error: string | null; added_at: number; completed_at: number | null;
+  /** Where a completed local job moved the data to (absolute); later jobs copy from there. Migration 003. */
+  library_path: string | null;
+  /** 1 = failed/errored; the worker still has to remove it (and its data) from the downloader. Migration 003. */
+  cleanup_pending: number;
+  /** Unix seconds the worker first handed it to the downloader (metadata timeout). Migration 003. */
+  started_at: number | null;
 }
 export interface JobRow {
   id: number; user_id: number; torrent_id: number; destination_id: number; state: JobState;
@@ -73,4 +79,5 @@ export interface VpnStatus {
 }
 
 export const now = (): number => Math.floor(Date.now() / 1000);
-export const userSlug = (username: string): string => username.toLowerCase().replace(/[^a-z0-9._-]/g, '_');
+/** Lossy by design (`Bob` and `bob` collide): never use it alone as a directory; see userDirName in destinations.ts. */
+export const userSlug = (username: string): string => username.toLowerCase().replace(/[^a-z0-9._-]/g, '_').slice(0, 64) || 'user';

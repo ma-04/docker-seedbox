@@ -4,6 +4,9 @@ import type { Config } from './config.js';
 export interface DriveCreds { clientId: string; clientSecret: string; refreshToken: string }
 type Google = Config['google'];
 
+/** Every request to Google gets a hard timeout so a hung connection cannot wedge a worker step. */
+const TIMEOUT_MS = 30_000;
+
 const tokenCache = new Map<string, { token: string; exp: number }>();
 
 export async function getAccessToken(creds: DriveCreds, google: Google): Promise<string> {
@@ -16,6 +19,7 @@ export async function getAccessToken(creds: DriveCreds, google: Google): Promise
       client_id: creds.clientId, client_secret: creds.clientSecret,
       refresh_token: creds.refreshToken, grant_type: 'refresh_token',
     }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`Google token refresh failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
   const body = (await res.json()) as { access_token: string; expires_in?: number };
@@ -26,6 +30,7 @@ export async function getAccessToken(creds: DriveCreds, google: Google): Promise
 async function drive<T>(creds: DriveCreds, google: Google, path: string, init: RequestInit = {}): Promise<T> {
   const token = await getAccessToken(creds, google);
   const res = await fetch(`${google.apiBaseUrl}/drive/v3${path}`, {
+    signal: AbortSignal.timeout(TIMEOUT_MS),
     ...init,
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
   });
@@ -37,10 +42,11 @@ const FOLDER = 'application/vnd.google-apps.folder';
 /** Escape a value for a Drive `q` string literal. */
 export const q = (s: string): string => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
+/** First match; when duplicates exist (same name twice) the oldest wins, so every caller picks the same one. */
 export async function findChild(creds: DriveCreds, google: Google, parentId: string, name: string, foldersOnly = false): Promise<{ id: string; mimeType: string } | null> {
   const query = `name = '${q(name)}' and '${q(parentId)}' in parents and trashed = false${foldersOnly ? ` and mimeType = '${FOLDER}'` : ''}`;
   const r = await drive<{ files: { id: string; mimeType: string }[] }>(creds, google,
-    `/files?q=${encodeURIComponent(query)}&fields=files(id,mimeType)&pageSize=1&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+    `/files?q=${encodeURIComponent(query)}&fields=files(id,mimeType,createdTime)&orderBy=createdTime&pageSize=1&supportsAllDrives=true&includeItemsFromAllDrives=true`);
   return r.files[0] ?? null;
 }
 

@@ -44,3 +44,11 @@ export interface Downloader {
   status(ref: string): Promise<DownloadStatus | null>;
   remove(ref: string, deleteData: boolean): Promise<void>;
 }
+
+/**
+ * The downloader could not be reached or answered with a server/auth error (restarting, network down).
+ * Says nothing about the torrent itself: callers must never fail jobs because of it.
+ */
+export class DownloaderUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) { super(message, options); this.name = 'DownloaderUnavailableError'; }
+}
