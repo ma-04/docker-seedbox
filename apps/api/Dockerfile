@@ -20,10 +20,12 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY apps/drive-proxy/package.json apps/drive-proxy/package.json
 COPY e2e/package.json e2e/package.json
+# The two `npm ci` stages below build in parallel: their npm cache mounts are `sharing=locked` (concurrent writers to
+# one shared npm cache corrupt it: EEXIST/ENOENT on _cacache renames).
 
 # --- Full install + TypeScript build.
 FROM build-base AS build
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --workspace @seedbox/api --include-workspace-root
 COPY tsconfig.base.json ./
 COPY apps/api/tsconfig.json apps/api/tsconfig.json
@@ -33,7 +35,7 @@ RUN npm run build -w @seedbox/api
 
 # --- Production-only dependencies.
 FROM build-base AS prod-deps
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --omit=dev --workspace @seedbox/api --include-workspace-root \
  && mkdir -p apps/api/node_modules \
  && npm cache clean --force
