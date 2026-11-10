@@ -8,8 +8,8 @@ const RESTARTABLE = new Set(['api', 'worker', 'vpn', 'qbittorrent', 'gateway', '
 const sh = (args, opts = {}) => new Promise((resolve) => {
   execFile('docker', args, { timeout: 90_000, maxBuffer: 4 << 20, ...opts }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr, code: err?.code ?? 0 }));
 });
-const container = async (service) => {
-  const r = await sh(['ps', '-q', '--filter', `label=com.docker.compose.project=${PROJECT}`, '--filter', `label=com.docker.compose.service=${service}`]);
+const container = async (service, all = false) => {
+  const r = await sh(['ps', all ? '-aq' : '-q', '--filter', `label=com.docker.compose.project=${PROJECT}`, '--filter', `label=com.docker.compose.service=${service}`]);
   const id = r.stdout.trim().split('\n')[0];
   if (!id) throw new Error(`no container for service ${service}`);
   return id;
@@ -38,7 +38,7 @@ http.createServer(async (req, res) => {
       const { services } = JSON.parse((await readBody(req)) || '{}');
       if (!Array.isArray(services) || !services.length || !services.every((s) => s === 'worker')) return send(400, { error: 'bad services' });
       for (const s of services) {
-        const r = await sh([url.pathname.slice(1), await container(s)]);
+        const r = await sh([url.pathname.slice(1), await container(s, true)]);
         if (!r.ok) return send(500, { error: r.stderr });
       }
       return send(200, { ok: true });

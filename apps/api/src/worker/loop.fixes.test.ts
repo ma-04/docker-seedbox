@@ -570,7 +570,7 @@ describe('S3 failure diagnostics', () => {
 
   it('a copy that fails with a misleading message is reported as an auth failure when the bucket probe is rejected', async () => {
     const r = await run((args, p) => (args[0] === 'copy' ? p.finish(1, [MISLEADING]) : p.finish(1, [AUTH])));
-    expect(r.calls.map((c) => c.args[0])).toEqual(['copy', 'lsf']);
+    expect(r.calls.map((c) => c.args[0])).toEqual(['copy', 'lsd']);
     expect(r.job.state).toBe('failed');
     expect(r.job.error).toMatch(/rejected the credentials/);
     expect(r.job.error).toMatch(/SignatureDoesNotMatch/);

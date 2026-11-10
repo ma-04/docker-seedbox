@@ -60,13 +60,14 @@ export const S3_AUTH_ERROR = /InvalidAccessKeyId|SignatureDoesNotMatch|AccessDen
 
 /**
  * Cheap read-only call against the bucket root (same env/secrets as the copy), used after a failed S3 copy to find out
- * whether the real cause is rejected credentials. rclone's own copy error can be misleading in that case (a failed
- * object HEAD during path resolution is reported as "is a file not a directory").
+ * whether the real cause is rejected credentials. rclone's own copy error is misleading in that case: with bad
+ * credentials the HEAD of the destination path fails with 403 and rclone >= 1.7x reports "is a file not a directory".
+ * `lsd` lists one level of prefixes only, so it is cheap on large buckets.
  */
 export function s3ProbeCommand(cmd: RcloneCommand, bucket: string): RcloneCommand {
   return {
     ...cmd,
-    args: ['lsf', `DST:${bucket}`, '--max-depth', '1', '--max-count', '1', '--config', '', '--use-json-log', '--retries', '1', '--low-level-retries', '1', '--s3-no-check-bucket'],
+    args: ['lsd', `DST:${bucket}`, '--config', '', '--use-json-log', '--retries', '1', '--low-level-retries', '1', '--s3-no-check-bucket'],
   };
 }
 
