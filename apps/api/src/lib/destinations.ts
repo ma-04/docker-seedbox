@@ -22,8 +22,8 @@ export function maskConfig(config: DestinationConfig): Record<string, unknown> {
 export function mergeConfig<T extends DestinationConfig>(existing: T, patch: Partial<T>): T {
   const out = { ...existing, ...patch } as Record<string, unknown>;
   for (const f of SECRET_FIELDS[existing.type]) {
-    const v = (patch as Record<string, unknown>)[f];
-    if (v === MASK || v === undefined) out[f] = (existing as Record<string, unknown>)[f];
+    const v = (patch as unknown as Record<string, unknown>)[f];
+    if (v === MASK || v === undefined) out[f] = (existing as unknown as Record<string, unknown>)[f];
   }
   return out as T;
 }

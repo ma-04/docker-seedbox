@@ -125,6 +125,9 @@ Test vectors (key `test-signing-key`) — every implementation must have a unit 
 
 ## API (all under `/api`, JSON, errors `{ error: { code, message } }`)
 
+Wire types: `apps/api/src/lib/dto.ts` (authoritative; the web app imports it type-only).
+
+
 ```
 GET    /health
 GET    /me                                   -> { user, isAdmin, limits }
@@ -174,6 +177,7 @@ as `rootFolderId`. Google endpoints are overridable for tests:
 | `GATEWAY_SECRET` | gateway, api | required; shared header secret |
 | `VPN_CONTROL_TOKEN` | vpn, api, worker | required |
 | `APP_HOST`, `AUTH_HOST`, `FILES_HOST` | gateway, api, authelia | hostnames, no scheme |
+| `COOKIE_DOMAIN` | authelia | parent domain covering `APP_HOST` and `AUTH_HOST` |
 | `PUBLIC_SCHEME` | api | `https` |
 | `AUTH_MODE` | gateway | `authelia` \| `external` |
 | `ADMIN_GROUP` | api | `admins` |
@@ -254,7 +258,9 @@ Cache API), stream `files/<id>?alt=media` passing `Range` through, set
 - Unit (vitest) per package.
 - `deploy/compose.e2e.yaml`: hermetic stack — the real services plus `opentracker`,
   a seeder that creates a multi-file torrent (a subfolder and file names with spaces,
-  unicode, `#`, `%` and `'`), MinIO, and a fake Google (OAuth + Drive subset).
+  unicode, `#`, `%` and `'`) and MinIO. Google Drive is not part of the hermetic stack
+  (rclone cannot target a fake Drive API); it is covered by API unit tests with a fake
+  Google and by the live suite.
   Also asserts the kill switch: in `required` mode with no tunnel, a host outside
   `LAN_CIDRS` is unreachable from the qBittorrent namespace. Playwright logs in through
   Authelia and drives the UI: add torrent → completed → download link returns bytes
