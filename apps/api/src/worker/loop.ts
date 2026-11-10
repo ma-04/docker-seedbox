@@ -28,7 +28,7 @@ export interface WorkerDeps {
   /** Free bytes on the downloads volume. */
   freeBytes?: (dir: string) => Promise<number>;
   gdrive?: GDriveOps;
-  /** SSRF guard for user-owned S3 endpoints; defaults to worker/netguard-fallback.ts. */
+  /** SSRF guard for user-owned S3 endpoints; defaults to the shared lib/netguard.ts `assertPublicEndpoint`. */
   endpointGuard?: EndpointGuard;
   /** Clock in ms (tests). */
   nowMs?: () => number;

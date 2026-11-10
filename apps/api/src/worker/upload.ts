@@ -11,10 +11,16 @@ import * as gdriveLib from '../lib/gdrive.js';
 import { getSetting } from '../lib/settings.js';
 import { now, type GDriveConfig, type JobRow, type TorrentRow, type UserRow } from '../lib/types.js';
 import type { Downloader } from '../downloaders/types.js';
-import { fallbackEndpointGuard, type EndpointGuard } from './netguard-fallback.js';
+import { assertPublicEndpoint } from '../lib/netguard.js';
 import { buildRcloneCommand, redact, runRclone, RcloneAborted, type RcloneProc, type SpawnFn } from './rclone.js';
 
-export type { EndpointGuard };
+
+/** SSRF guard called right before every S3 upload (same call shape as `assertPublicEndpoint`). */
+export type EndpointGuard = (url: string, opts: { allowPrivate: boolean }) => Promise<unknown>;
+
+/** rclone treats a scheme-less endpoint as https, so check it as https. */
+export const defaultEndpointGuard: EndpointGuard = (url, opts) =>
+  assertPublicEndpoint(/^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`, opts);
 
 export interface GDriveOps {
   ensureFolderPath: typeof gdriveLib.ensureFolderPath;
@@ -140,7 +146,7 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
     } else {
       let gdrive: { userFolder: string | null; jobFolder: string } | undefined;
       if (dest.config.type === 's3') {
-        await (deps.endpointGuard ?? fallbackEndpointGuard)(dest.config.endpoint, { allowPrivate: !userOwned });
+        await (deps.endpointGuard ?? defaultEndpointGuard)(dest.config.endpoint, { allowPrivate: !userOwned });
       } else if (dest.config.type === 'gdrive') {
         gdrive = await resolveGDriveFolders(deps, dest.config, dest.row.id, userOwned, remotePath, user);
       }
