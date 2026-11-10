@@ -1,9 +1,13 @@
 import { z } from 'zod';
 import { mergeConfig } from '../lib/destinations.js';
+import { parseHttpUrl } from '../lib/netguard.js';
 import { SECRET_FIELDS, type DestinationConfig, type DestinationType } from '../lib/types.js';
 import { parse, validation } from './errors.js';
 
-const url = z.string().url().max(2048);
+/** http(s) only, no embedded credentials (blocks javascript:/data: hrefs and user:pass@host tricks). */
+const url = z.string().max(2048).superRefine((v, ctx) => {
+  try { parseHttpUrl(v); } catch (e) { ctx.addIssue({ code: 'custom', message: (e as Error).message }); }
+});
 const ttl = z.number().int().min(0).max(3_153_600_000).optional();
 
 const subdir = z.string().max(300).optional().refine(

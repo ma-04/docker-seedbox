@@ -1,4 +1,4 @@
-import { contentDisposition } from './disposition';
+import { contentDisposition, safeContentType } from './disposition';
 import { download, resolveFile, throwForDrive, type DriveFile } from './drive';
 import { canonicalPath, verify } from './signing';
 import { HttpError, type Env } from './types';
@@ -25,11 +25,12 @@ function cors(req: Request, env: Env, res: Response): Response {
   return res;
 }
 
-function fileHeaders(file: DriveFile, inline: boolean): Headers {
+function fileHeaders(file: DriveFile): Headers {
   const h = new Headers({
-    'content-type': file.mimeType || 'application/octet-stream',
+    'content-type': safeContentType(file.mimeType),
+    'content-security-policy': "default-src 'none'; sandbox",
     'accept-ranges': 'bytes',
-    'content-disposition': contentDisposition(file.name, inline),
+    'content-disposition': contentDisposition(file.name),
     'cache-control': 'private, no-store',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
@@ -64,7 +65,7 @@ async function handle(req: Request, env: Env): Promise<Response> {
   const file = await resolveFile(env, path);
   if (!file) return text(404, 'Not found');
 
-  const headers = fileHeaders(file, url.searchParams.get('inline') === '1');
+  const headers = fileHeaders(file);
   if (req.method === 'HEAD') {
     if (file.size) headers.set('content-length', file.size);
     return new Response(null, { status: 200, headers });

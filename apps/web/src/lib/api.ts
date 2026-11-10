@@ -18,7 +18,10 @@ let reloaded = false;
 
 /** Same-origin JSON fetch. Errors are `{ error: { code, message } }` -> ApiError(message). */
 export async function api<T>(path: string, init: { method?: string; body?: unknown | FormData } = {}): Promise<T> {
+  const method = init.method ?? 'GET';
   const headers: Record<string, string> = { Accept: 'application/json' };
+  // CSRF defence in depth: the API rejects non-GET requests without this header.
+  if (method !== 'GET' && method !== 'HEAD') headers['X-Requested-With'] = 'seedbox';
   let body: BodyInit | undefined;
   if (init.body instanceof FormData) body = init.body;
   else if (init.body !== undefined) {
@@ -27,7 +30,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
   }
   let res: Response;
   try {
-    res = await fetch(`/api${path}`, { method: init.method ?? 'GET', headers, body, credentials: 'same-origin' });
+    res = await fetch(`/api${path}`, { method, headers, body, credentials: 'same-origin' });
   } catch {
     throw new ApiError('Network error: could not reach the server', 0, 'network');
   }

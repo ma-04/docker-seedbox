@@ -11,12 +11,24 @@ import { now, type DestinationRow, type JobFileRow, type JobRow, type TorrentRow
 import type { Ctx } from '../context.js';
 import { ApiError, idParam, limitExceeded, notFound, parse, validation } from '../errors.js';
 import { ACTIVE_SQL, getJobJoin, JOB_SELECT, jobDto, type JobJoin } from '../mappers.js';
+import { enforce, RATE } from '../ratelimit.js';
+import { NetGuardError } from '../../lib/netguard.js';
+import { guardConfig } from './destinations.js';
 import { parseMagnet, parseTorrentFile, type ParsedSource } from '../torrent.js';
 
 const jsonBody = z.object({ magnet: z.string().min(1).max(8192), destinationId: z.coerce.number().int().positive() });
 const stateQuery = z.object({ state: z.enum(['queued', 'downloading', 'uploading', 'completed', 'failed', 'cancelled']).optional() });
 const TORRENT_FILE_MAX = 5 * 1024 * 1024;
 const WEEK = 7 * 86400;
+
+/** Cancel a live job, or delete a finished one. Used by user and admin DELETE. */
+function cancelOrDeleteJob(db: Ctx['db'], job: JobRow): void {
+  if (job.state === 'completed' || job.state === 'failed' || job.state === 'cancelled') {
+    db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id);
+  } else {
+    db.prepare("UPDATE jobs SET state = 'cancelled', updated_at = ?, upload_speed = 0 WHERE id = ?").run(now(), job.id);
+  }
+}
 
 export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
   const { db, config } = ctx;
@@ -31,14 +43,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
     db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL WHERE id = ? AND state IN ('error','removed')").run(torrentId);
   }
 
-  /** Cancel a live job, or delete a finished one. Used by user and admin DELETE. */
-  function cancelOrDelete(job: JobRow): void {
-    if (job.state === 'completed' || job.state === 'failed' || job.state === 'cancelled') {
-      db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id);
-    } else {
-      db.prepare("UPDATE jobs SET state = 'cancelled', updated_at = ?, upload_speed = 0 WHERE id = ?").run(now(), job.id);
-    }
-  }
+  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, job);
   function retry(job: JobRow, user: UserRow): void {
     if (job.state !== 'failed' && job.state !== 'cancelled') throw new ApiError(409, 'conflict', 'Only failed or cancelled jobs can be retried');
     db.transaction(() => {
@@ -53,11 +58,6 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
     if (!j || j.user_id !== user.id) throw notFound('Job');
     return j;
   };
-  const anyJob = (id: number): JobJoin => {
-    const j = getJobJoin(db, id);
-    if (!j) throw notFound('Job');
-    return j;
-  };
 
   app.get('/api/jobs', async (req) => {
     const { state } = parse(stateQuery, req.query);
@@ -69,6 +69,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
   app.get('/api/jobs/:id', async (req) => jobDto(ownJob(req.user, parse(idParam, (req.params as { id: string }).id))));
 
   app.post('/api/jobs', async (req, reply) => {
+    enforce(ctx.limiter, req.user.id, 'job-create', RATE.jobCreate);
     const user = req.user;
     let parsed: ParsedSource;
     let destinationId: number;
@@ -139,6 +140,11 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
     const dest = getDestination(db, config.appSecret, job.destination_id);
     if (!dest) return { folderUrl: null, files: [] };
     const cfg = dest.config;
+    // Re-check right before presigning: DNS may have changed since the destination was saved.
+    try { await guardConfig(ctx, cfg, dest.row.owner_user_id === null); } catch (e) {
+      if (e instanceof NetGuardError) return { folderUrl: job.folder_url, files: (db.prepare('SELECT * FROM job_files WHERE job_id = ? ORDER BY path').all(job.id) as JobFileRow[]).map((f) => ({ path: f.path, size: f.size, url: null })) };
+      throw e;
+    }
     const files = db.prepare('SELECT * FROM job_files WHERE job_id = ? ORDER BY path').all(job.id) as JobFileRow[];
     const remote = job.remote_path ?? '';
     let link: (f: JobFileRow) => Promise<string | null> | string | null = () => null;
@@ -173,8 +179,17 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
     const out = await Promise.all(files.map(async (f) => ({ path: f.path, size: f.size, url: await link(f) })));
     return { folderUrl: job.folder_url, files: out };
   });
+}
 
-  // ---- admin
+/** Admin routes: register ONLY inside the requireAdmin plugin (see app.ts). */
+export function registerAdminJobs(app: FastifyInstance, ctx: Ctx): void {
+  const { db } = ctx;
+  const anyJob = (id: number): JobJoin => {
+    const j = getJobJoin(db, id);
+    if (!j) throw notFound('Job');
+    return j;
+  };
+  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, job);
   app.get('/api/admin/jobs', async (req) => {
     const { state } = parse(stateQuery, req.query);
     const rows = db.prepare(`${JOB_SELECT} ${state ? 'WHERE j.state = ?' : ''} ORDER BY j.created_at DESC, j.id DESC LIMIT 1000`).all(...(state ? [state] : [])) as JobJoin[];

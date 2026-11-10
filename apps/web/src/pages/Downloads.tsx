@@ -5,6 +5,7 @@ import { Button, Empty, ErrorNote, Field, PageHeader, Progress, Spinner, cx, err
 import { endpoints, type JobDto } from '../lib/api';
 import { formatAge, formatBytes, formatSpeed } from '../lib/format';
 import { useDestinations } from '../lib/hooks';
+import { safeHttpUrl } from '../lib/url';
 import { displayName, filterJobs, isActive, mergeJob, type JobFilter } from '../lib/jobs';
 
 const FILTERS: { id: JobFilter; label: string }[] = [
@@ -112,7 +113,7 @@ export function JobFiles({ job }: { job: JobDto }) {
   if (q.isLoading) return <Spinner label="Loading files" />;
   if (q.error) return <ErrorNote error={q.error} />;
   const data = q.data!;
-  const folderUrl = data.folderUrl ?? job.folderUrl;
+  const folderUrl = safeHttpUrl(data.folderUrl ?? job.folderUrl);
   return (
     <div className="mt-3 rounded-md bg-slate-50 p-3 dark:bg-slate-950" role="region" aria-label={`Files of ${displayName(job)}`}>
       {folderUrl && (
@@ -126,9 +127,9 @@ export function JobFiles({ job }: { job: JobDto }) {
             <li key={f.path} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5 text-sm">
               <span className="min-w-0 flex-1 break-all">{f.path}</span>
               <span className="text-xs text-slate-500">{formatBytes(f.size)}</span>
-              {f.url ? (
+              {safeHttpUrl(f.url) ? (
                 <>
-                  <a data-testid="file-link" href={f.url} target="_blank" rel="noreferrer" download className="font-medium text-brand-600 hover:underline">Download</a>
+                  <a data-testid="file-link" href={f.url ?? undefined} target="_blank" rel="noreferrer" download className="font-medium text-brand-600 hover:underline">Download</a>
                   <Button size="sm" variant="ghost" aria-label={`Copy link for ${f.path}`} onClick={() => copy(f.url!)}>Copy link</Button>
                 </>
               ) : <span className="text-xs italic text-slate-500">no direct link</span>}

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { q } from '../src/drive';
-import { contentDisposition } from '../src/disposition';
+import { contentDisposition, safeContentType } from '../src/disposition';
 import { FOLDER, env, installFakes, signedReq, type DriveNode, type Mock } from './helpers';
 
 const tree: DriveNode[] = [
@@ -204,9 +204,11 @@ describe('streaming', () => {
     expect(await res.text()).toBe('');
     expect(m.mediaCalls).toBe(0);
   });
-  it('?inline=1 uses inline disposition', async () => {
+  it('?inline=1 is ignored: always attachment, sandboxed, nosniff', async () => {
     const res = await run(await signedReq(P, 0, { query: '&inline=1' }));
-    expect(res.headers.get('content-disposition')).toMatch(/^inline;/);
+    expect(res.headers.get('content-disposition')).toMatch(/^attachment;/);
+    expect(res.headers.get('content-security-policy')).toBe("default-src 'none'; sandbox");
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
   });
   it.each([
     ['downloadQuotaExceeded', 403], ['userRateLimitExceeded', 403], [undefined, 429],
@@ -248,9 +250,31 @@ describe('CORS', () => {
 
 describe('Content-Disposition', () => {
   it('ascii fallback and RFC 5987 encoding', () => {
-    expect(contentDisposition('plain.txt', false)).toBe(`attachment; filename="plain.txt"; filename*=UTF-8''plain.txt`);
-    expect(contentDisposition(`ünï "q" it's 100%.txt`, true)).toBe(
-      `inline; filename="_n_ _q_ it's 100_.txt"; filename*=UTF-8''%C3%BCn%C3%AF%20%22q%22%20it%27s%20100%25.txt`,
+    expect(contentDisposition('plain.txt')).toBe(`attachment; filename="plain.txt"; filename*=UTF-8''plain.txt`);
+    expect(contentDisposition(`ünï "q" it's 100%.txt`)).toBe(
+      `attachment; filename="_n_ _q_ it's 100_.txt"; filename*=UTF-8''%C3%BCn%C3%AF%20%22q%22%20it%27s%20100%25.txt`,
     );
+  });
+});
+
+describe('active content types are neutralised', () => {
+  it.each(['text/html', 'text/html; charset=utf-8', 'application/xhtml+xml', 'image/svg+xml', 'text/xml', 'application/xml', 'application/atom+xml',
+    'application/javascript', 'text/javascript', 'application/x-javascript', 'TEXT/HTML'])('%s -> octet-stream', (mime) => {
+    expect(safeContentType(mime)).toBe('application/octet-stream');
+  });
+  it.each(['video/mp4', 'text/plain', 'application/pdf', undefined])('%s is kept/defaulted', (mime) => {
+    expect(safeContentType(mime)).toBe(mime ?? 'application/octet-stream');
+  });
+  it('a stored html file is served as an octet-stream attachment with a sandbox CSP', async () => {
+    const tree: DriveNode[] = [
+      { id: 'ux', name: 'eve', mimeType: FOLDER, parent: 'ROOT' },
+      { id: 'tx', name: 'T', mimeType: FOLDER, parent: 'ux' },
+      { id: 'fx', name: 'x.html', mimeType: 'text/html', parent: 'tx', size: '11' },
+    ];
+    installFakes(tree);
+    const res = await run(await signedReq('/eve/T/x.html'));
+    expect(res.headers.get('content-type')).toBe('application/octet-stream');
+    expect(res.headers.get('content-disposition')).toMatch(/^attachment;/);
+    expect(res.headers.get('content-security-policy')).toBe("default-src 'none'; sandbox");
   });
 });

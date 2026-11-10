@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { MASK } from '../lib/types.js';
 import { alice, B32, bob, HEX, magnet, makeLocalDest, root, setup } from './testutil.js';
 
-const s3 = { endpoint: 'http://127.0.0.1:9', region: 'us-east-1', accessKeyId: 'AK', secretAccessKey: 'SECRETVALUE', bucket: 'b', prefix: 'p' };
+const s3 = { endpoint: 'https://s3.example.test', region: 'us-east-1', accessKeyId: 'AK', secretAccessKey: 'SECRETVALUE', bucket: 'b', prefix: 'p' };
 
 describe('destinations', () => {
   it('masks secrets, treats MASK as unchanged, and hides shared config from users', async () => {
