@@ -94,3 +94,10 @@ export async function staysTrue(cond: () => Promise<boolean>, ms: number, what: 
     await new Promise((r) => setTimeout(r, everyMs));
   } while (Date.now() < until);
 }
+
+/** Deletes the user's earlier jobs for a torrent (adding a torrent the user already has just returns the old job). */
+export async function purgeJobs(page: Page, infohash: string): Promise<void> {
+  for (const j of (await api(page, 'GET', '/api/jobs')).json as { id: number; infohash: string }[]) {
+    if (j.infohash === infohash) await api(page, 'DELETE', `/api/jobs/${j.id}`);
+  }
+}

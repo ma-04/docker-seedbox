@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { DEST, addJob, api, ensureDestination, expectJobState, jobRow, userPage } from '../lib/app';
+import { DEST, addJob, api, ensureDestination, expectJobState, jobRow, purgeJobs, userPage } from '../lib/app';
 import { getManifest, restartServices } from '../lib/infra';
 
 test.describe.configure({ mode: 'serial' });
@@ -10,10 +10,7 @@ async function startSlow(browser: import('@playwright/test').Browser, testInfo: 
   await ensureDestination(a.page, DEST.local, 'local', {});
   await a.close();
   const u = await userPage(browser, testInfo, 'bob');
-  // earlier scenarios left a finished job for this torrent; adding it again would just return that job
-  for (const j of (await api(u.page, 'GET', '/api/jobs')).json as { id: number; infohash: string; state: string }[]) {
-    if (j.infohash === m.slow.infohash) await api(u.page, 'DELETE', `/api/jobs/${j.id}`);
-  }
+  await purgeJobs(u.page, m.slow.infohash);   // earlier scenarios left a finished job for this torrent
   const added = await addJob(u.page, { magnet: m.slow.magnet }, DEST.local);
   expect(added.status).toBe(201);
   const row = jobRow(u.page, added.id);

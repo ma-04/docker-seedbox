@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { DEST, addJob, api, ensureDestination, expectJobState, jobRow, staysTrue, userPage } from '../lib/app';
+import { DEST, addJob, api, ensureDestination, expectJobState, jobRow, purgeJobs, staysTrue, userPage } from '../lib/app';
 import { getManifest, probe, qbtTorrents, wgConfig } from '../lib/infra';
 
 test.describe.configure({ mode: 'serial' });
@@ -99,6 +99,7 @@ test.describe('8. VPN', () => {
     expect((await probe(DIRECT)).reachable).toBe(false);
 
     const alice = await userPage(browser, testInfo, 'alice');
+    await purgeJobs(alice.page, m.slow.infohash);   // test 5 left alice a finished job for this torrent
     const added = await addJob(alice.page, { magnet: m.slow.magnet }, DEST.local);
     expect(added.status).toBe(201);
     const row = jobRow(alice.page, added.id);
@@ -143,10 +144,11 @@ test.describe('8. VPN', () => {
     await page.getByRole('form', { name: 'VPN settings' }).getByLabel('VPN mode').selectOption('off');
     await page.getByRole('button', { name: 'Save VPN settings' }).click();
     await expect.poll(async () => (await status(page)).mode).toBe('off');
-    for (let i = 0; i < 2; i++) {
-      const row = page.getByTestId('vpn-config-row').first();
+    for (const n of ['e2e-wg1', 'e2e-wg2']) {
+      const row = page.getByTestId('vpn-config-row').filter({ hasText: n });
       await row.getByRole('button', { name: 'Delete' }).click();
       await row.getByRole('button', { name: 'Yes, delete' }).click();
+      await expect(row).toHaveCount(0);
     }
     await expect(page.getByTestId('vpn-config-row')).toHaveCount(0);
     // off mode: direct traffic is possible again
