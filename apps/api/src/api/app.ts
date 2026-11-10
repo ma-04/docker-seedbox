@@ -7,24 +7,29 @@ import { getSetting } from '../lib/settings.js';
 import { vpnClient, type VpnClient } from '../lib/vpn.js';
 import { registerAuth } from './auth.js';
 import type { Ctx } from './context.js';
+import { QbittorrentDownloader } from '../downloaders/qbittorrent.js';
+import type { EngineClient } from './engine.js';
 import { ApiError } from './errors.js';
 import { registerAdmin } from './routes/admin.js';
 import { registerDestinations } from './routes/destinations.js';
 import { registerDl } from './routes/dl.js';
+import { registerEngine } from './routes/engine.js';
 import { registerEvents } from './routes/events.js';
 import { registerJobs } from './routes/jobs.js';
 
 export interface BuildAppOptions {
-  db: Db; config: Config; vpn?: VpnClient; fetchImpl?: typeof fetch;
+  db: Db; config: Config; vpn?: VpnClient; engine?: EngineClient; fetchImpl?: typeof fetch;
   logger?: boolean | object; ssePollMs?: number; ssePingMs?: number;
 }
 
 export function buildApp(opts: BuildAppOptions): FastifyInstance {
   const { db, config } = opts;
+  const fetchImpl = opts.fetchImpl ?? ((...a: Parameters<typeof fetch>) => globalThis.fetch(...a));
   const ctx: Ctx = {
     db, config,
     vpn: opts.vpn ?? vpnClient(config),
-    fetchImpl: opts.fetchImpl ?? ((...a) => globalThis.fetch(...a)),
+    engine: opts.engine ?? new QbittorrentDownloader({ baseUrl: config.qbtUrl, fetchImpl, timeoutMs: 8000 }),
+    fetchImpl,
     ssePollMs: opts.ssePollMs ?? 1000,
     ssePingMs: opts.ssePingMs ?? 20_000,
   };
@@ -63,5 +68,6 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   registerDl(app, ctx);
   registerEvents(app, ctx);
   registerAdmin(app, ctx);
+  registerEngine(app, ctx);
   return app;
 }

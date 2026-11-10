@@ -169,6 +169,20 @@ OAuth callback creates a folder named `Seedbox` in the user's Drive and stores i
 as `rootFolderId`. Google endpoints are overridable for tests:
 `GOOGLE_OAUTH_AUTH_URL`, `GOOGLE_OAUTH_TOKEN_URL`, `GOOGLE_API_BASE_URL`.
 
+Engine settings: `GET|PUT /admin/engine/settings` (admin only; `EngineSettingsDto` /
+partial `EngineSettingsUpdateDto`) let admins tune a fixed whitelist of qBittorrent
+preferences from the web UI's collapsed "Advanced: torrent engine" section. The API calls
+qBittorrent's Web API (`GET /api/v2/app/preferences`, `POST /api/v2/app/setPreferences`
+with `json=`) and maps friendly camelCase names to a hard-coded set of keys (speed limits
+in KB/s, connection and upload-slot limits, queueing, DHT/PeX/LSD, encryption, anonymous
+mode, listen port, extra trackers). Input is validated strictly server-side and unknown
+keys are rejected with 400; nothing outside the whitelist is ever read back or written.
+Save paths, WebUI/auth, proxy, "run external program", RSS, scan dirs, mail, DNS, UPnP and
+the bound interface are never exposed. The qBittorrent WebUI itself is deliberately not
+exposed or proxied: it can run arbitrary commands and rewrite paths and credentials, so
+a whitelist is the only safe surface. If the engine is unreachable the API answers 502
+`engine_unavailable` without relaying the upstream response.
+
 ## Environment
 
 | Var | Used by | Default / meaning |

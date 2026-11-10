@@ -90,3 +90,23 @@ describe('QbittorrentDownloader', () => {
     await expect(d2.status('a'.repeat(40))).rejects.toThrow(/403/);
   });
 });
+
+describe('QbittorrentDownloader preferences', () => {
+  it('reads preferences and posts json=<object> to setPreferences', async () => {
+    const seen: { path: string; body?: string }[] = [];
+    const fetchImpl = (async (url: string, init: RequestInit = {}) => {
+      const path = new URL(url).pathname.replace('/api/v2', '');
+      seen.push({ path, body: init.body as string | undefined });
+      return path === '/app/preferences' ? Response.json({ dht: true }) : new Response('');
+    }) as unknown as typeof fetch;
+    const d = new QbittorrentDownloader({ baseUrl: 'http://qbt:8080', fetchImpl });
+    expect(await d.getPreferences()).toEqual({ dht: true });
+    await d.setPreferences({ dl_limit: 1024, dht: false });
+    expect(seen[1]!.path).toBe('/app/setPreferences');
+    expect(new URLSearchParams(seen[1]!.body).get('json')).toBe('{"dl_limit":1024,"dht":false}');
+  });
+  it('throws on upstream failure', async () => {
+    const d = new QbittorrentDownloader({ baseUrl: 'http://qbt', fetchImpl: (async () => new Response('nope', { status: 500 })) as unknown as typeof fetch });
+    await expect(d.getPreferences()).rejects.toThrow();
+  });
+});

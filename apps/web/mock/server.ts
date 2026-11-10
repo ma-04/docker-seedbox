@@ -8,6 +8,13 @@ const job = (id: number, o: Record<string, unknown>) => ({
   createdAt: t - id * 300, updatedAt: t, completedAt: null, user: { id: 1, username: 'alice' }, ...o,
 });
 
+const engine: Record<string, unknown> = {
+  downloadLimitKBps: 0, uploadLimitKBps: 0, maxConnections: 200, maxConnectionsPerTorrent: 100, maxUploads: -1, maxUploadsPerTorrent: -1,
+  queueingEnabled: true, maxActiveDownloads: 3, maxActiveUploads: 3, maxActiveTorrents: 5,
+  dht: true, pex: true, lsd: true, encryption: 'prefer', anonymousMode: false,
+  listenPort: 51413, randomPort: false, addTrackersEnabled: false, addTrackers: '',
+};
+
 const db = {
   jobs: [
     job(1, { state: 'downloading', name: 'Big Buck Bunny', totalSize: 276134947, downloadProgress: 0.42, downloadSpeed: 3_400_000 }),
@@ -82,6 +89,16 @@ export function mockMiddleware() {
       const c = db.vpn.find((x) => x.id === id); Object.assign(c ?? {}, await readBody(req)); return send(c);
     }
     if (p === '/admin/settings') { if (m === 'PUT') Object.assign(db.settings, await readBody(req)); return send(db.settings); }
+    if (p === '/admin/engine/settings') {
+      if (url.searchParams.has('down')) return send({ error: { code: 'engine_unavailable', message: 'Torrent engine is not reachable' } }, 502);
+      if (m === 'PUT') {
+        const b = (await readBody(req)) as Record<string, unknown>;
+        const bad = Object.keys(b).find((k) => !(k in engine));
+        if (bad) return send({ error: { code: 'validation', message: `Unrecognized key: ${bad}` } }, 400);
+        Object.assign(engine, b);
+      }
+      return send(engine);
+    }
     if (p === '/admin/users') return send(db.users);
     if (/^\/admin\/users\/\d+$/.test(p)) { const u = db.users.find((x) => x.id === idOf(/(\d+)$/)); Object.assign(u ?? {}, await readBody(req)); return send(u); }
     if (p === '/admin/jobs') return send(db.jobs);

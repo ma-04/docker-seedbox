@@ -7,6 +7,7 @@ import { openDb } from '../lib/db.js';
 import type { VpnStatus } from '../lib/types.js';
 import type { VpnClient } from '../lib/vpn.js';
 import { buildApp } from './app.js';
+import type { EngineClient } from './engine.js';
 
 export const GW = 'test-gateway-secret';
 export type TestUser = { name: string; groups?: string };
@@ -27,14 +28,14 @@ export function fakeVpn(overrides: Partial<VpnClient> = {}): VpnClient & { calls
   };
 }
 
-export function setup(vpn = fakeVpn()) {
+export function setup(vpn = fakeVpn(), engine?: EngineClient) {
   const downloads = mkdtempSync(join(tmpdir(), 'seedbox-test-'));
   const config = loadConfig({
     APP_SECRET: 's'.repeat(40), GATEWAY_SECRET: GW, VPN_CONTROL_TOKEN: 'vt', DOWNLOADS_DIR: downloads,
     APP_HOST: 'app.example.test', AUTH_HOST: 'auth.example.test', FILES_HOST: 'files.example.test', PUBLIC_SCHEME: 'https',
   });
   const db = openDb(':memory:');
-  const app = buildApp({ db, config, vpn, ssePollMs: 50, ssePingMs: 80 });
+  const app = buildApp({ db, config, vpn, engine, ssePollMs: 50, ssePingMs: 80 });
   const call = (user: TestUser | null, method: InjectOptions['method'], url: string, payload?: unknown, extra: InjectOptions = {}) =>
     app.inject({
       method, url, payload: payload as InjectOptions['payload'],

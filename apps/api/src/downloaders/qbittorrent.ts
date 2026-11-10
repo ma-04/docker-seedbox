@@ -130,4 +130,17 @@ export class QbittorrentDownloader implements Downloader {
   async remove(ref: string, deleteData: boolean): Promise<void> {
     await this.call('/torrents/delete', this.form({ hashes: ref.toLowerCase(), deleteFiles: deleteData ? 'true' : 'false' }));
   }
+
+  /** GET /app/preferences. Callers must pick only the keys they need; the full object contains secrets. */
+  async getPreferences(): Promise<Record<string, unknown>> {
+    const res = await this.call('/app/preferences');
+    const j = (await res.json()) as unknown;
+    if (!j || typeof j !== 'object' || Array.isArray(j)) throw new Error('qBittorrent returned unexpected preferences');
+    return j as Record<string, unknown>;
+  }
+
+  /** POST /app/setPreferences with form field `json=<object>` (only the given keys are changed). */
+  async setPreferences(prefs: Record<string, unknown>): Promise<void> {
+    await this.call('/app/setPreferences', this.form({ json: JSON.stringify(prefs) }));
+  }
 }

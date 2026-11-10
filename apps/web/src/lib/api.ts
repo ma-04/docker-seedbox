@@ -1,10 +1,10 @@
 import type {
-  DestinationCreateDto, DestinationDto, DestinationUpdateDto, JobDto, JobFilesDto, MeDto, SettingsDto,
+  DestinationCreateDto, DestinationDto, DestinationUpdateDto, EngineSettingsDto, EngineSettingsUpdateDto, JobDto, JobFilesDto, MeDto, SettingsDto,
   TestResultDto, UserDto, UserUpdateDto, VpnConfigCreateDto, VpnConfigDto, VpnConfigUpdateDto, VpnStatusDto,
 } from '../../../api/src/lib/dto';
 
 export type {
-  DestinationCreateDto, DestinationDto, DestinationUpdateDto, JobDto, JobFilesDto, MeDto, SettingsDto,
+  DestinationCreateDto, DestinationDto, DestinationUpdateDto, EngineSettingsDto, EngineSettingsUpdateDto, JobDto, JobFilesDto, MeDto, SettingsDto,
   TestResultDto, UserDto, UserUpdateDto, VpnConfigCreateDto, VpnConfigDto, VpnConfigUpdateDto, VpnStatusDto,
 };
 
@@ -82,6 +82,8 @@ export const endpoints = {
     vpnRotate: (configId?: number) => api<unknown>('/admin/vpn/rotate', { method: 'POST', body: configId === undefined ? {} : { configId } }),
     settings: () => api<SettingsDto>('/admin/settings'),
     updateSettings: (b: Partial<SettingsDto>) => api<SettingsDto>('/admin/settings', { method: 'PUT', body: b }),
+    engineSettings: () => api<EngineSettingsDto>('/admin/engine/settings'),
+    updateEngineSettings: (b: EngineSettingsUpdateDto) => api<EngineSettingsDto>('/admin/engine/settings', { method: 'PUT', body: b }),
     users: () => api<UserDto[]>('/admin/users'),
     updateUser: (id: number, b: UserUpdateDto) => api<UserDto>(`/admin/users/${id}`, { method: 'PATCH', body: b }),
     jobs: () => api<JobDto[]>('/admin/jobs'),

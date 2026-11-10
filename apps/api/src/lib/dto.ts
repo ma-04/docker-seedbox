@@ -91,3 +91,19 @@ export interface UserDto {
 export interface UserUpdateDto { disabled?: boolean; maxActiveJobs?: number | null }
 
 /** SSE on GET /events: `event: job` with `data: JobDto` whenever one of the caller's jobs changes; `event: ping` every 20 s. */
+
+/**
+ * GET/PUT /admin/engine/settings: a fixed whitelist of qBittorrent preferences (never the WebUI itself).
+ * Speeds are KB/s (1 KB = 1024 B; qBittorrent's API uses bytes/s), 0 = unlimited.
+ * Connection/upload-slot/queue limits: -1 = unlimited (0 is accepted on write and treated as unlimited by qBittorrent).
+ * `listenPort` is 0 while `randomPort` is on. `addTrackers` is newline-separated.
+ */
+export interface EngineSettingsDto {
+  downloadLimitKBps: number; uploadLimitKBps: number;
+  maxConnections: number; maxConnectionsPerTorrent: number; maxUploads: number; maxUploadsPerTorrent: number;
+  queueingEnabled: boolean; maxActiveDownloads: number; maxActiveUploads: number; maxActiveTorrents: number;
+  dht: boolean; pex: boolean; lsd: boolean; encryption: 'prefer' | 'require' | 'disable'; anonymousMode: boolean;
+  listenPort: number; randomPort: boolean;
+  addTrackersEnabled: boolean; addTrackers: string;
+}
+export type EngineSettingsUpdateDto = Partial<EngineSettingsDto>;
