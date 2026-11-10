@@ -1,0 +1,75 @@
+# Hermetic kill-switch / rotation test stack (project name: sbvpn). Driven by run.sh.
+name: sbvpn
+networks:
+  lan:    { ipam: { config: [ { subnet: 172.31.250.0/24 } ] } }   # stands in for the compose network
+  inet:   { ipam: { config: [ { subnet: 172.31.251.0/24 } ] } }   # stands in for "the internet"
+  behind: { ipam: { config: [ { subnet: 172.31.252.0/24 } ] } }   # only the WG servers sit here
+volumes: { qbt-config: {}, downloads: {} }
+x-tools: &tools
+  image: sbvpn-tools
+  volumes: ["./:/t:ro"]
+services:
+  tools-build:
+    <<: *tools
+    build: { context: ., dockerfile: Dockerfile.tools }
+    command: ["true"]
+    restart: "no"
+  echo-direct:   # reachable directly from the vpn container; must NOT be reachable in required mode
+    <<: *tools
+    command: ["/t/echo.sh"]
+    environment: { ECHO_NAME: direct }
+    networks: { inet: { ipv4_address: 172.31.251.20 } }
+  echo-behind:   # only reachable through a WireGuard server
+    <<: *tools
+    command: ["/t/echo.sh"]
+    environment: { ECHO_NAME: behind }
+    networks: { behind: { ipv4_address: 172.31.252.20 } }
+  wg1:
+    <<: *tools
+    command: ["/t/wg-server.sh"]
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv4.ip_forward: "1" }
+    environment: { WG_PRIVATE: "${WG1_PRIV:-}", PEER_PUBLIC: "${CLIENT_PUB:-}", TUN_NET: 10.99.1 }
+    networks: { inet: { ipv4_address: 172.31.251.11 }, behind: { ipv4_address: 172.31.252.11 } }
+  wg2:
+    <<: *tools
+    command: ["/t/wg-server.sh"]
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv4.ip_forward: "1" }
+    environment: { WG_PRIVATE: "${WG2_PRIV:-}", PEER_PUBLIC: "${CLIENT_PUB:-}", TUN_NET: 10.99.2 }
+    networks: { inet: { ipv4_address: 172.31.251.12 }, behind: { ipv4_address: 172.31.252.12 } }
+
+  # ---- the two services under test (README.md has the deployable versions) ----
+  vpn:
+    build: ..
+    image: sbvpn-vpn
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv6.conf.all.disable_ipv6: "1" }
+    environment:
+      VPN_CONTROL_TOKEN: test-token-0123456789
+      LAN_CIDRS: 172.31.250.0/24
+      VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-off}
+      PUBLIC_IP_URL: http://172.31.252.20/
+      HANDSHAKE_TIMEOUT_SEC: "8"
+    tmpfs: [/tmp]
+    networks:
+      lan:  { ipv4_address: 172.31.250.2 }
+      inet: { ipv4_address: 172.31.251.2, gw_priority: 100 }   # the "normal" default route
+  qbittorrent:
+    build: ../../qbittorrent
+    image: sbvpn-qbittorrent
+    network_mode: service:vpn
+    environment: { LAN_CIDRS: 172.31.250.0/24 }
+    volumes: ["qbt-config:/config", "downloads:/downloads"]
+    depends_on: { vpn: { condition: service_healthy, restart: true } }
+  # test helpers
+  probe:   # shares the vpn netns, like qbittorrent does
+    <<: *tools
+    network_mode: service:vpn
+    command: ["sleep", "infinity"]
+    depends_on: { vpn: { condition: service_healthy } }
+  lan-client:
+    <<: *tools
+    command: ["sleep", "infinity"]
+    environment: { VPN_CONTROL_TOKEN: test-token-0123456789 }
+    networks: { lan: { ipv4_address: 172.31.250.50 } }

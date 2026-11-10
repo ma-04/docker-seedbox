@@ -230,9 +230,12 @@ Crash-safe: all state lives in SQLite; on boot, `uploading` jobs restart their u
 
 ## VPN sidecar (`services/vpn`)
 
-Alpine + `wireguard-tools` + `iptables` + a small control server on `:8000`
+Purpose-built (Gluetun was evaluated and rejected, see `services/vpn/README.md`): Alpine +
+`wireguard-tools` + `iproute2` + `nftables` + a small static Go control server on `:8000`
 (Bearer `VPN_CONTROL_TOKEN`, reachable only on the compose network).
-Needs `cap_add: [NET_ADMIN]`, `/dev/net/tun`, sysctl `net.ipv4.conf.all.src_valid_mark=1`.
+Needs `cap_add: [NET_ADMIN]` and a kernel with WireGuard (5.6+); no `/dev/net/tun`, no host
+sysctls. Sysctl `net.ipv6.conf.all.disable_ipv6=1` (namespaced) is set as belt and braces.
+The exact compose blocks for `vpn` and `qbittorrent` are in `services/vpn/README.md`.
 
 ```
 GET  /status      -> { mode, connected, name, publicIp, lastHandshakeSec, since }
@@ -241,23 +244,39 @@ POST /disconnect
 POST /mode        { mode: "off" | "required" }
 ```
 
-Kill switch (always on in `required` mode, including before the first `/connect`):
-OUTPUT allowed only to `lo`, the wg interface, the current WireGuard endpoint
-(UDP), and `LAN_CIDRS` (the compose subnet, so `api`/`worker` can reach
-qBittorrent's WebUI on `:8080` and the e2e tracker/seeder). IPv6 is dropped entirely
-and `::/0` is stripped from `AllowedIPs`. In `off` mode traffic leaves via the
-container's normal route. Config is held in memory/tmpfs only.
+`/connect` takes raw wg-quick text, rejects `PreUp/PostUp/PreDown/PostDown/SaveConfig` (400),
+executes nothing from it, strips IPv6 `Address`/`DNS`/`AllowedIPs` (`::/0`), waits for a handshake
+(`502` if none; the previous tunnel is kept) and is make-before-break: the old tunnel carries
+traffic until the new one has a handshake, routes are then swapped atomically.
+`connected` = interface up and last handshake <= 180 s ago. `publicIp` comes from `PUBLIC_IP_URL`
+(default a plain-text IP service) fetched through the tunnel, `null` on failure.
+`VPN_DEFAULT_MODE` (`off` | `required`, default `off`) is the mode after a container start; the mode
+and the last config are otherwise in memory only and are re-applied by the worker.
+
+Kill switch (always on in `required` mode, including before the first `/connect` and during
+rotation): one nftables table, replaced atomically and installed before the API listens. OUTPUT
+policy `drop`; allowed only to loopback, `LAN_CIDRS` (the compose subnet, so `api`/`worker` can
+reach qBittorrent's WebUI on `:8080` and the e2e tracker/seeder), `wg*` interfaces and the UDP
+endpoint of the tunnel being brought up / currently up. Established-connection state grants
+nothing. IPv6 is dropped entirely. In `off` mode traffic leaves via the container's normal
+route (and a tunnel, if any, is torn down). Input from the tunnel to `:8000`/`:8080` is dropped in
+both modes. Config is held in process memory only (never on disk, argv or logs).
 
 DNS: while a tunnel is up the sidecar overwrites `/etc/resolv.conf` *in place* (it is
-shared with `qbittorrent`) with the config's `DNS =` servers, so lookups go through
-the tunnel; Docker's embedded resolver (`127.0.0.11`) is restored on disconnect / `off`.
-Consequently nothing in the shared namespace may rely on compose service names: the
-e2e tracker/seeder use fixed IPs inside `LAN_CIDRS`.
+shared with `qbittorrent`) with the config's `DNS =` servers (else `VPN_FALLBACK_DNS`, default
+`1.1.1.1`, via the tunnel), so lookups go through the tunnel. In `required` mode without a tunnel
+it holds no nameserver; Docker's embedded resolver (`127.0.0.11`) is restored in `off` mode and
+is blocked for everything but root in `required` mode. Root (the sidecar itself) uses it only to
+resolve a WireGuard endpoint *hostname*, the one lookup that leaves the namespace outside the
+tunnel (IP endpoints avoid it). Consequently nothing in the shared namespace may rely on compose
+service names: the e2e tracker/seeder use fixed IPs inside `LAN_CIDRS`.
 
 qBittorrent WebUI auth: `services/qbittorrent` wraps the official image with an
-entrypoint that seeds `qBittorrent.conf` (WebUI port 8080, auth bypass for
-`LAN_CIDRS` via `AuthSubnetWhitelist`, host-header validation off, no UPnP, DHT/PeX on,
-default save path `/downloads/incomplete`). The WebUI is never routed by the gateway.
+entrypoint that (re)asserts, in `qBittorrent.conf` (`[WebUI]` section in qBittorrent 5), WebUI
+port 8080, auth bypass for `LAN_CIDRS` via `AuthSubnetWhitelist`, `LocalHostAuth=false`, host-header
+validation and CSRF protection off, no UPnP, anonymous mode off, no interface binding, and on first
+start only: DHT/PeX on, LSD off, no pre-allocation, default save path `/downloads/incomplete`;
+it runs as uid/gid 1000. The WebUI is never routed by the gateway.
 
 ## drive-proxy (Cloudflare Worker)
 
