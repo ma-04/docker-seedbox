@@ -55,6 +55,36 @@ Routes that need no login: `GET /api/health` and `GET /dl/*` (on `FILES_HOST`, s
 URL only; the gateway still adds `X-Gateway-Secret`). Every other route, including
 `GET /api/oauth/google/callback`, requires the user headers.
 
+**Authorisation follows the matched route, never the URL string.** `apps/api/src/api/app.ts`
+registers authenticated routes in an encapsulated plugin whose `onRequest` hook is `requireUser`,
+and admin routes in a child plugin that adds `requireAdmin`; only `/api/health` and `/dl/*` live
+outside. Unmatched URLs 404 without touching user state. Every route carries `config.guard`
+(`public|user|admin`) and `app.routeTable` lists them; `security.test.ts` fails if a route exists
+outside a guarded plugin or an `admin` URL is not in the admin plugin. New admin routes must be
+registered from `registerAdmin*` inside that plugin. Root hooks additionally reject (400) raw paths
+containing `%2f`, `%5c`, `%2e`, `%00`, empty or `.`/`..` segments, or an `/api` prefix that
+differs in case.
+
+CSRF: every non-GET/HEAD `/api/*` request (JSON and multipart) must carry
+`X-Requested-With: seedbox` or the API answers 403 `csrf`. The SPA's fetch wrapper adds it.
+
+Outbound destinations (SSRF): `apps/api/src/lib/netguard.ts` exports
+`assertPublicEndpoint(url, { allowPrivate })`. For user-owned destinations the S3 `endpoint` and
+`publicBaseUrl` must be `https:`, carry no credentials, not be a bare single-label host, and every
+address the name resolves to must be public (not loopback, RFC 1918, CGNAT, link-local, ULA,
+unspecified, multicast, or IPv4-mapped forms). It is enforced on create, update, `test` and when
+building file links. Admin-created (shared) destinations may use `http:` and private addresses
+(e.g. a MinIO container) but still no credentials in the URL. `publicBaseUrl`/`proxyBaseUrl` are
+`http(s)` only everywhere. The worker must call `assertPublicEndpoint` again right before uploading
+for user-owned destinations (DNS rebinding: a check here cannot bind the later connection).
+`POST .../test` returns only a short category (`unreachable`, `auth failed`, `bucket not found`,
+`tls error`, `timeout`) to non-admins; admins see the detailed message.
+
+Limits: `GET /api/events` allows `SSE_MAX_PER_USER` (default 5; the oldest is closed) streams per
+user and `SSE_MAX_TOTAL` (default 200, then 503); one shared poller feeds all streams and closes
+the streams of users who become disabled. Per-user token buckets (429 + `Retry-After`): destination
+test 10/min, job create 30/min, destination create 20/min.
+
 ## Domain model (SQLite)
 
 Authoritative schema: `apps/api/migrations/001_init.sql`. Timestamps are unix seconds.
@@ -105,8 +135,10 @@ destinations, `<prefix>/<torrentName>/...` for user-owned ones. `userSlug` =
   The API also returns the per-user Drive folder URL when `sharing != 'none'`.
 - gdrive, user-owned: Drive `webViewLink` of the uploaded folder.
 - s3: `publicBaseUrl` join, else a presigned GET.
-- local: `${publicBaseUrl}/dl/<urlencoded path>?exp=&sig=` → api verifies →
-  `X-Accel-Redirect: /_protected/<path>` → gateway serves from the `downloads` volume.
+- local: `${publicBaseUrl}/dl/<urlencoded path>?exp=&sig=` → api verifies → requires a completed
+  job (owner not disabled) whose `remote_path` + `job_files.path` covers the path, else 404 →
+  `X-Accel-Redirect: /_protected/<path>` → gateway serves from the `downloads` volume. Responses
+  always carry `Content-Disposition: attachment`, `nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`.
 
 **Signature (shared by api, worker and drive-proxy):**
 `sig = hex(HMAC-SHA256(key, path + "\n" + exp))` where `path` is the *decoded* path
@@ -284,7 +316,8 @@ Secrets: `GDRIVE_CLIENT_ID`, `GDRIVE_CLIENT_SECRET`, `GDRIVE_REFRESH_TOKEN`,
 `SIGNING_KEY`; var `ROOT_FOLDER_ID`. `GET|HEAD /<path>?exp=&sig=`: verify signature,
 resolve path segment-by-segment under the root (Drive `files.list`, cached with the
 Cache API), stream `files/<id>?alt=media` passing `Range` through, set
-`Content-Disposition`, `Accept-Ranges`. No directory listing. 404 for anything else.
+`Content-Disposition: attachment` (always; no inline mode), `Content-Security-Policy: default-src 'none'; sandbox`,
+`nosniff`, `Accept-Ranges`; html/xhtml/svg/xml/javascript types are sent as `application/octet-stream`. No directory listing. 404 for anything else.
 
 ## Tests
 

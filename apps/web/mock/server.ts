@@ -52,6 +52,7 @@ export function mockMiddleware() {
     const p = url.pathname.replace(/\/$/, '');
     const m = req.method ?? 'GET';
     const send = (body: unknown, status = 200) => { res.statusCode = status; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(body)); };
+    if (m !== 'GET' && m !== 'HEAD' && req.headers['x-requested-with'] !== 'seedbox') return send({ error: { code: 'csrf', message: 'Missing X-Requested-With header' } }, 403);
     const idOf = (re: RegExp) => Number(re.exec(p)?.[1]);
     if (p === '/events') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
