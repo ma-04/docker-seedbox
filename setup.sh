@@ -163,9 +163,18 @@ authelia_image() { # single source of truth: deploy/compose.yaml
 
 # --- Authelia users -------------------------------------------------------------------------------
 hash_password() { # hash_password PASSWORD -> argon2id digest, via the pinned Authelia image
-  local out
-  out=$(docker run --rm "$(authelia_image)" authelia crypto hash generate argon2 --password "$1" --no-confirm 2>&1) \
-    || die "Could not hash the password with $(authelia_image): $out"
+  # The password goes in through a 0600 env file, never on the `docker run` command line (visible in `ps` and
+  # shell history to every local user). Limitation: `authelia crypto hash generate` has no stdin/file input, so
+  # the authelia process inside the throw-away container still has it in its argv for about a second.
+  local out envf rc=0
+  envf=$(mktemp) || die "Cannot create a temporary file"
+  chmod 600 "$envf"
+  printf 'SEEDBOX_PW=%s\n' "$1" >"$envf"
+  # shellcheck disable=SC2016  # $SEEDBOX_PW must expand inside the container
+  out=$(docker run --rm --env-file "$envf" --entrypoint sh "$(authelia_image)" \
+    -c 'exec authelia crypto hash generate argon2 --password "$SEEDBOX_PW" --no-confirm' 2>&1) || rc=$?
+  rm -f "$envf"
+  [ "$rc" -eq 0 ] || die "Could not hash the password with $(authelia_image) (exit $rc)"
   printf '%s\n' "$out" | sed -n 's/^Digest: //p' | head -n 1
 }
 

@@ -4,6 +4,8 @@
 # The worker overrides CMD with `node dist/worker.js`.
 
 ARG NODE_IMAGE=node:22-bookworm-slim
+# Pinned: a floating tag would change the uploader (and its flags) under a running deployment.
+ARG RCLONE_IMAGE=rclone/rclone:1.74.4
 
 # --- Collect every workspace package.json (+ lockfile) so `npm ci` layers cache independently of source changes.
 FROM ${NODE_IMAGE} AS manifests
@@ -39,11 +41,13 @@ RUN --mount=type=cache,target=/root/.npm \
  && npm cache clean --force
 
 # --- Runtime.
+FROM ${RCLONE_IMAGE} AS rclone
+
 FROM ${NODE_IMAGE} AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=rclone/rclone:latest /usr/local/bin/rclone /usr/local/bin/rclone
+COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     DOWNLOADS_DIR=/downloads \
