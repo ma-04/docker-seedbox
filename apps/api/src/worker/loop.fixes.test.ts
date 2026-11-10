@@ -75,7 +75,7 @@ describe('races that used to strand jobs', () => {
     expect(job(s.db, j1).state).toBe('completed');
     // the user deletes the finished job; the worker retires the torrent (removes it from qBittorrent)
     s.db.prepare('DELETE FROM jobs WHERE id = ?').run(j1);
-    rmSync(torrent(s.db, t).library_path!, { recursive: true, force: true }); // deleting a local job removes its library copy
+    rmSync(torrent(s.db, t).library_path!, { recursive: true, force: true }); // the library copy is gone (cleaned up by hand): without it the worker must download again
     await s.worker.tick();
     expect(torrent(s.db, t).state).toBe('removed');
     expect(dl.dropNextAdd).toBe(true);
