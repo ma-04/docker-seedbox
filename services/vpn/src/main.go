@@ -150,18 +150,9 @@ func (s *Server) connect(name string, cfg *WGConfig) (err error) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	// Handshake done: swing the routes over (route replace is atomic per prefix), then drop the old tunnel.
-	for _, p := range cfg.AllowedIPs {
-		var prefixes []string
-		if p.Bits() == 0 {
-			prefixes = []string{"0.0.0.0/1", "128.0.0.0/1"}
-		} else {
-			prefixes = []string{p.String()}
-		}
-		for _, x := range prefixes {
-			if _, err = run("", "ip", "-4", "route", "replace", x, "dev", newIf); err != nil {
-				return fail(err)
-			}
-		}
+	// If any replace fails, the routes already moved are restored so the old tunnel is not left routeless.
+	if err = swapRoutes(run, allowedPrefixes(cfg.AllowedIPs), newIf); err != nil {
+		return fail(err)
 	}
 	for _, c := range s.lan { // keep LAN CIDRs on the normal route
 		if out, _ := run("", "ip", "-4", "route", "show", "exact", c.String()); out == "" {
@@ -193,6 +184,66 @@ func (s *Server) connect(name string, cfg *WGConfig) (err error) {
 		}
 	}
 	return nil
+}
+
+// runFn is the signature of run(); swapRoutes takes it so the rollback can be tested.
+type runFn func(stdin string, name string, args ...string) (string, error)
+
+// allowedPrefixes expands AllowedIPs like wg-quick: a default route becomes two /1 routes.
+func allowedPrefixes(ips []netip.Prefix) []string {
+	var out []string
+	for _, p := range ips {
+		if p.Bits() == 0 {
+			out = append(out, "0.0.0.0/1", "128.0.0.0/1")
+		} else {
+			out = append(out, p.String())
+		}
+	}
+	return out
+}
+
+// swapRoutes points every prefix at newIf. Before touching a prefix its current route is
+// recorded; when a later `ip route replace` fails, every prefix already moved is put back
+// (or deleted if it had no route), so the previous tunnel keeps carrying traffic.
+func swapRoutes(run runFn, prefixes []string, newIf string) error {
+	type saved struct{ prefix, route string }
+	var done []saved
+	for _, x := range prefixes {
+		prev, _ := run("", "ip", "-4", "route", "show", "exact", x)
+		if _, err := run("", "ip", "-4", "route", "replace", x, "dev", newIf); err != nil {
+			for i := len(done) - 1; i >= 0; i-- {
+				d := done[i]
+				if d.route == "" {
+					_, _ = run("", "ip", "-4", "route", "del", d.prefix, "dev", newIf)
+				} else {
+					_, _ = run("", "ip", append([]string{"-4", "route", "replace"}, strings.Fields(d.route)...)...)
+				}
+			}
+			return err
+		}
+		done = append(done, saved{x, firstLine(prev)})
+	}
+	return nil
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return strings.TrimSpace(s)
+}
+
+// resolveDefaultMode validates VPN_DEFAULT_MODE. Unset means "required" (fail closed): after a
+// host or container restart qBittorrent resumes torrents immediately, long before the worker
+// has re-applied the admin's setting, so the safe default must not leak the real IP.
+func resolveDefaultMode(v string) (string, error) {
+	switch strings.TrimSpace(v) {
+	case "":
+		return "required", nil
+	case "off", "required":
+		return strings.TrimSpace(v), nil
+	}
+	return "", errors.New("VPN_DEFAULT_MODE must be off or required")
 }
 
 var errHandshake = errors.New("handshake failed")
@@ -233,6 +284,9 @@ func (s *Server) setMode(mode string) error {
 	s.mu.Lock()
 	cur, ep, up := s.mode, s.endpoint, s.iface != ""
 	s.mu.Unlock()
+	if cur == mode {
+		return nil // the worker re-asserts the mode regularly; an unchanged mode must not touch the tunnel or the firewall
+	}
 	if mode == "required" {
 		var eps []netip.AddrPort
 		if up {
@@ -245,9 +299,7 @@ func (s *Server) setMode(mode string) error {
 			s.failClosedDNS()
 		}
 	} else {
-		if cur != mode || up {
-			s.teardown() // off = normal container route; the tunnel goes away
-		}
+		s.teardown() // off = normal container route; the tunnel goes away
 		s.openDNS()
 		if err := applyRuleset(s.rules("off")); err != nil {
 			return err
@@ -413,9 +465,9 @@ func main() {
 	} else {
 		s.handshakeTimeout = 20 * time.Second
 	}
-	mode := env("VPN_DEFAULT_MODE", "off")
-	if mode != "off" && mode != "required" {
-		log.Fatalf("VPN_DEFAULT_MODE must be off or required")
+	mode, err := resolveDefaultMode(os.Getenv("VPN_DEFAULT_MODE"))
+	if err != nil {
+		log.Fatal(err)
 	}
 	// Remember Docker's resolver config; heal a stale file left by a previous run.
 	orig, _ := os.ReadFile("/etc/resolv.conf")

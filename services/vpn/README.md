@@ -65,7 +65,11 @@ sidecar: Alpine + `wireguard-tools` + `iproute2` + `nftables` + a ~500-line stat
   tunnel in the background (first IPv4 found in the body) and is `null` when it fails.
 * **Modes** — `required` (above) or `off` (OUTPUT policy accept, tunnel torn down, normal route).
   Neither mode nor the last config survives a container restart; the default after start is
-  `VPN_DEFAULT_MODE` (`off` unless set to `required`, which fails closed until `/connect`).
+  `VPN_DEFAULT_MODE`, which is **`required`** (fail closed until `/connect`) unless explicitly set to `off`:
+  after a host or container restart qBittorrent resumes its torrents immediately, long before the worker has
+  re-applied the admin's setting, so an open default would leak the real IP. `POST /mode` with the mode the
+  sidecar already has is a no-op (it never touches a live tunnel or the firewall); the worker applies `vpn.mode`
+  at startup and only calls it when the reported mode differs.
 * Input from the tunnel to `:8000`/`:8080` is dropped in every mode, so other customers of the VPN
   provider cannot reach the control API or WebUI via the tunnel address.
 * Config contents live only in the process memory. Logs contain only `connect "<name>" ok|failed`.
@@ -78,7 +82,7 @@ sidecar: Alpine + `wireguard-tools` + `iproute2` + `nftables` + a ~500-line stat
 |---|---|---|
 | `VPN_CONTROL_TOKEN` | required | Bearer token for `:8000` |
 | `LAN_CIDRS` | `172.31.250.0/24` | comma-separated; reachable in every mode and state (must contain the compose subnet) |
-| `VPN_DEFAULT_MODE` | `off` | `off` or `required` right after (re)start |
+| `VPN_DEFAULT_MODE` | `required` | `required` (fail closed) or `off` right after (re)start |
 | `PUBLIC_IP_URL` | `https://api.ipify.org` | plain-text IP service, fetched through the tunnel; empty disables |
 | `VPN_FALLBACK_DNS` | `1.1.1.1` | resolver used when the config has no IPv4 `DNS =` |
 | `HANDSHAKE_TIMEOUT_SEC` | `20` | how long `/connect` waits for a handshake |
@@ -113,7 +117,7 @@ services:
     environment:
       VPN_CONTROL_TOKEN: ${VPN_CONTROL_TOKEN:?set VPN_CONTROL_TOKEN}
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
-      VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-off}   # "required" = fail closed after restarts
+      VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-required}   # fail closed after restarts until the worker applies vpn.mode
       # PUBLIC_IP_URL: https://api.ipify.org
     tmpfs: [/tmp]                     # (not read_only: /etc/resolv.conf must stay writable)
     networks:
@@ -167,7 +171,9 @@ POST /disconnect
 POST /mode        { mode: "off" | "required" }
 ```
 
-`/connect`, `/disconnect` and `/mode` return the new status. `/mode off` also tears the tunnel down.
+`/connect`, `/disconnect` and `/mode` return the new status. `/mode off` also tears the tunnel down;
+`/mode` with the current mode changes nothing. If swapping the routes to a new tunnel fails midway, the
+routes already moved are restored so the old tunnel keeps working.
 
 ## Tests
 

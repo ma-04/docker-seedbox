@@ -18,12 +18,16 @@ export interface VpnReconcileDeps { db: Db; config: Config; vpn: VpnClient; log:
 export async function reconcileVpn(d: VpnReconcileDeps, trafficExpected: boolean): Promise<void> {
   const { db, config, vpn } = d;
   const mode = getSetting(db, 'vpn.mode');
-  await vpn.setMode(mode);
+  let status = await vpn.status();
+  // Only touch the sidecar when its mode differs: `/mode off` tears a live tunnel down, so re-asserting it blindly is harmful.
+  if (status.mode !== mode) {
+    await vpn.setMode(mode);
+    status = { ...status, mode };
+  }
   if (mode !== 'required') return;
   const enabled = (db.prepare('SELECT COUNT(*) AS n FROM vpn_configs WHERE enabled = 1').get() as { n: number }).n;
   if (enabled === 0) return;
 
-  const status = await vpn.status();
   const rotation = getSetting(db, 'vpn.rotation');
   const activeId = getSetting(db, 'vpn.activeConfigId');
   const stale = trafficExpected && status.connected && status.lastHandshakeSec !== null && status.lastHandshakeSec > HANDSHAKE_STALE_SEC;
