@@ -29,6 +29,9 @@ rnd "$DATA/Single File.bin" 2000000
 
 # --- 3. slow torrent (upload-limited below) so tests can act mid-download ---------------------------
 rnd "$DATA/Slow File.bin" 8000000
+# Two more, each used by exactly one restart test: a torrent whose data was just delivered is reused, not re-downloaded.
+rnd "$DATA/Slow File 2.bin" 8000000
+rnd "$DATA/Slow File 3.bin" 8000000
 
 mk() { # mk <file-or-dir name inside $DATA> <torrent file base>
   transmission-create -o "$OUT/torrents/$2.torrent" -t "$TRACKER_URL" -c "" "$DATA/$1" >/dev/null
@@ -37,9 +40,11 @@ mk() { # mk <file-or-dir name inside $DATA> <torrent file base>
 mk "E2E Multi Pack" multi
 mk "Single File.bin" single
 mk "Slow File.bin" slow
+mk "Slow File 2.bin" slow2
+mk "Slow File 3.bin" slow3
 
 hash_of() { transmission-show "$OUT/torrents/$1.torrent" | sed -n 's/^ *Hash\( v1\)\{0,1\}: *//p' | head -1; }
-H_MULTI=$(hash_of multi); H_SINGLE=$(hash_of single); H_SLOW=$(hash_of slow)
+H_MULTI=$(hash_of multi); H_SINGLE=$(hash_of single); H_SLOW=$(hash_of slow); H_SLOW2=$(hash_of slow2); H_SLOW3=$(hash_of slow3)
 
 cat > "$CFG/settings.json" <<JSON
 {
@@ -68,19 +73,20 @@ cat > "$CFG/settings.json" <<JSON
 JSON
 transmission-daemon -f --config-dir "$CFG" --log-level=error &
 for i in $(seq 1 60); do transmission-remote -l >/dev/null 2>&1 && break; sleep 0.5; done
-for t in multi single slow; do
+for t in multi single slow slow2 slow3; do
   transmission-remote -a "$OUT/torrents/$t.torrent" -w "$DATA" >/dev/null
 done
 # Slow torrent: cap its upload so a 6 MB download takes ~20 s.
-SLOW_ID=$(transmission-remote -l | awk '/Slow File/ {gsub(/\*/,"",$1); print $1}')
-transmission-remote -t "$SLOW_ID" -u "${SLOW_KBPS:-300}" >/dev/null
-# wait until all three are verified and seeding
+for SLOW_ID in $(transmission-remote -l | awk '/Slow File/ {gsub(/\*/,"",$1); print $1}'); do
+  transmission-remote -t "$SLOW_ID" -u "${SLOW_KBPS:-300}" >/dev/null
+done
+# wait until all five are verified and seeding
 for i in $(seq 1 120); do
   n=$(transmission-remote -l | grep -c -E 'Seeding|Idle' || true)
-  [ "$n" -ge 3 ] && break
+  [ "$n" -ge 5 ] && break
   sleep 0.5
 done
-[ "$n" -ge 3 ] || { echo "seeder: torrents did not reach Seeding"; transmission-remote -l; exit 1; }
+[ "$n" -ge 5 ] || { echo "seeder: torrents did not reach Seeding"; transmission-remote -l; exit 1; }
 
 magnet() { # magnet <hash> <display name>
   dn=$(printf '%s' "$2" | jq -sRr @uri)
@@ -98,15 +104,19 @@ one_file_json() { # one_file_json <file>
 
 jq -n \
   --arg tracker "$TRACKER_URL" \
-  --arg hm "$H_MULTI" --arg hs "$H_SINGLE" --arg hl "$H_SLOW" \
+  --arg hm "$H_MULTI" --arg hs "$H_SINGLE" --arg hl "$H_SLOW" --arg hl2 "$H_SLOW2" --arg hl3 "$H_SLOW3" \
   --arg mm "$(magnet "$H_MULTI" 'E2E Multi Pack')" --arg ms "$(magnet "$H_SINGLE" 'Single File.bin')" --arg ml "$(magnet "$H_SLOW" 'Slow File.bin')" \
+  --arg ml2 "$(magnet "$H_SLOW2" 'Slow File 2.bin')" --arg ml3 "$(magnet "$H_SLOW3" 'Slow File 3.bin')" \
   --argjson fm "$(files_json "$M")" \
   --argjson fs "$(one_file_json "$DATA/Single File.bin")" \
   --argjson fl "$(one_file_json "$DATA/Slow File.bin")" \
+  --argjson fl2 "$(one_file_json "$DATA/Slow File 2.bin")" --argjson fl3 "$(one_file_json "$DATA/Slow File 3.bin")" \
   '{tracker: $tracker,
     multi:  {name: "E2E Multi Pack", infohash: $hm, torrent: "torrents/multi.torrent",  magnet: $mm, files: $fm},
     single: {name: "Single File.bin", infohash: $hs, torrent: "torrents/single.torrent", magnet: $ms, files: $fs},
-    slow:   {name: "Slow File.bin",   infohash: $hl, torrent: "torrents/slow.torrent",   magnet: $ml, files: $fl}}' > "$OUT/manifest.json.tmp"
+    slow:   {name: "Slow File.bin",   infohash: $hl, torrent: "torrents/slow.torrent",   magnet: $ml, files: $fl},
+    slow2:  {name: "Slow File 2.bin", infohash: $hl2, torrent: "torrents/slow2.torrent", magnet: $ml2, files: $fl2},
+    slow3:  {name: "Slow File 3.bin", infohash: $hl3, torrent: "torrents/slow3.torrent", magnet: $ml3, files: $fl3}}' > "$OUT/manifest.json.tmp"
 chmod 644 "$OUT/manifest.json.tmp"
 mv "$OUT/manifest.json.tmp" "$OUT/manifest.json"
 echo "seeder: ready ($(jq -c '[.multi.infohash,.single.infohash,.slow.infohash]' "$OUT/manifest.json"))"

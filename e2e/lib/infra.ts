@@ -6,7 +6,7 @@ export const sha256 = (b: Buffer): string => createHash('sha256').update(b).dige
 
 export interface FixtureFile { path: string; size: number; sha256: string }
 export interface FixtureTorrent { name: string; infohash: string; torrent: string; magnet: string; files: FixtureFile[] }
-export interface Manifest { tracker: string; multi: FixtureTorrent; single: FixtureTorrent; slow: FixtureTorrent }
+export interface Manifest { tracker: string; multi: FixtureTorrent; single: FixtureTorrent; slow: FixtureTorrent; slow2: FixtureTorrent; slow3: FixtureTorrent }
 
 let manifest: Manifest | null = null;
 /** Seeder fixture: torrents, magnets and sha256 sums (served by the TLS front from the shared fixtures volume). */
