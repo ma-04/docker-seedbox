@@ -4,7 +4,7 @@ compatibility_date = "2025-01-15"
 workers_dev = true
 
 [vars]
-# Drive folder id that holds <userSlug>/<torrentName>/... (the destination's root folder id).
+# Drive folder id that holds <userSlug>-<userId>/<torrent name> [<8 hex>]/... (the destination's root folder id).
 ROOT_FOLDER_ID = ""
 # Optional:
 # ALLOWED_ORIGINS = "https://seedbox.example.com"   # comma separated, or "*"; default: no CORS headers
