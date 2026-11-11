@@ -139,6 +139,8 @@ NETWORK_RE='^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'
 GROUP_RE='^[a-z0-9][a-z0-9_-]{0,31}$'
 VERSION_RE='^(latest|edge|local|[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+# Host values are compared the way the gateway, Authelia and the API read them: surrounding blanks dropped, lowercase.
+norm_host() { local v; v=$(lower "$1"); v=${v#"${v%%[![:space:]]*}"}; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
 valid_host() { [ "${#1}" -le 253 ] && [[ $1 =~ $HOST_RE ]]; }
 valid_user() { [[ $1 =~ $USER_RE ]]; }
 valid_email() { [ "${#1}" -le 254 ] && [[ $1 =~ $EMAIL_RE ]] && valid_host "$(lower "${1#*@}")"; }
@@ -503,55 +505,78 @@ or continue with --accept-new-secret if you want a new secret and will re-enter 
   # Optional, independently: a separate login host (AUTH_HOST) and/or a separate download host (FILES_HOST). Empty
   # AUTH_HOST / FILES_HOST in .env mean "on APP_HOST". Re-runs keep whatever layout .env already has (an existing
   # three-host install stays exactly as it is) unless flags change it.
+  local auth_mode=${AUTH_MODE_IN:-$(env_get AUTH_MODE)}
+  auth_mode=$(norm_host "${auth_mode:-authelia}")
+  case "$auth_mode" in authelia|external) ;; *) die "AUTH_MODE must be authelia or external (got '$auth_mode')" ;; esac
+
   local cur_app cur_auth cur_files cur_cookie
   cur_app=$(env_get APP_HOST); cur_auth=$(env_get AUTH_HOST); cur_files=$(env_get FILES_HOST); cur_cookie=$(env_get COOKIE_DOMAIN)
   if [ "$fresh" = 1 ]; then cur_app=""; cur_auth=""; cur_files=""; cur_cookie=""; fi   # .env.example values are placeholders
-  cur_app=$(lower "$cur_app"); cur_auth=$(lower "$cur_auth"); cur_files=$(lower "$cur_files"); cur_cookie=$(lower "$cur_cookie")
+  cur_app=$(norm_host "$cur_app"); cur_auth=$(norm_host "$cur_auth"); cur_files=$(norm_host "$cur_files"); cur_cookie=$(norm_host "$cur_cookie")
   [ "$cur_auth" != "$cur_app" ] || cur_auth=""     # equal to APP_HOST = the single-domain layout
   [ "$cur_files" != "$cur_app" ] || cur_files=""
 
   if [ -z "$DOMAIN" ] && [ -n "$cur_app" ]; then DOMAIN=$cur_app; fi
   ask DOMAIN "Domain (e.g. seedbox.example.com)" ""
   reject_ctl "domain" "$DOMAIN"
-  DOMAIN=$(lower "$DOMAIN")
+  DOMAIN=$(norm_host "$DOMAIN")
   [ -n "$DOMAIN" ] || die "A domain is required: ./setup.sh --domain seedbox.example.com"
   valid_host "$DOMAIN" || die "'$DOMAIN' is not a valid fully-qualified domain name (hostnames only, no https://)."
-  # Changing the domain on a re-run keeps the layout: separate hosts are re-derived from the new domain.
+  # Changing the domain on a re-run keeps the layout. Only hosts that still are the old derived defaults (auth.<old>,
+  # files.<old>) follow the new domain; a host chosen deliberately (e.g. a download domain outside the cookie domain)
+  # stays as it is. A cookie domain that was simply the old domain is re-derived; a custom parent is kept (and checked).
   if [ -n "$cur_app" ] && [ "$cur_app" != "$DOMAIN" ]; then
-    [ -z "$cur_auth" ] || cur_auth="auth.$DOMAIN"
-    [ -z "$cur_files" ] || cur_files="files.$DOMAIN"
-    cur_cookie=""
+    [ "$cur_auth" != "auth.$cur_app" ] || cur_auth="auth.$DOMAIN"
+    [ "$cur_files" != "files.$cur_app" ] || cur_files="files.$DOMAIN"
+    [ "$cur_cookie" != "$cur_app" ] || cur_cookie=""
   fi
   local app_host=$DOMAIN auth_host files_host
   if [ "$SINGLE_DOMAIN" = 1 ]; then
     { [ -z "$AUTH_HOST_IN" ] && [ -z "$FILES_HOST_IN" ]; } || die "--single-domain cannot be combined with --auth-host / --files-host."
     cur_auth=""; cur_files=""; cur_cookie=""
   fi
-  auth_host=$(lower "${AUTH_HOST_IN:-$cur_auth}")
-  files_host=$(lower "${FILES_HOST_IN:-$cur_files}")
+  auth_host=$(norm_host "${AUTH_HOST_IN:-$cur_auth}")
+  files_host=$(norm_host "${FILES_HOST_IN:-$cur_files}")
   if [ "$fresh" = 1 ] && [ "$INTERACTIVE" = 1 ] && [ "$SINGLE_DOMAIN" = 0 ]; then
     say "Everything is served from $DOMAIN: the app, the login page ($DOMAIN/auth/) and downloads ($DOMAIN/dl/)."
     if [ -z "$FILES_HOST_IN" ] && confirm "Serve downloads from a separate domain? (isolates downloaded files from the app's origin; one more DNS record)" n; then
+      say "Use a name OUTSIDE $DOMAIN (e.g. on another domain you own): a subdomain of $DOMAIN would still receive the login cookie."
       FILES_HOST_IN=""
-      ask FILES_HOST_IN "Download hostname" "files.$DOMAIN"
-      files_host=$(lower "$FILES_HOST_IN")
+      ask FILES_HOST_IN "Download hostname (empty = keep downloads on $DOMAIN/dl/)" ""
+      files_host=$(norm_host "$FILES_HOST_IN")
     fi
-    if [ -z "$AUTH_HOST_IN" ] && confirm "Serve the login page from a separate hostname instead of $DOMAIN/auth/? (rarely needed; one more DNS record)" n; then
+    if [ "$auth_mode" = authelia ] && [ -z "$AUTH_HOST_IN" ] && confirm "Serve the login page from a separate hostname instead of $DOMAIN/auth/? (rarely needed; one more DNS record)" n; then
       AUTH_HOST_IN=""
       ask AUTH_HOST_IN "Login hostname" "auth.$DOMAIN"
-      auth_host=$(lower "$AUTH_HOST_IN")
+      auth_host=$(norm_host "$AUTH_HOST_IN")
     fi
   fi
   reject_ctl "login host" "$auth_host"; reject_ctl "download host" "$files_host"
   [ "$auth_host" != "$app_host" ] || auth_host=""
   [ "$files_host" != "$app_host" ] || files_host=""
+  if [ "$auth_mode" = external ] && [ -n "$auth_host" ]; then
+    say "AUTH_MODE=external has no login portal: dropping the separate login host $auth_host."
+    auth_host=""
+  fi
   local h
   for h in "$auth_host" "$files_host"; do [ -z "$h" ] || valid_host "$h" || die "'$h' is not a valid hostname."; done
   if [ -n "$auth_host" ] && [ "$auth_host" = "$files_host" ]; then die "The login host and the download host must be different hostnames."; fi
-  # Authelia's session cookie: by default scoped to APP_HOST itself (with the portal on APP_HOST nothing else needs
-  # it); a separate login host needs a parent domain of both (--cookie-domain).
+  # Authelia's session cookie. Portal on APP_HOST: scoped to APP_HOST itself, always (a parent domain left over from a
+  # three-host install would send the cookie to sibling hosts, files host included, and allow post-login redirects to
+  # them). Separate login host: a parent domain of both, required (--cookie-domain; default: the app domain).
   local cookie_domain
-  cookie_domain=$(lower "${COOKIE_IN:-${cur_cookie:-$DOMAIN}}")
+  if [ -z "$auth_host" ]; then
+    COOKIE_IN=$(norm_host "$COOKIE_IN")
+    if [ -n "$COOKIE_IN" ] && [ "$COOKIE_IN" != "$app_host" ]; then
+      die "--cookie-domain only applies with a separate login host (--auth-host): with the portal on $app_host/auth/ the login cookie is scoped to $app_host."
+    fi
+    if [ -n "$cur_cookie" ] && [ "$cur_cookie" != "$app_host" ]; then
+      say "Login cookie domain: $cur_cookie -> $app_host (the portal is on $app_host; users log in once more)."
+    fi
+    cookie_domain=$app_host
+  else
+    cookie_domain=$(norm_host "${COOKIE_IN:-${cur_cookie:-$DOMAIN}}")
+  fi
   reject_ctl "cookie domain" "$cookie_domain"
   valid_host "$cookie_domain" || die "'$cookie_domain' is not a valid hostname."
   case "$app_host" in *".$cookie_domain"|"$cookie_domain") ;; *) die "APP_HOST ($app_host) must be inside the cookie domain ($cookie_domain). Use --cookie-domain." ;; esac
@@ -589,9 +614,6 @@ or continue with --accept-new-secret if you want a new secret and will re-enter 
   PROXY=$(lower "$PROXY")
   case "$PROXY" in bundled|external|none) ;; *) die "--proxy must be bundled, external or none (got '$PROXY')" ;; esac
 
-  local auth_mode=${AUTH_MODE_IN:-$(env_get AUTH_MODE)}
-  auth_mode=${auth_mode:-authelia}
-  case "$auth_mode" in authelia|external) ;; *) die "AUTH_MODE must be authelia or external (got '$auth_mode')" ;; esac
   check_auth_proxy "$auth_mode" "$PROXY"
 
   local proxy_network=${PROXY_NETWORK_IN:-$(env_get PROXY_NETWORK)}
@@ -723,18 +745,20 @@ in_cookie_domain() { # in_cookie_domain HOST COOKIE_DOMAIN -> 0 if a cookie for 
 }
 sep_host() { # sep_host KEY : AUTH_HOST / FILES_HOST from .env if it is a separate host (empty or = APP_HOST -> nothing)
   local v app
-  v=$(lower "$(env_get "$1")"); app=$(lower "$(env_get APP_HOST)")
+  # AUTH_MODE=external has no portal: the gateway ignores AUTH_HOST then, and so does everything here
+  if [ "$1" = AUTH_HOST ] && [ "$(norm_host "$(env_get AUTH_MODE)")" = external ]; then return 0; fi
+  v=$(norm_host "$(env_get "$1")"); app=$(norm_host "$(env_get APP_HOST)")
   [ "$v" = "$app" ] || printf '%s' "$v"
 }
 hosts_in_use() { # the public hostnames this install answers on, one per line: APP_HOST, then any separate ones
   local h
-  lower "$(env_get APP_HOST)"; printf '\n'
+  norm_host "$(env_get APP_HOST)"; printf '\n'
   for h in "$(sep_host AUTH_HOST)" "$(sep_host FILES_HOST)"; do [ -z "$h" ] || printf '%s\n' "$h"; done
 }
 
 print_summary() {
   local gen_pw=${1:-} proxy scheme app auth files n
-  app=$(lower "$(env_get APP_HOST)"); auth=$(sep_host AUTH_HOST); files=$(sep_host FILES_HOST)
+  app=$(norm_host "$(env_get APP_HOST)"); auth=$(sep_host AUTH_HOST); files=$(sep_host FILES_HOST)
   scheme=$(env_get PUBLIC_SCHEME); scheme=${scheme:-https}
   case "$(env_get COMPOSE_FILE)" in *proxy-bundled*) proxy=bundled ;; *proxy-external*) proxy=external ;; *) proxy=none ;; esac
   step "Done"
@@ -1013,14 +1037,32 @@ cmd_doctor() {
 
   say ""; say "Hosts"
   local h ips app_l sep_a sep_f
-  app_l=$(lower "$(env_get APP_HOST)"); sep_a=$(sep_host AUTH_HOST); sep_f=$(sep_host FILES_HOST)
-  if [ -z "$sep_a" ] && [ -z "$sep_f" ]; then ok "single domain: $app_l (login $app_l/auth/, downloads $app_l/dl/)"
-  else ok "app $app_l, login ${sep_a:-$app_l/auth/}, downloads ${sep_f:-$app_l/dl/}"; fi
+  local external=0 login
+  [ "$(norm_host "$(env_get AUTH_MODE)")" != external ] || external=1
+  app_l=$(norm_host "$(env_get APP_HOST)"); sep_a=$(sep_host AUTH_HOST); sep_f=$(sep_host FILES_HOST)
+  login=${sep_a:-$app_l/auth/}; [ "$external" = 0 ] || login="your SSO proxy (AUTH_MODE=external)"
+  if [ -z "$sep_a" ] && [ -z "$sep_f" ] && [ "$external" = 0 ]; then ok "single domain: $app_l (login $app_l/auth/, downloads $app_l/dl/)"
+  else ok "app $app_l, login $login, downloads ${sep_f:-$app_l/dl/}"; fi
+  if [ "$external" = 1 ] && [ -n "$(norm_host "$(env_get AUTH_HOST)")" ]; then
+    meh "AUTH_HOST is set but ignored with AUTH_MODE=external (no login portal); leave it empty"
+  fi
   for h in AUTH_HOST FILES_HOST; do
-    if [ -n "$(env_get "$h")" ] && [ -z "$(sep_host "$h")" ]; then meh "$h equals APP_HOST: leave it empty instead (same layout; avoids duplicate names in VIRTUAL_HOST/LETSENCRYPT_HOST)"; fi
+    if [ -n "$(norm_host "$(env_get "$h")")" ] && [ "$(norm_host "$(env_get "$h")")" = "$app_l" ]; then
+      meh "$h repeats APP_HOST: leave it empty (same layout, but the name appears twice in VIRTUAL_HOST/LETSENCRYPT_HOST); ./setup.sh normalises it"
+    fi
   done
-  local ck; ck=$(lower "$(env_get COOKIE_DOMAIN)"); ck=${ck:-$app_l}
-  if [ -n "$sep_f" ] && in_cookie_domain "$sep_f" "$ck"; then
+  # the cookie domain Authelia actually uses (configuration.yml): APP_HOST with the portal on it, else COOKIE_DOMAIN
+  local ck ck_set; ck_set=$(norm_host "$(env_get COOKIE_DOMAIN)"); ck=$app_l
+  if [ "$external" = 0 ] && [ -n "$sep_a" ]; then
+    ck=$ck_set
+    if [ -z "$ck" ]; then bad "COOKIE_DOMAIN is empty but the login portal has its own host ($sep_a): Authelia will not start. Set it to a parent domain of both hosts (./setup.sh --cookie-domain)"
+    elif ! in_cookie_domain "$app_l" "$ck" || ! in_cookie_domain "$sep_a" "$ck"; then bad "COOKIE_DOMAIN ($ck) must be a parent of both APP_HOST ($app_l) and AUTH_HOST ($sep_a)"
+    else ok "login cookie domain: $ck"; fi
+  elif [ "$external" = 0 ]; then
+    if [ -n "$ck_set" ] && [ "$ck_set" != "$app_l" ]; then meh "COOKIE_DOMAIN=$ck_set is ignored: with the portal on $app_l the login cookie is scoped to $app_l (re-run ./setup.sh to tidy .env)"
+    else ok "login cookie domain: $app_l"; fi
+  fi
+  if [ -n "$sep_f" ] && [ "$external" = 0 ] && [ -n "$ck" ] && in_cookie_domain "$sep_f" "$ck"; then
     meh "download host $sep_f is inside the login cookie's domain ($ck): it receives the session cookie and is same-site; a host outside it isolates downloads fully (SECURITY.md)"
   fi
 
