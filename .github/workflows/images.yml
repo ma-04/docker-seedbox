@@ -1,0 +1,133 @@
+name: Images
+
+# Reusable: builds the five images for linux/amd64 AND linux/arm64, each NATIVELY on a runner of that architecture (no
+# QEMU anywhere), and smoke-tests every image on the runner that built it (.github/scripts/smoke.sh).
+#
+#   push: false  ci.yml (every pull request): build, load into the runner's Docker, smoke-test. Nothing leaves the runner.
+#   push: true   release.yml: build with provenance + SBOM, push UNTAGGED (by digest), pull that exact digest back and
+#                smoke-test it, then hand the digest to release.yml (artifact digest-<image>-<arch>), which merges the two
+#                architectures into one multi-arch index per image and tags it.
+#
+# fail-fast: one red leg cancels the others, and release.yml tags nothing unless all ten legs are green.
+on:
+  workflow_call:
+    inputs:
+      push:
+        description: Push by digest (needs packages:write) instead of loading locally
+        type: boolean
+        default: false
+      version:
+        description: Version baked into the images (web footer VITE_APP_VERSION, org.opencontainers.image.version)
+        type: string
+        required: true
+
+# No `permissions:` here on purpose: in a reusable workflow they could only narrow what the caller grants. The caller
+# decides: ci.yml grants contents:read only, release.yml adds packages:write for the push.
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    name: Build ${{ matrix.image.name }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        # Descriptions: no commas (build-push-action reads annotations as a comma/newline list). release.yml copies the
+        # per-arch manifest annotations onto the multi-arch index, so this is the only place they are written.
+        image:
+          - { name: api, context: ., file: apps/api/Dockerfile, description: "docker-seedbox API and worker: Node.js with SQLite and rclone" }
+          - { name: web, context: ., file: apps/web/Dockerfile, description: "docker-seedbox web UI served by nginx-unprivileged" }
+          - { name: gateway, context: services/gateway, file: services/gateway/Dockerfile, description: "docker-seedbox gateway: nginx routing with login enforcement and signed downloads" }
+          - { name: vpn, context: services/vpn, file: services/vpn/Dockerfile, description: "docker-seedbox WireGuard sidecar with an nftables kill switch" }
+          - { name: qbittorrent, context: services/qbittorrent, file: services/qbittorrent/Dockerfile, description: "docker-seedbox qBittorrent: the official qbittorrent-nox plus a settings entrypoint" }
+        # GitHub-hosted standard runners; the -arm label is the native arm64 runner (free for public repositories).
+        platform:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    env:
+      IMAGE: ${{ matrix.image.name }}
+      ARCH: ${{ matrix.platform.arch }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Image name
+        id: name
+        run: echo "ref=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/docker-seedbox-${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - if: inputs.push
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # OCI labels (in the image config) and annotations (on the per-arch manifest). release.yml puts the same
+      # annotations on the multi-arch index.
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ steps.name.outputs.ref }}
+          tags: type=raw,value=${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.title=docker-seedbox-${{ matrix.image.name }}
+            org.opencontainers.image.description=${{ matrix.image.description }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+          annotations: |
+            org.opencontainers.image.title=docker-seedbox-${{ matrix.image.name }}
+            org.opencontainers.image.description=${{ matrix.image.description }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.file }}
+          platforms: linux/${{ matrix.platform.arch }}
+          build-args: |
+            VITE_APP_VERSION=${{ inputs.version }}
+            VITE_SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ inputs.push && steps.meta.outputs.annotations || '' }}
+          # push: untagged, by digest (release.yml tags the merged index). Otherwise: load into this runner's Docker.
+          outputs: ${{ inputs.push && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', steps.name.outputs.ref) || format('type=docker,name=smoke/{0}:{1}', matrix.image.name, matrix.platform.arch) }}
+          # Attestations (SLSA provenance, SPDX SBOM) are attached to the pushed per-arch image; release.yml keeps them
+          # in the merged index. The docker exporter (load) cannot carry them.
+          provenance: ${{ inputs.push && 'mode=max' || 'false' }}
+          sbom: ${{ inputs.push }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }},mode=max
+
+      # Recorded before the smoke test: release.yml only merges when every leg (including its smoke test) is green, and a
+      # dry run's cleanup needs the digest of every push, also of a leg whose smoke test failed.
+      - name: Record the digest
+        if: inputs.push
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::bad digest '$DIGEST'"; exit 1; }
+          mkdir -p digests
+          printf '%s' "$DIGEST" > "digests/${IMAGE}-${ARCH}"
+          echo "${IMAGE} linux/${ARCH}: \`${DIGEST}\` (built on ${RUNNER_ARCH}, ${{ matrix.platform.runner }})" >> "$GITHUB_STEP_SUMMARY"
+      - if: inputs.push
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: digest-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          path: digests/${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true   # a re-run of a failed job uploads it again
+
+      # The pushed digest is pulled back and tested: what is smoke-tested is byte for byte what gets tagged.
+      - name: Smoke test on ${{ matrix.platform.runner }}
+        env:
+          REF: ${{ inputs.push && format('{0}@{1}', steps.name.outputs.ref, steps.build.outputs.digest) || format('smoke/{0}:{1}', matrix.image.name, matrix.platform.arch) }}
+        run: .github/scripts/smoke.sh "$IMAGE" "$REF" "$ARCH" "$VERSION"

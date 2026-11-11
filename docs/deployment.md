@@ -76,7 +76,7 @@ cd deploy && docker compose up -d      # setup.sh already did this
 docker compose ps                      # everything should become healthy
 ```
 
-Images come from `ghcr.io/ma-04/docker-seedbox-*` (`SEEDBOX_REGISTRY`, `SEEDBOX_VERSION` in `.env`; see [Versions](#versions-upgrades-and-verification)). To build from your clone instead: `./setup.sh --build` (or `docker compose build`). With no published release yet, `./setup.sh` offers exactly that.
+Images come from `ghcr.io/ma-04/docker-seedbox-*` (`SEEDBOX_REGISTRY`, `SEEDBOX_VERSION` in `.env`; see [Versions](#versions-upgrades-and-verification)). To build from your clone instead: `./setup.sh --build` (or `docker compose build`). With neither a release nor `edge` published, `./setup.sh` offers exactly that.
 
 ## Authelia users
 
@@ -100,19 +100,34 @@ Images are published to `ghcr.io/ma-04/docker-seedbox-{api,web,gateway,vpn,qbitt
 
 | Tag | What it is |
 |---|---|
-| `1.2.3` | an exact release: pin this in production |
+| `1.2.3` | an exact release (git tag `v1.2.3`): pin this in production. Never moved. |
 | `1.2` | the newest `1.2.x` release |
-| `latest` | the newest non-prerelease release |
-| `1.3.0-rc.1` | a pre-release (never moves `1.3` or `latest`) |
-| `edge` | the head of `main`, published only after the whole CI suite passed; for trying things, not for production |
+| `1` | the newest `1.x.y` release (not published for `0.x`, where every minor may break) |
+| `latest` | the newest stable release (the highest version, not the most recently built one; never a pre-release) |
+| `1.3.0-rc.1` | a pre-release (never moves `1.3`, `1` or `latest`) |
+| `edge` | the head of `main`, published after the whole CI suite passed; for trying things, not for production |
+| `sha-abc1234` | the `main` build of commit `abc1234` (what `edge` pointed at then); never moved |
 
-`./setup.sh` pins `SEEDBOX_VERSION` in `deploy/.env` to the newest release when it installs. While no release is
-published yet (or the registry has no images for the version), it says so and builds the images from your clone
-instead (`SEEDBOX_VERSION=local`); with `--yes` it does that without asking.
+**Architectures.** Every tag is a multi-arch image for `linux/amd64` and `linux/arm64`; Docker pulls the right one
+automatically. Both are built natively (no emulation) and smoke-tested on their own architecture before anything is
+tagged; for releases the VPN kill-switch test and the full end-to-end suite also run on arm64
+([releasing.md](releasing.md)). What CI proves is GitHub's arm64 runner: Ubuntu 24.04 on an Azure arm64 VM (`ubuntu-24.04-arm`).
+Other 64-bit ARM Linux hosts, such as a Raspberry Pi 4/5 or another board with a **64-bit** OS, or an
+Ampere / Graviton cloud server, are expected to work the same way but are not tested. They need a kernel with WireGuard
+(Linux 5.6+, built in or as a module) and nftables; `./setup.sh doctor` checks for WireGuard. 32-bit ARM (`armv7`) is
+not built. Docker Desktop on Apple Silicon can pull the arm64 images, but it is not a supported or tested deployment
+host (the VPN needs the host kernel's WireGuard and nftables).
+
+`./setup.sh` pins `SEEDBOX_VERSION` in `deploy/.env` to the newest release (as its exact `X.Y.Z`) when it installs.
+While no release is published yet it uses `edge` instead and says so; if `edge` is not in the registry either (or
+the registry is unreachable), it builds the images from your clone (`SEEDBOX_VERSION=local`; with `--yes` without
+asking).
 
 ```sh
 ./setup.sh update                      # newest release; prints "Update: 1.2.3 -> 1.3.0" and what is running now
 ./setup.sh update --version 1.2.4      # pin a specific version (also how you roll forward one step at a time)
+./setup.sh update --version latest     # resolve the newest release now and pin it (also: leave edge for a release)
+./setup.sh update --version edge       # follow main; a plain `update` then stays on edge and pulls its newest build
 ./setup.sh update --build              # clones: rebuild from the checked-out source (git pull first)
 ./setup.sh backup                      # before a major upgrade
 ```
@@ -122,8 +137,9 @@ restore a backup taken before the upgrade, then pass `--allow-downgrade`. The Au
 acme-companion images, and every base image, are pinned by digest in the compose files and Dockerfiles; Dependabot
 proposes updates to them.
 
-**Verifying an image.** Every published image carries a signed build-provenance attestation (SLSA, via GitHub
-artifact attestations) and an SBOM. With the [GitHub CLI](https://cli.github.com/):
+**Verifying an image.** Every published image carries a signed build-provenance attestation for its multi-arch
+digest (SLSA, via GitHub artifact attestations), and each architecture inside it carries an SBOM and BuildKit's own
+provenance. With the [GitHub CLI](https://cli.github.com/):
 
 ```sh
 gh attestation verify oci://ghcr.io/ma-04/docker-seedbox-api:1.2.3 --repo ma-04/docker-seedbox
@@ -132,8 +148,9 @@ for i in api web gateway vpn qbittorrent; do gh attestation verify "oci://ghcr.i
 ```
 
 A successful run proves the image was built by this repository's release workflow (from a release tag, or from `main` for `:edge`), not pushed by hand.
-`docker buildx imagetools inspect ghcr.io/ma-04/docker-seedbox-api:1.2.3 --format '{{ json .SBOM }}'` prints the SBOM.
-Use the digest (`@sha256:...`) printed by `docker compose images` or the workflow summary if you want to pin by content.
+`docker buildx imagetools inspect ghcr.io/ma-04/docker-seedbox-api:1.2.3 --format '{{ json .SBOM }}'` prints the SBOMs
+(one per architecture). The GitHub Release of each version lists the digest (`@sha256:...`) of every image if you
+want to pin by content; the same digest works on amd64 and arm64.
 
 ## Backups
 
