@@ -145,8 +145,9 @@ function TrackerLists() {
             Trackers given to the torrent engine: <strong>{d.effectiveCount}</strong> ({d.manualCount} manual, the rest from the lists).
           </p>
           <p className="hint">
-            Applies to torrents added after the list is applied; running downloads are not changed. Private torrents never get these trackers: the engine skips them
-            for .torrent files, and for magnet links the worker removes them again as soon as the engine knows the torrent is private.
+            Applies to torrents added after the list is applied; running downloads are not changed. Private .torrent files never get these trackers (the engine skips
+            them). A private magnet link does get them until its metadata arrives; the worker then removes them (within about 30 s), so they may be
+            contacted briefly before that.
           </p>
         </>
       )}

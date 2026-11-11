@@ -43,6 +43,11 @@ export function setSetting<K extends SettingKey>(db: Db, key: K, value: Settings
     .run(key, JSON.stringify(value));
 }
 
+/** Atomic "set unless already set" (api and worker are separate processes: a check-then-set could race). */
+export function setSettingIfAbsent<K extends SettingKey>(db: Db, key: K, value: Settings[K]): void {
+  db.prepare('INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, JSON.stringify(value));
+}
+
 export function getAllSettings(db: Db): Settings {
   const out = { ...SETTING_DEFAULTS } as Record<string, unknown>;
   for (const k of Object.keys(SETTING_DEFAULTS) as SettingKey[]) out[k] = getSetting(db, k);

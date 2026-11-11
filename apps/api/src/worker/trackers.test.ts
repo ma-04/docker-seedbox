@@ -56,15 +56,24 @@ describe('tracker sync (worker)', () => {
     expect(s.engine.sets).toEqual([{ add_trackers_enabled: true, add_trackers_from_url_enabled: false, add_trackers: 'http://mine.example.org/a' }]);
   });
 
-  it('fetches the lists and writes manual + fetched (manual first) to the engine, keeping the native URL preference off', async () => {
+  it('fetches the lists and writes manual + fetched (manual first, one tier each) to the engine, keeping the native URL preference off', async () => {
     const s = setup();
     setSetting(s.db, 'trackers.listUrls', [A]);
     await s.tick();
     expect(s.requests).toEqual([A]);
     expect(s.engine.sets).toEqual([{
       add_trackers_enabled: true, add_trackers_from_url_enabled: false,
-      add_trackers: 'http://172.31.250.30:6969/announce\nudp://a1.example.org:6969/announce\nudp://a2.example.org:6969/announce',
+      add_trackers: 'http://172.31.250.30:6969/announce\n\nudp://a1.example.org:6969/announce\n\nudp://a2.example.org:6969/announce',
     }]);
+  });
+
+  it('a case-only change of a manual tracker is written to the engine', async () => {
+    const s = setup();
+    setSetting(s.db, 'trackers.manual', 'http://t.example.org/ABC/announce');
+    await s.tick();
+    setSetting(s.db, 'trackers.manual', 'http://t.example.org/abc/announce');
+    await s.tick();
+    expect(s.engine.sets.map((w) => w.add_trackers)).toEqual(['http://t.example.org/ABC/announce', 'http://t.example.org/abc/announce']);
   });
 
   it('writes only when the effective list changed, and re-applies after the engine lost it (restart) on the slow check', async () => {

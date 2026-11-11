@@ -53,7 +53,7 @@ export function registerTrackers(app: FastifyInstance, ctx: Ctx): void {
       if (b.refreshHours !== undefined) setSetting(db, 'trackers.refreshHours', b.refreshHours);
       if (b.maxTrackers !== undefined) setSetting(db, 'trackers.maxTrackers', b.maxTrackers);
       if (changed && getSetting(db, 'trackers.enabled') && (urls ?? getSetting(db, 'trackers.listUrls')).length > 0) requestRefresh();
-    })();
+    }).immediate();
     return out();
   });
 

@@ -67,8 +67,10 @@ export function parseTrackerList(body: Buffer | string, max: number): ParsedList
       if (!tok) continue;
       tokens++;
       const clean = tok.length > MAX_ENTRY_CHARS ? null : sanitiseTracker(tok);
+      // The policy is checked again on the FINAL form: normalise() punycodes/percent-decodes the (opaque) udp: host, so
+      // `udp://127.0.0.%31` or a full-width `１２７.０.０.１` only reveal themselves after it.
       const norm = clean ? normalise(clean) : null;
-      if (!norm) { invalid++; continue; }
+      if (!norm || !sanitiseTracker(norm)) { invalid++; continue; }
       if (seen.has(norm)) { duplicates++; continue; }
       seen.add(norm);
       if (trackers.length >= max) { overCap++; continue; }
@@ -139,10 +141,13 @@ export async function fetchTrackerListBody(url: string, opts: FetchOptions = {})
   const maxRedirects = opts.maxRedirects ?? MAX_REDIRECTS;
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? FETCH_TIMEOUT_MS);
+  // The deadline also covers the guard's DNS lookup (not abortable itself), not only the HTTP exchange.
+  const aborted = new Promise<never>((_, reject) => ac.signal.addEventListener('abort', () => reject(Object.assign(new Error('timeout'), { name: 'AbortError' })), { once: true }));
+  aborted.catch(() => {});
   try {
     let current = url;
     for (let hop = 0; ; hop++) {
-      const u = await guard(current); // immediately before the request; the connection is pinned to a vetted address
+      const u = await Promise.race([guard(current), aborted]); // immediately before the request; the connection is pinned to a vetted address
       const res = await request(u, {
         signal: ac.signal,
         headers: { 'user-agent': 'docker-seedbox', accept: 'text/plain, */*;q=0.1', 'accept-encoding': 'identity' },
@@ -169,6 +174,7 @@ export async function fetchTrackerListBody(url: string, opts: FetchOptions = {})
       return Buffer.concat(chunks);
     }
   } catch (e) {
-    throw new TrackerListError(safeMessage(e));
+    // After the deadline the socket error may look like a reset: report the timeout, which is what happened.
+    throw new TrackerListError(ac.signal.aborted && !(e instanceof TrackerListError) ? 'The request timed out' : safeMessage(e));
   } finally { clearTimeout(timer); }
 }

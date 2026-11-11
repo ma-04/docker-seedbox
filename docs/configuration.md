@@ -90,7 +90,7 @@ manual entries, never the downloaded ones). The torrent engine receives the manu
 - **Private torrents.** qBittorrent does not add these trackers to a torrent that is already known to be private (a `.torrent` file with the private flag).
   For a magnet link the engine cannot know before it has the metadata, so it adds them anyway; the worker removes the extra trackers again (all except those
   in the magnet itself) shortly after the engine flags the torrent as private. Verified against the qBittorrent 5.3.0 source (`SessionImpl::addTorrent_impl`:
-  `isAddTrackersEnabled() && !(hasMetadata && p.ti->priv())`). Torrent info reports `private` only once the metadata is known. Between metadata arrival and the next sweep (at most ~30 s) the extra trackers may be contacted once.
+  `isAddTrackersEnabled() && !(hasMetadata && p.ti->priv())`). Torrent info reports `private` only once the metadata is known. Until the metadata arrives, and up to the next sweep (~30 s) after that, the extra trackers are announced to (they learn the infohash and the VPN exit IP). The sweep only removes trackers that are in the current list and only runs while extra trackers are enabled.
   Do not add private-tracker torrents on a shared instance anyway (see SECURITY.md).
 - **Why not qBittorrent's own "download trackers from URL"?** It fetches from inside the VPN network namespace with no scheme/host validation and no size cap, and gives
   the UI nothing to show. The app fetches and filters instead; the engine's own option is kept off.

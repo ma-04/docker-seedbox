@@ -38,6 +38,17 @@ describe('parseTrackerList', () => {
     expect(p.invalid).toBe(11);
   });
 
+  it('applies the policy to the normalised form: percent-encoded or full-width private hosts are dropped', () => {
+    const filler = Array.from({ length: 50 }, (_, i) => `udp://f${i}.example.org:1/a`);
+    const p = parseTrackerList(lines(
+      ...filler,
+      'udp://127.0.0.%31:6969/announce', 'udp://10.0.0.%31:1/a', 'udp://169.254.169.%32%35%34:80/a',
+      'udp://%6c%6fcalhost.%6c%6fcal:1/a', 'udp://１２７.０.０.１:1/a',
+    ), 100);
+    expect(p.trackers).toEqual(filler);
+    expect(p.invalid).toBe(5);
+  });
+
   it('is only rejected as a whole above 20% invalid tokens', () => {
     const good = Array.from({ length: 8 }, (_, i) => `udp://t${i}.example.org:1/a`);
     expect(parseTrackerList(lines(...good, 'junk1', 'junk2'), 100).invalid).toBe(2); // exactly 20%
@@ -136,6 +147,17 @@ describe('fetchTrackerListBody', () => {
   it('times out', async () => {
     const base = await serve(() => { /* never answers */ });
     await expect(fetchTrackerListBody(`${base}/x`, { ...opts(), timeoutMs: 100 })).rejects.toThrow(/timed out/);
+  });
+
+  it('the deadline also covers a DNS check that never answers', async () => {
+    const t0 = Date.now();
+    await expect(fetchTrackerListBody('https://slow-dns.example.org/list.txt', { guard: () => new Promise<URL>(() => {}), timeoutMs: 100 })).rejects.toThrow(/timed out/);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  it('a body that stalls past the deadline is reported as a timeout', async () => {
+    const base = await serve((_req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.write('udp://a.example.org:1/a\n'); /* never ends */ });
+    await expect(fetchTrackerListBody(`${base}/x`, { ...opts(), timeoutMs: 200 })).rejects.toThrow(/timed out/);
   });
 
   it('aborts beyond the size cap (declared and streamed)', async () => {

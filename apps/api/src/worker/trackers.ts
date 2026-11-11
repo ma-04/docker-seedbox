@@ -9,7 +9,7 @@ import type { Logger } from 'pino';
 import { decryptJson } from '../lib/crypto.js';
 import type { Config } from '../lib/config.js';
 import type { Db } from '../lib/db.js';
-import { getSetting, hasSetting, setSetting } from '../lib/settings.js';
+import { getSetting, hasSetting, setSettingIfAbsent } from '../lib/settings.js';
 import { effectiveTrackers, refreshDue, refreshTrackerLists, splitLines } from '../lib/trackers.js';
 import type { FetchOptions } from '../lib/trackerlist.js';
 import type { TorrentSource } from '../lib/types.js';
@@ -61,9 +61,9 @@ export class TrackerSync {
     const needEnabled = !hasSetting(db, 'trackers.enabled');
     if (needManual || needEnabled) {
       const prefs = await this.d.engine.getPreferences();
-      // Re-check: an admin PUT may have written the setting while the engine call was in flight.
-      if (needManual && !hasSetting(db, 'trackers.manual')) setSetting(db, 'trackers.manual', typeof prefs.add_trackers === 'string' ? splitLines(prefs.add_trackers).join('\n') : '');
-      if (needEnabled && !hasSetting(db, 'trackers.enabled')) setSetting(db, 'trackers.enabled', prefs.add_trackers_enabled === true);
+      // Insert-if-absent: an admin PUT may have written the setting while the engine call was in flight.
+      if (needManual) setSettingIfAbsent(db, 'trackers.manual', typeof prefs.add_trackers === 'string' ? splitLines(prefs.add_trackers).join('\n') : '');
+      if (needEnabled) setSettingIfAbsent(db, 'trackers.enabled', prefs.add_trackers_enabled === true);
       this.d.log.info('tracker lists: took over the engine\'s extra-tracker settings');
     }
     this.migrated = true;
@@ -87,15 +87,18 @@ export class TrackerSync {
     const verify = t - this.lastVerify >= (this.d.verifyEveryMs ?? 60_000);
     if (desired === this.applied && !verify) return;
     // The engine's own "add trackers from URL" preference must stay off: this app fetches (and validates) the lists.
-    const wanted = { enabled: eff.enabled, list: eff.trackers.map(lineKey) };
+    // Compared exactly (not case-folded): a case-only edit of a passkey path is a real change.
+    const wanted = { enabled: eff.enabled, list: eff.trackers };
     const prefs = await engine.getPreferences();
     this.lastVerify = t;
     const same = prefs.add_trackers_enabled === wanted.enabled
       && prefs.add_trackers_from_url_enabled !== true
-      && (!wanted.enabled || (typeof prefs.add_trackers === 'string' && JSON.stringify(splitLines(prefs.add_trackers).map(lineKey)) === JSON.stringify(wanted.list)));
+      && (!wanted.enabled || (typeof prefs.add_trackers === 'string' && JSON.stringify(splitLines(prefs.add_trackers)) === JSON.stringify(wanted.list)));
     if (!same) {
       const w: Record<string, unknown> = { add_trackers_enabled: eff.enabled, add_trackers_from_url_enabled: false };
-      if (eff.enabled) w.add_trackers = eff.trackers.join('\n');
+      // A blank line starts a new tier in qBittorrent's add_trackers. One tracker per tier: with the default
+      // announce_to_all_tiers=true every tracker is announced to; in a single tier only the first working one would be.
+      if (eff.enabled) w.add_trackers = eff.trackers.join('\n\n');
       await engine.setPreferences(w);
       this.d.log.info({ enabled: eff.enabled, trackers: eff.trackers.length }, 'tracker lists applied to the engine');
     }
