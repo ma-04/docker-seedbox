@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
-import { api, ensureFreshJob, login, qbtJson, note } from './lib';
+import { SMALL, SMALL_LIMIT_KBPS, api, ensureFreshJob, login, qbtJson, note } from './lib';
+
+const BASE = SMALL ? SMALL_LIMIT_KBPS : 0;   // the limit the engine carries before and after this spec
 
 test.describe.configure({ mode: 'serial' });
 
@@ -21,7 +23,7 @@ test.describe('5. engine settings: download limit', () => {
     await details.locator('summary').click();
     const form = details.getByRole('form', { name: 'Torrent engine settings' });
     const dl = form.getByLabel('Download limit (KB/s, 0 = unlimited)');
-    await expect(dl).toHaveValue('0');
+    await expect(dl).toHaveValue(String(BASE));
     try {
     await dl.fill(String(LIMIT_KB));
     await details.getByTestId('engine-save').click();
@@ -40,18 +42,18 @@ test.describe('5. engine settings: download limit', () => {
     if (mean(before) > LIMIT_KB * 1024 * 3) expect(mean(limited)).toBeLessThan(mean(before) / 2);
 
     } finally {   // never leave the engine throttled, whatever happened above
-      await api(page, 'PUT', '/api/admin/engine/settings', { downloadLimitKBps: 0 });
+      await api(page, 'PUT', '/api/admin/engine/settings', { downloadLimitKBps: BASE });
     }
     // reset: back to unlimited in the engine and in the UI
     await page.reload();
     await page.getByTestId('engine-settings').locator('summary').click();
-    await dl.fill('0');
+    await dl.fill(String(BASE));
     await details.getByTestId('engine-save').click();
     await expect(details.getByText('Engine settings saved')).toBeVisible();
-    await expect.poll(async () => (await qbtJson('/api/v2/app/preferences')).dl_limit).toBe(0);
+    await expect.poll(async () => (await qbtJson('/api/v2/app/preferences')).dl_limit).toBe(BASE * 1024);
     await page.reload();
     await page.getByTestId('engine-settings').locator('summary').click();
-    await expect(page.getByTestId('engine-settings').getByLabel('Download limit (KB/s, 0 = unlimited)')).toHaveValue('0');
+    await expect(page.getByTestId('engine-settings').getByLabel('Download limit (KB/s, 0 = unlimited)')).toHaveValue(String(BASE));
     const after = await sample(10);
     note(testInfo, "speed", `after reset: max ${Math.round(Math.max(...after) / 1024)} KB/s`);
   });

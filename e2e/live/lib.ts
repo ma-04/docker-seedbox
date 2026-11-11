@@ -192,16 +192,25 @@ export async function ubuntuLts(): Promise<Official> {
   }
   throw new Error('no Ubuntu LTS server torrent found');
 }
+/**
+ * LIVE_SMALL=1: one small official ISO only (the Debian arm64 netinst, about 700 MiB; its content is irrelevant, only its
+ * published sha256 matters). No Ubuntu job, no DVD; the engine is throttled while the limit/restart specs need a download
+ * that is still running, and unthrottled before the completion spec.
+ */
+export const SMALL = process.env.LIVE_SMALL === '1';
+export const SMALL_LIMIT_KBPS = 1024;
+
 /** Debian netinst, from cdimage.debian.org. */
 export async function debianNetinst(): Promise<Official> {
-  const base = 'https://cdimage.debian.org/debian-cd/current/amd64';
+  const arch = SMALL ? 'arm64' : 'amd64';
+  const base = `https://cdimage.debian.org/debian-cd/current/${arch}`;
   const listing = await getText(`${base}/bt-cd/`);
-  const t = /debian-[\d.]+-amd64-netinst\.iso\.torrent/.exec(listing)?.[0];
+  const t = new RegExp(`debian-[\\d.]+-${arch}-netinst\\.iso\\.torrent`).exec(listing)?.[0];
   if (!t) throw new Error('no Debian netinst torrent found');
   const name = t.replace(/\.torrent$/, '');
   const sha256 = sumFor(await getText(`${base}/iso-cd/SHA256SUMS`), name);
   const torrent = await getBuffer(`${base}/bt-cd/${t}`);
-  return { name, torrent: webSeedsOn() ? withWebSeeds(torrent, seedUrls(name, ['https://deb.debian.org/debian-cd/current/amd64/iso-cd'], process.env.LIVE_WEBSEEDS_DEBIAN)) : torrent, sha256 };
+  return { name, torrent: webSeedsOn() ? withWebSeeds(torrent, seedUrls(name, [`https://deb.debian.org/debian-cd/current/${arch}/iso-cd`], process.env.LIVE_WEBSEEDS_DEBIAN)) : torrent, sha256 };
 }
 
 // ---- rclone (local, with the git-ignored credentials; used only for verification and run-scoped cleanup) --------------
@@ -261,6 +270,7 @@ export async function addTorrent(page: Page, o: Official, destination: string): 
  * admin to the shared Local destination; the cleanup spec deletes it with the other jobs (jobs are keyed in state.jobs).
  */
 export async function ensureFreshJob(page: Page, key: string, kind: 'debian-dvd' | 'ubuntu-desktop'): Promise<number> {
+  if (SMALL) return state().jobs.debianDrive!.id;   // the (throttled) small ISO is the "big, still downloading" job
   const known = state().jobs[key];
   const jobs = (await api(page, 'GET', '/api/jobs')).json as { id: number }[];
   if (known && jobs.some((j) => j.id === known.id)) return known.id;

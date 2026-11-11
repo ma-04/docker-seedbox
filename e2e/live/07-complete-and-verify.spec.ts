@@ -1,6 +1,6 @@
 import { expect, test, type Browser, type Page } from '@playwright/test';
 import { live } from './env';
-import { api, fetchHash, fullHash, jobRow, login, qbtJson, rclone, s3Prefix, save, state, type Fetched } from './lib';
+import { SMALL, api, fetchHash, fullHash, jobRow, login, qbtJson, rclone, s3Prefix, save, state, type Fetched } from './lib';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -52,6 +52,11 @@ async function verifyLocal(page: Page, jobId: number, isoName: string, sha256: s
 test.describe('7. completion and verification', () => {
   test('the Debian jobs (Drive, B2, Local) complete in the UI', async ({ browser }) => {
     test.setTimeout(240 * 60_000);
+    {   // the engine was throttled by spec 04 (LIVE_SMALL) to keep the download running for specs 05/06: lift it
+      const c = await browser.newContext(); const p = await c.newPage(); await login(p, 'admin');
+      expect((await api(p, 'PUT', '/api/admin/engine/settings', { downloadLimitKBps: 0 })).status).toBe(200);
+      await c.close();
+    }
     const ctxs = await Promise.all((['admin', 'user', 'user2'] as const).map(async (w) => { const c = await browser.newContext(); const p = await c.newPage(); await login(p, w); await p.goto('/'); return { c, p }; }));
     const j = ST().jobs;
     // watch them in the UI (live progress through SSE)
@@ -68,7 +73,7 @@ test.describe('7. completion and verification', () => {
     const jobs = (await api(page, 'GET', '/api/jobs')).json as { id: number; totalSize: number; downloadProgress: number }[];
     const j = ST().jobs;
     const deb = jobs.find((x) => x.id === j.debianDrive!.id)!.totalSize;
-    const ub = jobs.find((x) => x.id === j.ubuntu!.id);
+    const ub = j.ubuntu ? jobs.find((x) => x.id === j.ubuntu!.id) : undefined;
     const ubPartial = ub ? ub.totalSize * ub.downloadProgress : 0;   // what the (separate) Ubuntu torrent has fetched so far
     const dl = ((await qbtJson('/api/v2/sync/maindata')).server_state.alltime_dl as number) - ST().baselineDl;
     save({ downloadedBytes: dl, debianBytes: deb, ubuntuPartialBytes: ubPartial });
@@ -136,7 +141,7 @@ test.describe('7. completion and verification', () => {
 
   // Optional: the 3 GB Ubuntu ISO (sha256 from Ubuntu's SHA256SUMS). Skipped with LIVE_SKIP_UBUNTU=1 (e.g. a VPN that cannot move it).
   test('Ubuntu Server LTS ISO -> Local: completes, sha256 equals the published one', async ({ browser }) => {
-    test.skip(process.env.LIVE_SKIP_UBUNTU === '1', 'LIVE_SKIP_UBUNTU=1');
+    test.skip(process.env.LIVE_SKIP_UBUNTU === '1' || SMALL, 'LIVE_SKIP_UBUNTU=1 / LIVE_SMALL=1');
     test.setTimeout(240 * 60_000);
     const ctx = await browser.newContext(); const page = await ctx.newPage(); await login(page, 'admin');
     await page.goto('/');

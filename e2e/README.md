@@ -93,6 +93,7 @@ npx playwright test -c playwright.live.config.ts 02 03          # selected specs
 | `06-vpn-restart-midflight` | `compose restart vpn` mid-download: the server's own IP is never seen from the namespace, the VPN comes back and the download resumes |
 | `07-complete-and-verify` | jobs complete in the UI; local link: sha256 equals the published one, Range gives 206, a tampered signature is refused; Drive: shared folder opens unauthenticated, Worker link sha256; B2: presigned link sha256, object below the run prefix; the torrent was downloaded once |
 | `08-stack-restart` | `docker compose down && up -d`: healthy again, jobs and links intact, the VPN reconnects by itself and stays `required` |
+| `09-final-review` | footer (source link, version), a newline-injected magnet is rejected (400) and nothing is added, `/add?magnet=` pre-fills without submitting, the VPN page shows the MTU, from inside the qbittorrent container the Docker bridge gateway and a sibling container are unreachable while the tunnel works, deleting the Local job removes its library files and its signed link answers 404 |
 | `99-cleanup` | deletes the test jobs, the Drive folders this run created, the B2 objects under the run prefix and the big ISO from the server (the deployment, its destinations and the VPN stay) |
 
 Safety rules baked in: a run id is generated once (`e2e/.out/live/state.json`); every S3/B2 delete asserts the
@@ -100,6 +101,10 @@ Safety rules baked in: a run id is generated once (`e2e/.out/live/state.json`); 
 bucket-root listing/deletion); Drive removals address only the job folders recorded for this run. Credentials are passed
 through the app's own UI/API over HTTPS; the env file and the rclone/WireGuard files are read on the machine running the
 tests and never copied to the server (the ssh probes only run `docker`, `curl` and `compose` commands).
+
+`LIVE_SMALL=1` runs the suite with one small official ISO (Debian arm64 netinst, about 700 MiB) for all three destinations
+instead of the Ubuntu ISO: no Ubuntu job, and the engine is throttled to 1 MiB/s by spec 04 so that specs 05 and 06 find a
+download still running; spec 07 lifts the throttle before waiting for completion.
 
 Notes for the credentials you feed it:
 

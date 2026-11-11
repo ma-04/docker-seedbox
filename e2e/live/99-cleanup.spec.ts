@@ -52,15 +52,14 @@ test.describe('99. cleanup (this run only)', () => {
   test('server: the big ISO is gone from the library; show what is left', async () => {
     // Deleting a job does not delete the data a local destination already holds (see the issue "deleting a job leaves
     // local library data behind"), so remove this run's own copies by exact name: the ISO folders `<name> [<hash8>]`.
-    const names = [(state().ubuntu as { name: string }).name, (state().debian as { name: string }).name];
+    const names = [(state().ubuntu as { name: string } | undefined)?.name, (state().debian as { name: string }).name].filter((n): n is string => !!n);
     for (const n of names) {
       const r = await sh(`sudo docker exec seedbox-api-1 find /downloads/library -mindepth 2 -maxdepth 2 -type d -name '${n} \\[*\\]' -exec rm -rf {} +`);
       expect(r.code, r.err).toBe(0);
     }
     await sh(`sudo docker exec seedbox-api-1 find /downloads/library -mindepth 1 -maxdepth 1 -type d -empty -not -name .staging -delete`);
     const r = await sh(`sudo docker exec seedbox-api-1 sh -c 'ls -la /downloads/library 2>&1; du -sh /downloads 2>&1' ; df -h / | tail -1`);
-    const ubuntuName = (state().ubuntu as { name: string }).name;
-    const find = await sh(`sudo docker run --rm -v seedbox_downloads:/d:ro alpine sh -c 'find /d -name "${ubuntuName}*" | head'`);
+    const find = await sh(`sudo docker run --rm -v seedbox_downloads:/d:ro alpine sh -c 'find /d -name "${names[names.length - 1]}*" | head'`);
     expect(find.out.trim(), r.out).toBe('');
   });
 });

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { addTorrent, api, debianNetinst, jobRow, login, qbtJson, save, state, ubuntuLts, type Official } from './lib';
+import { SMALL, SMALL_LIMIT_KBPS, addTorrent, api, debianNetinst, jobRow, login, qbtJson, save, state, ubuntuLts, type Official } from './lib';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -14,9 +14,9 @@ test.describe('4a. add the torrents (the VPN is required and connected)', () => 
   });
 
   test('Ubuntu Server LTS ISO -> Local (admin); Debian netinst -> Google Drive (admin) and -> B2 (normal user)', async ({ browser }) => {
-    const ubuntu = await ubuntuLts();
+    const ubuntu = SMALL ? undefined : await ubuntuLts();
     const debian = await debianNetinst();
-    save({ ubuntu: { name: ubuntu.name, sha256: ubuntu.sha256 }, debian: { name: debian.name, sha256: debian.sha256 } });
+    save({ ...(ubuntu ? { ubuntu: { name: ubuntu.name, sha256: ubuntu.sha256 } } : {}), debian: { name: debian.name, sha256: debian.sha256 } });
 
     const actx = await browser.newContext();
     const a = await actx.newPage();
@@ -35,7 +35,11 @@ test.describe('4a. add the torrents (the VPN is required and connected)', () => 
       save({ jobs: { ...state().jobs, [key]: { id: r.id, user: who } }, hashes: { ...((state().hashes as object) ?? {}), [key.startsWith('ubuntu') ? 'ubuntu' : 'debian']: r.infohash } });
       return r;
     };
-    await add(a, 'ubuntu', 'admin', ubuntu, 'live-local');
+    if (SMALL) {   // keep the small ISO mid-download for the limit and restart specs (spec 07 lifts this)
+      expect((await api(a, 'PUT', '/api/admin/engine/settings', { downloadLimitKBps: SMALL_LIMIT_KBPS })).status).toBe(200);
+    } else {
+      await add(a, 'ubuntu', 'admin', ubuntu!, 'live-local');
+    }
     const d1 = await add(a, 'debianDrive', 'admin', debian, 'live-gdrive');
     const d2 = await add(p, 'debianB2', 'user', debian, 'live-b2');
     // a third destination for the same torrent, from a second normal user (one job per user and torrent)
@@ -47,7 +51,7 @@ test.describe('4a. add the torrents (the VPN is required and connected)', () => 
     await u2ctx.close();
     expect(d2.infohash).toBe(d1.infohash);
     expect(d2.id).not.toBe(d1.id);
-    const u = { id: state().jobs.ubuntu!.id };
+    const u = { id: (SMALL ? state().jobs.debianDrive! : state().jobs.ubuntu!).id };
 
     // same torrent, two destinations => one download in the engine
     // (on a re-run the download may already be done and gone from the engine: then at most one is acceptable)

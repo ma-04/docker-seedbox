@@ -38,11 +38,12 @@ test.describe('8. reboot-style restart: compose down && up -d', () => {
     // jobs intact in the UI, links still work
     const j = state().jobs;
     await page.goto('/');
-    await expect(jobRow(page, j.ubuntu!.id)).toHaveAttribute('data-state', 'completed');
+    if (j.ubuntu) await expect(jobRow(page, j.ubuntu.id)).toHaveAttribute('data-state', 'completed');
     await expect(jobRow(page, j.debianDrive!.id)).toHaveAttribute('data-state', 'completed');
-    const files = (await api(page, 'GET', `/api/jobs/${j.ubuntu!.id}/files`)).json.files as { path: string; url: string }[];
-    const r = await fetchHash(files[0]!.url, { Range: 'bytes=0-99' });
-    expect(r.status).toBe(206);
+    if (j.ubuntu) {
+      const files = (await api(page, 'GET', `/api/jobs/${j.ubuntu.id}/files`)).json.files as { path: string; url: string }[];
+      expect((await fetchHash(files[0]!.url, { Range: 'bytes=0-99' })).status).toBe(206);
+    }
     const dfiles = (await api(page, 'GET', `/api/jobs/${j.debianDrive!.id}/files`)).json.files as { path: string; url: string }[];
     expect((await fetchHash(dfiles[0]!.url, { Range: 'bytes=0-99' })).status).toBe(206);
     const ctx = await browser.newContext(); const u = await ctx.newPage(); await login(u, 'user');
