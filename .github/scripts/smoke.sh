@@ -32,7 +32,9 @@ case "$ARCH" in
   arm64) [ "$(uname -m)" = aarch64 ] || fail "this machine is $(uname -m), not arm64: run the smoke test on the native runner" ;;
   *) fail "unknown arch $ARCH" ;;
 esac
-case "$REF" in *@sha256:*) docker pull -q "$REF" >/dev/null || fail "pull $REF" ;; esac
+# Pulled seconds after the push: GHCR can briefly 404 a just-pushed manifest, so retry (bounded, about 1 min).
+pull() { local i; for i in 1 2 3 4 5; do docker pull -q "$REF" >/dev/null && return 0; sleep $((i * i)); done; docker pull -q "$REF" >/dev/null; }
+case "$REF" in *@sha256:*) pull || fail "pull $REF" ;; esac
 plat=$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$REF")
 [ "$plat" = "linux/$ARCH" ] && ok "image platform is $plat" || fail "image platform is $plat, expected linux/$ARCH"
 # Containers run with the hardening flags deploy/compose.yaml gives them (read-only root, dropped capabilities).

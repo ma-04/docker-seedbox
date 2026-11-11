@@ -210,7 +210,10 @@ jobs:
       id-token: write       # sigstore signing identity for the attestation
       attestations: write
     strategy:
-      fail-fast: true
+      # Not fail-fast: cancelling the other images mid-push helps nothing (`publish` needs all five anyway) and leaves
+      # more to redo. A failed leg is fixed by re-running it: the index is deterministic (same sources, same
+      # annotations), so a re-run writes the same digest under the same tag.
+      fail-fast: false
       matrix:
         image: [api, web, gateway, vpn, qbittorrent]
     env:
@@ -232,6 +235,10 @@ jobs:
         id: index
         run: |
           set -euo pipefail
+          # GHCR is eventually consistent: a tag (and now and then a digest) read right after a push can 404 for a moment
+          # (run 42999493957: `imagetools create` pushed :sha-3da4c34, the inspect 0.5 s later got "not found"). Reads
+          # and idempotent writes go through retry (bounded: 6 attempts, about 1.5 min), and reads use the DIGEST.
+          retry() { local i; for i in 1 2 3 4 5; do "$@" && return 0; echo "::warning::attempt $i failed, retrying in $((i * i * 2))s: $*" >&2; sleep $((i * i * 2)); done; "$@"; }
           ref="${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/docker-seedbox-${IMAGE}"
           srcs=()
           for arch in amd64 arm64; do
@@ -241,16 +248,22 @@ jobs:
           done
           # The OCI annotations of the per-arch image manifest (title, description, source, revision, version,
           # licenses, created; written by images.yml) are copied onto the index.
-          top=$(docker buildx imagetools inspect --raw "${srcs[0]}")
+          top=$(retry docker buildx imagetools inspect --raw "${srcs[0]}")
           m=$(jq -r 'if .manifests then (.manifests[] | select(.platform.architecture == "amd64") | .digest) else empty end' <<<"$top")
-          if [ -n "$m" ]; then man=$(docker buildx imagetools inspect --raw "$ref@$m"); else man=$top; fi
+          if [ -n "$m" ]; then man=$(retry docker buildx imagetools inspect --raw "$ref@$m"); else man=$top; fi
           ann=()
           while IFS= read -r kv; do ann+=(--annotation "index:$kv"); done < <(jq -r '.annotations // {} | to_entries[] | "\(.key)=\(.value)"' <<<"$man")
           [ "${#ann[@]}" -gt 0 ] || { echo "::error::the per-arch manifest carries no annotations"; exit 1; }
-          docker buildx imagetools create "${ann[@]}" -t "$ref:$IMMUTABLE" "${srcs[@]}"
+          # The digest comes from create's own result, not from reading the tag back.
+          mkdir -p meta && rm -f meta/create.json
+          retry docker buildx imagetools create --metadata-file meta/create.json "${ann[@]}" -t "$ref:$IMMUTABLE" "${srcs[@]}"
+          jq . meta/create.json
+          digest=$(jq -r '.["containerimage.descriptor"].digest // .["containerimage.digest"] // empty' meta/create.json)
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::imagetools create reported no index digest"; exit 1; }
+          at="$ref@$digest"
 
-          # Check what was pushed: both platforms, and each one's attestation manifest (provenance + SBOM) survived.
-          raw=$(docker buildx imagetools inspect --raw "$ref:$IMMUTABLE")
+          # Check what was pushed (by digest): both platforms, and each one's attestation manifest (provenance + SBOM).
+          raw=$(retry docker buildx imagetools inspect --raw "$at")
           echo "$raw" | jq .
           for arch in amd64 arm64; do
             pd=$(jq -r --arg a "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest' <<<"$raw")
@@ -259,14 +272,15 @@ jobs:
               || { echo "::error::linux/$arch has no attestation manifest in the index"; exit 1; }
           done
           for kind in SBOM Provenance; do
-            out=$(docker buildx imagetools inspect "$ref:$IMMUTABLE" --format "{{ json .$kind }}")
+            out=$(retry docker buildx imagetools inspect "$at" --format "{{ json .$kind }}")
             for arch in amd64 arm64; do
               jq -e --arg p "linux/$arch" 'has($p) and (.[$p] | length > 0)' <<<"$out" >/dev/null \
                 || { echo "::error::no $kind for linux/$arch"; echo "$out" | head -c 2000; exit 1; }
             done
           done
-          digest=$(docker buildx imagetools inspect "$ref:$IMMUTABLE" --format '{{ json .Manifest }}' | jq -r .digest)
-          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::cannot read the index digest"; exit 1; }
+          # The tag must (eventually) resolve to that digest: `publish` checks it again before anything moves.
+          tag_is() { [ "$(docker buildx imagetools inspect "$ref:$IMMUTABLE" --format '{{ json .Manifest }}' | jq -r .digest)" = "$digest" ]; }
+          retry tag_is || { echo "::error::$ref:$IMMUTABLE does not resolve to $digest"; exit 1; }
           echo "name=$ref" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           mkdir -p index && printf '%s' "$digest" > "index/$IMAGE"
@@ -354,11 +368,15 @@ jobs:
           MOVING: ${{ steps.tags.outputs.moving }}
         run: |
           set -euo pipefail
+          # GHCR is eventually consistent: a tag (and now and then a digest) read right after a push can 404 for a moment
+          # (run 42999493957: `imagetools create` pushed :sha-3da4c34, the inspect 0.5 s later got "not found"). Reads
+          # and idempotent writes go through retry (bounded: 6 attempts, about 1.5 min), and reads use the DIGEST.
+          retry() { local i; for i in 1 2 3 4 5; do "$@" && return 0; echo "::warning::attempt $i failed, retrying in $((i * i * 2))s: $*" >&2; sleep $((i * i * 2)); done; "$@"; }
           owner=${GITHUB_REPOSITORY_OWNER,,}
           # All five must exist under the immutable tag with the digest this run produced, before anything moves.
           for image in $IMAGES; do
             ref="${REGISTRY}/${owner}/docker-seedbox-${image}"; d=$(cat "index/$image")
-            now=$(docker buildx imagetools inspect "$ref:$IMMUTABLE" --format '{{ json .Manifest }}' | jq -r .digest)
+            now=$(retry docker buildx imagetools inspect "$ref:$IMMUTABLE" --format '{{ json .Manifest }}' | jq -r .digest)
             [ "$now" = "$d" ] || { echo "::error::$ref:$IMMUTABLE is $now, this run built $d"; exit 1; }
           done
           # Tag by tag across all five images; release-tags.sh lists `latest` last. Re-running is harmless: the same
@@ -366,7 +384,7 @@ jobs:
           for t in $MOVING; do
             for image in $IMAGES; do
               ref="${REGISTRY}/${owner}/docker-seedbox-${image}"; d=$(cat "index/$image")
-              docker buildx imagetools create -t "$ref:$t" "$ref@$d"
+              retry docker buildx imagetools create -t "$ref:$t" "$ref@$d"
               echo "\`$ref:$t\` -> \`$d\`" >> "$GITHUB_STEP_SUMMARY"
             done
           done
@@ -401,14 +419,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # GHCR is eventually consistent: a tag (and now and then a digest) read right after a push can 404 for a moment
+          # (run 42999493957: `imagetools create` pushed :sha-3da4c34, the inspect 0.5 s later got "not found"). Reads
+          # and idempotent writes go through retry (bounded: 6 attempts, about 1.5 min), and reads use the DIGEST.
+          retry() { local i; for i in 1 2 3 4 5; do "$@" && return 0; echo "::warning::attempt $i failed, retrying in $((i * i * 2))s: $*" >&2; sleep $((i * i * 2)); done; "$@"; }
           owner=${GITHUB_REPOSITORY_OWNER,,}
           for image in $IMAGES; do
             ref="${REGISTRY}/${owner}/docker-seedbox-${image}"
             for t in "$IMMUTABLE" $MOVING; do
-              gh attestation verify "oci://$ref:$t" --repo "$GITHUB_REPOSITORY" \
+              retry gh attestation verify "oci://$ref:$t" --repo "$GITHUB_REPOSITORY" \
                 --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
             done
-            gh attestation verify "oci://$ref@$(cat "index/$image")" --repo "$GITHUB_REPOSITORY" --format json \
+            retry gh attestation verify "oci://$ref@$(cat "index/$image")" --repo "$GITHUB_REPOSITORY" --format json \
               | jq -r '.[0].verificationResult.statement.subject[0] | "\(.name)@sha256:\(.digest.sha256) verified"'
           done
 
@@ -489,6 +511,11 @@ jobs:
           pattern: digest-*
           path: digests
           merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: index-*
+          path: index
+          merge-multiple: true
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
@@ -502,12 +529,17 @@ jobs:
           set -uo pipefail
           owner=$GITHUB_REPOSITORY_OWNER
           case "$(gh api "users/$owner" --jq .type)" in Organization) base="orgs/$owner" ;; *) base="users/$owner" ;; esac
-          children() { docker buildx imagetools inspect --raw "$1" 2>/dev/null | jq -r '.manifests[]?.digest'; }
+          retry() { local i; for i in 1 2 3 4; do "$@" && return 0; sleep $((i * i * 2)); done; "$@"; }   # GHCR read-after-write
+          children() { local raw; raw=$(retry docker buildx imagetools inspect --raw "$1" 2>/dev/null) && jq -r '.manifests[]?.digest' <<<"$raw"; }
+          index_digest() { # the index-<image> artifact (merge succeeded) or, after a partial merge, the tag itself
+            if [ -s "index/$1" ]; then cat "index/$1"; return; fi
+            retry docker buildx imagetools inspect "$2:$IMMUTABLE" --format '{{ json .Manifest }}' 2>/dev/null | jq -r .digest
+          }
           rc=0
           for image in $IMAGES; do
             pkg="docker-seedbox-$image"; ref="ghcr.io/${owner,,}/$pkg"
             digests=()
-            if idx=$(docker buildx imagetools inspect "$ref:$IMMUTABLE" --format '{{ json .Manifest }}' 2>/dev/null | jq -r .digest) && [ -n "$idx" ]; then
+            if idx=$(index_digest "$image" "$ref") && [[ $idx == sha256:* ]]; then
               digests+=("$idx"); mapfile -t -O "${#digests[@]}" digests < <(children "$ref@$idx")
             fi
             for f in digests/"$image"-*; do
