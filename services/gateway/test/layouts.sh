@@ -59,10 +59,33 @@ if render ext external app.example.test "" ""; then ok "nginx -t passes"; else b
 hasnt "$(app ext)" "location ^~ /auth/" "no /auth/ location"
 has "$(app ext)" "files-locations.conf" "app host serves /dl/"
 
+echo "AUTH_MODE=external with a leftover AUTH_HOST: ignored (no server block proxying to an Authelia that does not run)"
+if render extauth external app.example.test auth.example.test ""; then ok "nginx -t passes"; else bad "nginx -t passes: $(cat "$T/extauth.err")"; fi
+hasnt "$(section extauth /tmp/gateway/servers.conf)" "server_name auth.example.test;" "no login server block"
+hasnt "$(app extauth)" "location ^~ /auth/" "no /auth/ location"
+
+echo "separate login host, downloads on the app host"
+if render authonly authelia app.example.test auth.example.test ""; then ok "nginx -t passes"; else bad "nginx -t passes: $(cat "$T/authonly.err")"; fi
+app=$(app authonly); auth=$(server authonly auth.example.test)
+hasnt "$app" "/auth/" "no portal location on the app host"
+has "$app" "include /etc/nginx/snippets/files-locations.conf;" "app host serves /dl/"
+has "$auth" "include /etc/nginx/snippets/authelia-portal.conf;" "login host proxies to Authelia"
+hasnt "$(section authonly /tmp/gateway/servers.conf)" "server_name files." "no download server block"
+
+echo "values are trimmed and lowercased (like the API and the Authelia template)"
+if render norm authelia " App.Example.test " "APP.example.test " " Files.Example.test"; then ok "nginx -t passes"; else bad "nginx -t passes: $(cat "$T/norm.err")"; fi
+has "$(app norm)" "location ^~ /auth/" "an AUTH_HOST equal to APP_HOST up to case and blanks means /auth/ on the app host"
+has "$(server norm files.example.test)" "server_name files.example.test;" "FILES_HOST rendered lowercased and trimmed"
+
 echo "invalid layouts refuse to start"
 if render dup authelia app.example.test same.example.test same.example.test; then bad "AUTH_HOST = FILES_HOST refused"; else ok "AUTH_HOST = FILES_HOST refused"; fi
 if render inj authelia app.example.test 'x.example.test; }' ""; then bad "a hostname with nginx syntax refused"; else ok "a hostname with nginx syntax refused"; fi
 if render noapp authelia "" "" ""; then bad "missing APP_HOST refused"; else ok "missing APP_HOST refused"; fi
+# the same rule as setup.sh's HOST_RE
+for h in localhost a-.example.test -a.example.test a..example.test 'a.example.test
+evil.test'; do
+  if render badhost authelia app.example.test "" "$h"; then bad "FILES_HOST '$h' refused"; else ok "FILES_HOST '$h' refused"; fi
+done
 
 echo; echo "passed=$PASS failed=$FAILN"
 [ "$FAILN" = 0 ]

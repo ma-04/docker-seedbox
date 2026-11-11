@@ -16,18 +16,27 @@ out="${GATEWAY_OUT:-/tmp/gateway}"
 mkdir -p "$out"
 
 die() { echo "gateway: $*" >&2; exit 1; }
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-# Whole-string check (a newline or any other character outside [a-z0-9.-] fails): the value is pasted into nginx config.
+# Normalised like the API (lib/config.ts) and Authelia (configuration.yml): surrounding blanks dropped, lowercase.
+norm() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+# The same rule as setup.sh's HOST_RE: dot-separated labels of [a-z0-9-] that neither start nor end with '-', at least
+# two labels (Authelia refuses single-label cookie domains such as "localhost"), at most 253 characters. The value is
+# pasted into nginx config, so it is checked as a whole string first (a newline or any other character fails).
+HOST_RE='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
 valid_host() {
-  case "$1" in ""|*[!a-z0-9.-]*|.*|*.|-*|*-|*..*|*.-*|*-.*) return 1 ;; esac
-  [ "${#1}" -le 253 ]
+  case "$1" in ""|*[!a-z0-9.-]*) return 1 ;; esac
+  [ "${#1}" -le 253 ] && printf '%s\n' "$1" | grep -Eq "$HOST_RE"
 }
 
 [ -n "${GATEWAY_SECRET:-}" ] || die "GATEWAY_SECRET must be set"
 
-app=$(lower "${APP_HOST:-}")
-auth=$(lower "${AUTH_HOST:-}")
-files=$(lower "${FILES_HOST:-}")
+app=$(norm "${APP_HOST:-}")
+auth=$(norm "${AUTH_HOST:-}")
+files=$(norm "${FILES_HOST:-}")
+# AUTH_MODE=external has no Authelia: a separate login host would only proxy to a container that does not run.
+if [ "$mode" = external ] && [ -n "$auth" ]; then
+  echo "gateway: AUTH_MODE=external - ignoring AUTH_HOST ($auth); there is no login portal in this mode." >&2
+  auth=""
+fi
 [ -n "$app" ] || die "APP_HOST must be set"
 valid_host "$app" || die "APP_HOST is not a valid hostname: '$app'"
 [ -z "$auth" ] || valid_host "$auth" || die "AUTH_HOST is not a valid hostname: '$auth' (leave it empty for the single-domain layout)"
@@ -83,4 +92,6 @@ EOF
   if [ -n "$files" ]; then sed "s/@HOST@/$files/g" "$snip/server-files.conf.in"; fi
 } > "$out/servers.conf"
 
-echo "gateway: app=$app login=${auth:-$app/auth/} downloads=${files:-$app/dl/} (AUTH_MODE=$mode)" >&2
+login=${auth:-$app/auth/}
+[ "$mode" = authelia ] || login="your SSO proxy"
+echo "gateway: app=$app login=$login downloads=${files:-$app/dl/} (AUTH_MODE=$mode)" >&2
