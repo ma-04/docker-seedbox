@@ -94,6 +94,16 @@ export function acquireVpnLock(db: Db, ttlSec = LOCK_TTL_SEC, nowSec = now()): s
   }).immediate();
 }
 
+/** Like acquireVpnLock, but waits up to `waitMs` (the worker holds it only while its own /connect is in flight). */
+export async function acquireVpnLockWait(db: Db, waitMs: number): Promise<string | null> {
+  const until = Date.now() + waitMs;
+  for (;;) {
+    const t = acquireVpnLock(db);
+    if (t || Date.now() >= until) return t;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 export function releaseVpnLock(db: Db, token: string): void {
   db.transaction(() => {
     const row = db.prepare('SELECT value_json FROM settings WHERE key = ?').get(LOCK_KEY) as { value_json: string } | undefined;

@@ -245,19 +245,20 @@ config exists), `vpn.rotation` (`"manual"` | `"interval"` | `"on-failure"`),
 
 **Deleting jobs.** Cancelling an active job never touches files. Deleting a finished job (user `DELETE /jobs/:id` or admin
 `DELETE /admin/jobs/:id`) or a destination removes the rows and, in the same transaction, queues the delivered files in
-`pending_deletions` (completed jobs with a `remote_path` only). Local destinations: always; the worker removes
+`pending_deletions` (finished jobs that chose a `remote_path`; the worker's reference check makes a failed/cancelled sibling harmless). Local destinations: always; the worker removes
 `library/<fullRemotePath(remote_path)>` (must stay under the library root; any `..`, empty segment, symlinked parent or the
 `.staging` dir is refused) only if no other job row references the same destination + remote_path (nor another local
-destination mapping to the same library path) and no active job still needs it as its library copy (deferred), clears
+destination mapping to the same library path), no active job still needs it as its library copy and no active job exists for the deleted job's torrent and destination (delete + immediate re-add): those cases are deferred, not dropped. It then clears
 `torrents.library_path` pointers into it, then prunes empty parent directories (never the library root); failures retry
 with backoff (12 attempts). S3: remote data is kept unless `cleanup.deleteRemoteOnJobDelete` is on, then the worker runs
 `rclone purge DST:<bucket>/<prefix>/<exact job dir>` (asserted: one segment for user-owned, two for shared, ending in
-` [<8 hex>]`, strictly below the prefix; user-owned goes through the egress proxy). Google Drive data is never deleted
-automatically. The web UI's Remove confirmation for completed jobs states which of these applies (`GET /me` -> `cleanup`).
+` [<8 hex>]`, strictly below the prefix; user-owned goes through the egress proxy). Deleting a *destination* only ever removes
+local files, never remote data. Google Drive data is never deleted automatically. The deletion pass runs off the tick (an S3
+purge can be slow) and is aborted on shutdown. The web UI's Remove confirmation for completed jobs states which of these applies (`GET /me` -> `cleanup`).
 
 **VPN changes are serialised.** The worker's reconcile and `POST /admin/vpn/rotate` hold the `vpn.lock` row of `settings`
 (`{token, until}`, 60 s expiry, compare-and-set in an immediate transaction) while they call `/connect`; whoever finds it
-held skips (worker) or answers 409 (admin). The worker re-reads `vpn.mode` right before connecting and treats a sidecar 409
+held skips (worker) or waits up to 15 s and then answers 409 (admin). The worker re-reads `vpn.mode` right before connecting and treats a sidecar 409
 from `/connect` ("mode is off") as nothing to do.
 
 **Logging.** The API logger never records query strings (signed `/dl` links carry `exp`/`sig` there), magnet links, or

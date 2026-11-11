@@ -36,14 +36,22 @@ describe('deleting jobs queues file removal in the same transaction', () => {
     expect(pending(env)).toHaveLength(1);
   });
 
-  it('does not queue anything for failed/cancelled jobs, active jobs (cancel), or jobs without a remote path', async () => {
+  it('does not queue anything for active jobs (cancel) or jobs that never chose a remote path', async () => {
     const env = setup();
-    const a = seedJob(env, { type: 'local' }, { state: 'failed' });
-    const b = seedJob(env, { type: 'local' }, { state: 'cancelled', destId: a.destId });
+    const a = seedJob(env, { type: 'local' }, { state: 'failed', remote: null });
     const c = seedJob(env, { type: 'local' }, { state: 'completed', remote: null, destId: a.destId });
     const d = seedJob(env, { type: 'local' }, { state: 'uploading', destId: a.destId });
-    for (const j of [a, b, c, d]) expect((await env.call(alice, 'DELETE', `/api/jobs/${j.jobId}`)).statusCode).toBe(204);
+    for (const j of [a, c, d]) expect((await env.call(alice, 'DELETE', `/api/jobs/${j.jobId}`)).statusCode).toBe(204);
     expect(pending(env)).toEqual([]);
+  });
+
+  it('a failed/cancelled job that reached an upload also queues its path (the worker keeps it while a sibling references it), so a sibling cannot leak the files', async () => {
+    const env = setup();
+    const a = seedJob(env, { type: 'local', subdir: 'lib' }, { state: 'failed' });
+    expect((await env.call(alice, 'DELETE', `/api/jobs/${a.jobId}`)).statusCode).toBe(204);
+    expect(pending(env)).toHaveLength(1);
+    // the queue row remembers the torrent so a delete + immediate re-add is noticed by the worker
+    expect(env.db.prepare('SELECT torrent_id FROM pending_deletions').get()).toEqual({ torrent_id: 1 });
   });
 
   it('S3 and Drive data is kept by default; S3 is queued only with cleanup.deleteRemoteOnJobDelete', async () => {
@@ -70,7 +78,15 @@ describe('deleting jobs queues file removal in the same transaction', () => {
     seedJob(env, { type: 'local' }, { destId: a.destId, state: 'failed', remote: 'alice-1/Failed [cccccccc]' });
     expect((await env.call(root, 'DELETE', `/api/admin/destinations/${a.destId}`)).statusCode).toBe(204);
     expect(env.db.prepare('SELECT COUNT(*) n FROM destinations').get()).toEqual({ n: 0 });
-    expect((pending(env) as { full_path: string }[]).map((r) => r.full_path).sort()).toEqual(['lib/alice-1/Movie [aaaaaaaa]', 'lib/alice-1/Other [bbbbbbbb]']);
+    expect((pending(env) as { full_path: string }[]).map((r) => r.full_path).sort()).toEqual(['lib/alice-1/Failed [cccccccc]', 'lib/alice-1/Movie [aaaaaaaa]', 'lib/alice-1/Other [bbbbbbbb]']);
+  });
+
+  it('deleting an S3 destination never purges remote data, even with cleanup.deleteRemoteOnJobDelete on', async () => {
+    const env = setup();
+    setSetting(env.db, 'cleanup.deleteRemoteOnJobDelete', true);
+    const a = seedJob(env, s3, { owner: 0, remote: 'Movie [aaaaaaaa]' });
+    expect((await env.call(alice, 'DELETE', `/api/destinations/${a.destId}`)).statusCode).toBe(204);
+    expect(pending(env)).toEqual([]);
   });
 
   it('GET /api/me exposes what deleting does to remote files', async () => {

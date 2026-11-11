@@ -1,6 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
+import { createServer as createHttps } from 'node:https';
+import { readFileSync } from 'node:fs';
 import { connect, createServer as createTcp, type AddressInfo, type Server as TcpServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -170,6 +172,59 @@ describe.skipIf(!haveRclone)('real rclone through the egress proxy', () => {
     expect(r.hitsA.length).toBeGreaterThan(0);        // the (allowed) endpoint was reached through the proxy
     expect(r.hitsB).toEqual([]);                     // the redirect target was not
     expect(r.denied.some((d) => d === `second.fake.test:${r.portB}`)).toBe(true);
+    expect(r.err).toBeTruthy();
+  }, 60_000);
+});
+
+/**
+ * Production shape: an https endpoint, so rclone (Go) sends `CONNECT host:port` with the Proxy-Authorization from the proxy URL's
+ * userinfo, then TLS through the tunnel. Self-signed certificate, so rclone runs with --no-check-certificate.
+ */
+const haveOpenssl = spawnSync('openssl', ['version']).status === 0;
+describe.skipIf(!haveRclone || !haveOpenssl)('real rclone through the egress proxy: https (CONNECT)', () => {
+  async function scenario(allowSecond: boolean) {
+    const dir = mkdtempSync(join(tmpdir(), 'egress-tls-'));
+    const gen = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(dir, 'k.pem'), '-out', join(dir, 'c.pem'), '-days', '1', '-subj', '/CN=first.fake.test']);
+    if (gen.status !== 0) throw new Error(`openssl failed: ${gen.stderr}`);
+    const tls = { key: readFileSync(join(dir, 'k.pem')), cert: readFileSync(join(dir, 'c.pem')) };
+    const hitsA: string[] = [];
+    const hitsB: string[] = [];
+    let portB = 0;
+    const a = track(createHttps(tls, (q, r) => {
+      q.resume();
+      hitsA.push(`${q.method} ${q.url}`);
+      r.writeHead(307, { location: `https://second.fake.test:${portB}/stolen`, 'content-length': '0' });
+      r.end();
+    }));
+    const b = track(createHttps(tls, (q, r) => { q.resume(); hitsB.push(`${q.method} ${q.url}`); r.writeHead(403, { 'content-length': '0' }); r.end(); }));
+    const portA = await listen(a as unknown as Server);
+    portB = await listen(b as unknown as Server);
+    const { p } = await startProxy((addr, prt) => addr === '127.0.0.1' && (prt === portA || (allowSecond && prt === portB)));
+    const src = join(dir, 'src');
+    mkdirSync(src);
+    writeFileSync(join(src, 'f.txt'), 'hello');
+    const cmd = buildRcloneCommand(
+      { type: 's3', endpoint: `https://first.fake.test:${portA}`, region: 'us-east-1', accessKeyId: 'AKIAEXAMPLE', secretAccessKey: 'secret-secret-secret', bucket: 'bkt', forcePathStyle: true },
+      src, 'job', { egress: await p.env() },
+    );
+    cmd.args.push('--no-check-certificate', '--retries', '1', '--low-level-retries', '1', '--contimeout', '3s', '--timeout', '5s');
+    cmd.env.HOME = dir;
+    const err = await runRclone({ spawn: realSpawn, bin, cmd, onStats: () => undefined, stallMs: 20_000 }).then(() => null, (e: Error) => e);
+    return { err, hitsA, hitsB, denied: p.denied, portB };
+  }
+
+  it('control: an allowed redirect target is followed through the tunnel (CONNECT + token work)', async () => {
+    const r = await scenario(true);
+    expect(r.hitsA.length).toBeGreaterThan(0);
+    expect(r.hitsB.length).toBeGreaterThan(0);
+    expect(r.denied).toEqual([]);
+  }, 60_000);
+
+  it('a CONNECT to a denied redirect target is refused: the second listener is never reached', async () => {
+    const r = await scenario(false);
+    expect(r.hitsA.length).toBeGreaterThan(0);
+    expect(r.hitsB).toEqual([]);
+    expect(r.denied).toContain(`second.fake.test:${r.portB}`);
     expect(r.err).toBeTruthy();
   }, 60_000);
 });

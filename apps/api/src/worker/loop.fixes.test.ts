@@ -148,7 +148,7 @@ describe('races that used to strand jobs', () => {
     expect(existsSync(join(dir, 'sub/b.txt'))).toBe(true);
     const { enqueueDeletion } = await import('../lib/deletions.js');
     s.db.transaction(() => { enqueueDeletion(s.db, s.config.appSecret, row); s.db.prepare('DELETE FROM jobs WHERE id = ?').run(j); })();
-    await s.worker.tick();
+    await s.worker.tick(); await s.worker.idle(); // deletions run off the tick
     expect(existsSync(dir)).toBe(false);
     expect(existsSync(join(s.config.downloadsDir, 'library', 'alice-1'))).toBe(false);
     expect(s.db.prepare('SELECT COUNT(*) n FROM pending_deletions').get()).toEqual({ n: 0 });

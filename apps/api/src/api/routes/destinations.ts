@@ -123,9 +123,10 @@ function makeHelpers(ctx: Ctx) {
     const active = db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE destination_id = ? AND state IN ${ACTIVE_SQL}`).get(row.id) as { n: number };
     if (active.n > 0) throw conflict('Destination has active jobs; cancel them first');
     db.transaction(() => {
-      // The delivered files go too (local always, S3 only with cleanup.deleteRemoteOnJobDelete): queue them while the
-      // destination row still exists; the worker works from the snapshot stored in pending_deletions.
-      for (const j of db.prepare("SELECT * FROM jobs WHERE destination_id = ? AND state = 'completed'").all(row.id) as JobRow[]) enqueueDeletion(db, secret, j);
+      // Delivered files of a LOCAL destination go too (queued while the destination row still exists; the worker works from
+      // the stored path). Remote data is never purged here, whatever cleanup.deleteRemoteOnJobDelete says: deleting a
+      // destination is often how credentials get rotated, and that setting is about job deletes.
+      for (const j of db.prepare("SELECT * FROM jobs WHERE destination_id = ? AND state IN ('completed','failed','cancelled')").all(row.id) as JobRow[]) enqueueDeletion(db, secret, j, { remote: false });
       // Finished jobs reference the destination (no cascade): drop them with it.
       db.prepare('DELETE FROM jobs WHERE destination_id = ?').run(row.id);
       db.prepare('DELETE FROM destinations WHERE id = ?').run(row.id);

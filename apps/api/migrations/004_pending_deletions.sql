@@ -5,6 +5,7 @@ CREATE TABLE pending_deletions (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   destination_id INTEGER NOT NULL,
   remote_path    TEXT    NOT NULL,                 -- jobs.remote_path of the deleted job (<userDir>/<jobDir> or <jobDir>)
+  torrent_id     INTEGER,                          -- the deleted job's torrent: files are kept while an active job for it targets the same destination
   kind           TEXT    NOT NULL DEFAULT 'local', -- 'local' = delete library files, 's3' = rclone purge of the job dir
   full_path      TEXT    NOT NULL,                 -- local: path relative to the library root (subdir + remote_path)
   config_enc     TEXT,                             -- s3 only: snapshot of destinations.config_enc (the row may be deleted)

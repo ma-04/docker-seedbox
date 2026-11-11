@@ -9,7 +9,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import type { Logger } from 'pino';
 import type { Config } from '../lib/config.js';
 import type { Db } from '../lib/db.js';
-import { isSafeRelPath, s3ConfigOf, stillReferenced, type PendingDeletionRow } from '../lib/deletions.js';
+import { isSafeRelPath, reAddedActive, s3ConfigOf, stillReferenced, type PendingDeletionRow } from '../lib/deletions.js';
 import { now, type TorrentRow } from '../lib/types.js';
 import type { EgressProxy } from './egress-proxy.js';
 import { buildS3PurgeCommand, redact, runRclone, type SpawnFn } from './rclone.js';
@@ -93,6 +93,7 @@ export async function processDeletions(d: DeletionDeps): Promise<void> {
   for (const row of rows) {
     if (d.signal?.aborted) return;
     try {
+      if (reAddedActive(d.db, row)) throw new Defer('the same torrent was added again for this destination');
       if (stillReferenced(d.db, d.config.appSecret, row)) {
         d.log.info({ deletionId: row.id }, 'files are still referenced by another job; keeping them');
       } else if (row.kind === 'local') await deleteLocal(d, row);

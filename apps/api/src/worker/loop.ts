@@ -66,6 +66,8 @@ export class Worker {
   private stopped = false;
   private ticking: Promise<void> | null = null;
   private vpnInflight: Promise<void> | null = null;
+  private deletionsInflight: Promise<void> | null = null;
+  private deletionsAc = new AbortController();
   private lastVpn = 0;
   private lastVpnWarn = 0;
   private lastWarn = new Map<string, number>();
@@ -90,6 +92,7 @@ export class Worker {
 
   start(): void {
     this.stopped = false;
+    this.deletionsAc = new AbortController();
     // Apply vpn.mode before anything else: after a restart the sidecar boots fail-closed and qBittorrent has
     // already resumed its torrents; do not wait for the first periodic reconcile.
     this.lastVpn = Date.now();
@@ -109,6 +112,7 @@ export class Worker {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     for (const u of this.uploads.values()) { u.ac.abort(); u.proc?.kill('SIGTERM'); }
+    this.deletionsAc.abort();
     await this.ticking;
     await this.idle();
     await this.egress.stop();
@@ -118,6 +122,7 @@ export class Worker {
   async idle(): Promise<void> {
     while (this.uploads.size) await Promise.allSettled([...this.uploads.values()].map((u) => u.done));
     if (this.vpnInflight) await this.vpnInflight;
+    if (this.deletionsInflight) await this.deletionsInflight;
   }
 
   private warnOnce(key: string, msg: string, err?: unknown, everyMs = 60_000): void {
@@ -442,12 +447,14 @@ export class Worker {
 
   // --- step 6: delete files of removed jobs ---------------------------------------------------------
 
-  private async deletions(): Promise<void> {
-    if (this.stopped) return;
-    await processDeletions({
+  /** Off the tick (an S3 purge can take minutes against a slow endpoint and must not freeze the state machine); one pass at a time. */
+  private deletions(): void {
+    if (this.stopped || this.deletionsInflight) return;
+    this.deletionsInflight = processDeletions({
       db: this.db, config: this.d.config, log: this.log, rcloneBin: this.d.rcloneBin, egress: this.egress, endpointGuard: this.d.endpointGuard,
+      signal: this.deletionsAc.signal,
       spawn: this.d.spawn ?? ((cmd, args, opts) => nodeSpawn(cmd, args, { env: opts.env, stdio: ['ignore', 'ignore', 'pipe'] })),
-    });
+    }).catch((e) => this.log.error({ err: String(e) }, 'deletions crashed')).finally(() => { this.deletionsInflight = null; });
   }
 
   // --- step 5: release torrents nobody needs ------------------------------------------------------

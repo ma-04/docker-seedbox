@@ -30,7 +30,7 @@ Nothing but the gateway is exposed. `api`, `worker`, `web`, `authelia`, `vpn` an
 
 **Logs.** The API logs method and path only: query strings (which carry `exp`/`sig` of signed download links), magnet links and `Authorization`/`Cookie`/`X-Gateway-Secret` headers are never written.
 
-**Deleted data.** Removing a completed job deletes its files from a local destination (confined to the library folder, never while another job references the same folder). Removed S3 data is only deleted when the admin turns on `cleanup.deleteRemoteOnJobDelete`; Google Drive data is never deleted automatically.
+**Deleted data.** Removing a completed job deletes its files from a local destination (confined to the library folder, never while another job references the same folder). Removed S3 job data is only deleted when the admin turns on `cleanup.deleteRemoteOnJobDelete` (deleting a destination never purges remote data); Google Drive data is never deleted automatically.
 
 **VPN kill switch.** With `vpn.mode=required`, the VPN sidecar firewalls all egress except loopback, the WireGuard interface, the WireGuard endpoint and the internal subnet; IPv6 is dropped. qBittorrent has no network of its own (it shares the sidecar's namespace), so when the tunnel is down its traffic is blocked rather than leaking. Run `./setup.sh doctor` and verify your public IP from inside the namespace after configuring a VPN.
 

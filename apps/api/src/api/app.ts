@@ -23,7 +23,7 @@ import { registerAdminJobs, registerJobs } from './routes/jobs.js';
 export interface BuildAppOptions {
   db: Db; config: Config; vpn?: VpnClient; engine?: EngineClient; fetchImpl?: typeof fetch;
   logger?: boolean | object; ssePollMs?: number; ssePingMs?: number;
-  sseMaxPerUser?: number; sseMaxTotal?: number; limiter?: RateLimiter; lookup?: GuardOptions['lookup'];
+  sseMaxPerUser?: number; sseMaxTotal?: number; vpnLockWaitMs?: number; limiter?: RateLimiter; lookup?: GuardOptions['lookup'];
 }
 
 export interface RouteInfo { method: string | string[]; url: string; config?: { guard?: string } }
@@ -44,6 +44,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     sseMaxPerUser: opts.sseMaxPerUser ?? envInt('SSE_MAX_PER_USER', 5),
     sseMaxTotal: opts.sseMaxTotal ?? envInt('SSE_MAX_TOTAL', 200),
     limiter: opts.limiter ?? new RateLimiter(),
+    vpnLockWaitMs: opts.vpnLockWaitMs ?? 15_000,
     lookup: opts.lookup,
   };
   const app = Fastify({ logger: loggerOptions(opts.logger) as never, trustProxy: true });

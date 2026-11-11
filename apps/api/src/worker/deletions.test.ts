@@ -6,7 +6,8 @@ import { setSetting } from '../lib/settings.js';
 import { now, type JobRow } from '../lib/types.js';
 import { processDeletions } from './deletions.js';
 import { buildS3PurgeCommand } from './rclone.js';
-import { addDest, addJob, addTorrent, addUser, fakeSpawn, makeEnv, silent, writeFiles } from './testkit.js';
+import { Worker } from './loop.js';
+import { addDest, addJob, addTorrent, addUser, FakeDownloader, FakeVpn, fakeSpawn, makeEnv, silent, writeFiles } from './testkit.js';
 
 const H = 'a'.repeat(40);
 
@@ -92,6 +93,23 @@ describe('local library deletion', () => {
     expect(s.rows().map((r) => r.attempts)).toEqual(rows.map(() => 1));
   });
 
+  it('waits while the same torrent was added again for the destination (delete + immediate re-add), then deletes', async () => {
+    const s = setup();
+    const u = addUser(s.db, 'alice');
+    const d = addDest(s.db, { type: 'local' });
+    const t = addTorrent(s.db, H);
+    writeFiles(s.lib, { 'alice-1/Movie [aaaaaaaa]/a.mkv': 'A' });
+    s.db.prepare("INSERT INTO pending_deletions (destination_id, remote_path, torrent_id, kind, full_path, created_at) VALUES (?, 'alice-1/Movie [aaaaaaaa]', ?, 'local', 'alice-1/Movie [aaaaaaaa]', ?)").run(d, t, now());
+    const again = addJob(s.db, u, t, d); // queued: its remote_path is not known yet, so only the torrent link protects the files
+    await s.run();
+    expect(existsSync(join(s.lib, 'alice-1/Movie [aaaaaaaa]/a.mkv'))).toBe(true);
+    expect(s.rows()[0]!.attempts).toBe(0);
+    s.db.prepare("UPDATE jobs SET state = 'completed', remote_path = 'alice-1/Other [bbbbbbbb]' WHERE id = ?").run(again);
+    s.db.prepare('UPDATE pending_deletions SET retry_at = 0').run();
+    await s.run();
+    expect(existsSync(join(s.lib, 'alice-1/Movie [aaaaaaaa]'))).toBe(false);
+  });
+
   it('does not follow a symlinked parent out of the library', async () => {
     const s = setup();
     const outside = join(s.dir, 'outside');
@@ -145,6 +163,23 @@ describe('S3 purge (cleanup.deleteRemoteOnJobDelete)', () => {
     expect(calls[0]!.env.HTTPS_PROXY).toBe('http://p');
     expect(calls[0]!.env.RCLONE_CONFIG_DST_ENDPOINT).toBe('https://s3.example.test');
     expect(s.rows()).toEqual([]);
+  });
+
+  it('a hanging purge does not block the worker tick, and stop() aborts it', async () => {
+    const env = makeEnv();
+    setSetting(env.db, 'cleanup.deleteRemoteOnJobDelete', true);
+    const d = addDest(env.db, cfg);
+    enqueueDeletion(env.db, env.config.appSecret, { destination_id: d, remote_path: 'alice-1/Movie [aaaaaaaa]', state: 'completed', torrent_id: null });
+    const hang = fakeSpawn(); // never exits on its own
+    const w = new Worker({ db: env.db, config: env.config, downloader: new FakeDownloader(), vpn: new FakeVpn(), log: silent, vpnEveryMs: 1e9, spawn: hang.spawn, tickMs: 1e9 });
+    const t0 = Date.now();
+    await w.tick();
+    expect(Date.now() - t0).toBeLessThan(1000);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(hang.procs).toHaveLength(1);
+    expect(hang.procs[0]!.killed).toBe(false);
+    await w.stop();
+    expect(hang.procs[0]!.killed).toBe(true);
   });
 
   it('treats "directory not found" as done and keeps retrying real failures', async () => {
