@@ -32,6 +32,18 @@ describe('parseMagnet', () => {
     expect(parseMagnet(long)).toMatchObject({ ok: false });
     expect(parseMagnet(`magnet:?xt=urn:btih:${HEX}&dn=${'a'.repeat(1000)}`).ok).toBe(true);
   });
+  it('rejects the newline injection payload and any interior whitespace/control character', () => {
+    expect(parseMagnet(`magnet:?xt=urn:btih:${HEX}&dn=x\nhttp://172.31.250.1/evil\nmagnet:?xt=urn:btih:${'b'.repeat(40)}`).ok).toBe(false);
+    for (const c of ['\n', '\r', '\t', ' ', '\u0000', '\u007f', '\u0085', '\u00a0', '\u2028', '\u2029', '\u3000', '\ufeff']) {
+      expect(parseMagnet(`magnet:?xt=urn:btih:${HEX}&dn=a${c}b`)).toMatchObject({ ok: false });
+    }
+  });
+  it('measures the 8 KB limit in bytes, like the API', () => {
+    const base = `magnet:?xt=urn:btih:${HEX}&dn=`;
+    expect(parseMagnet(base + 'a'.repeat(MAX_MAGNET_LENGTH - base.length)).ok).toBe(true);
+    expect(parseMagnet(base + 'a'.repeat(MAX_MAGNET_LENGTH - base.length + 1)).ok).toBe(false);
+    expect(parseMagnet(base + '\u00e9'.repeat(MAX_MAGNET_LENGTH / 2)).ok).toBe(false);
+  });
   it('rejects double-encoded input', () => {
     expect(parseMagnet(encodeURIComponent(`magnet:?xt=urn:btih:${HEX}`)).ok).toBe(false);
     expect(parseMagnet(`magnet:?xt=urn%253Abtih%253A${HEX}`).ok).toBe(false);

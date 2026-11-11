@@ -7,6 +7,7 @@ import type { Config } from '../lib/config.js';
 import type { Db } from '../lib/db.js';
 import { decryptJson } from '../lib/crypto.js';
 import { getSetting } from '../lib/settings.js';
+import { canonicalizeMagnet, SourceError } from '../lib/source.js';
 import { now, type JobRow, type TorrentRow, type TorrentSource } from '../lib/types.js';
 import type { VpnClient } from '../lib/vpn.js';
 import { DownloaderUnavailableError, type Downloader } from '../downloaders/types.js';
@@ -177,7 +178,8 @@ export class Worker {
     const savePath = join(this.d.config.downloadsDir, 'incomplete', t.infohash);
     await this.d.downloader.add({
       id: t.infohash,
-      source: 'magnet' in src ? { magnet: src.magnet } : { torrent: Buffer.from(src.torrentB64, 'base64') },
+      // Re-canonicalised on every add: rows stored before the source policy existed may hold the user's raw string.
+      source: 'magnet' in src ? { magnet: canonicalizeMagnet(src.magnet).magnet } : { torrent: Buffer.from(src.torrentB64, 'base64') },
       savePath,
     });
     return savePath;
@@ -231,6 +233,7 @@ export class Worker {
         this.missingSince.delete(t.id);
         this.diskChecked.delete(t.id);
       } catch (err) {
+        if (err instanceof SourceError) { this.failTorrent(t, `Invalid torrent source: ${err.message}`); continue; }
         const n = (this.addFailures.get(t.id) ?? 0) + 1;
         this.addFailures.set(t.id, n);
         this.warnOnce(`add:${t.id}`, `adding torrent ${t.id} failed (attempt ${n})`, err, 30_000);
