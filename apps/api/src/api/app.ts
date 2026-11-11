@@ -12,6 +12,7 @@ import type { Ctx } from './context.js';
 import { QbittorrentDownloader } from '../downloaders/qbittorrent.js';
 import type { EngineClient } from './engine.js';
 import { ApiError } from './errors.js';
+import { loggerOptions } from './logging.js';
 import { registerAdmin } from './routes/admin.js';
 import { registerAdminDestinations, registerDestinations } from './routes/destinations.js';
 import { registerDl } from './routes/dl.js';
@@ -45,7 +46,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     limiter: opts.limiter ?? new RateLimiter(),
     lookup: opts.lookup,
   };
-  const app = Fastify({ logger: opts.logger ?? false, trustProxy: true });
+  const app = Fastify({ logger: loggerOptions(opts.logger) as never, trustProxy: true });
 
   app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 5 } });
   const routeTable: RouteInfo[] = [];
