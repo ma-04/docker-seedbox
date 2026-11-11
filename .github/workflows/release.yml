@@ -277,6 +277,7 @@ jobs:
           path: index/${{ matrix.image }}
           if-no-files-found: error
           retention-days: 7
+          overwrite: true   # a re-run of a failed job uploads it again
       # GitHub artifact attestation (SLSA build provenance, Sigstore-signed) for the multi-arch index digest:
       # `gh attestation verify oci://ghcr.io/<owner>/docker-seedbox-<name>:<tag> --repo <owner>/docker-seedbox`.
       # Dry runs keep it out of the registry (only GitHub's attestation store).

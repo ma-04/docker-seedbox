@@ -105,12 +105,8 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
           cache-to: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }},mode=max
 
-      # The pushed digest is pulled back and tested: what is smoke-tested is byte for byte what gets tagged.
-      - name: Smoke test on ${{ matrix.platform.runner }}
-        env:
-          REF: ${{ inputs.push && format('{0}@{1}', steps.name.outputs.ref, steps.build.outputs.digest) || format('smoke/{0}:{1}', matrix.image.name, matrix.platform.arch) }}
-        run: .github/scripts/smoke.sh "$IMAGE" "$REF" "$ARCH" "$VERSION"
-
+      # Recorded before the smoke test: release.yml only merges when every leg (including its smoke test) is green, and a
+      # dry run's cleanup needs the digest of every push, also of a leg whose smoke test failed.
       - name: Record the digest
         if: inputs.push
         env:
@@ -128,3 +124,10 @@ jobs:
           path: digests/${{ matrix.image.name }}-${{ matrix.platform.arch }}
           if-no-files-found: error
           retention-days: 7
+          overwrite: true   # a re-run of a failed job uploads it again
+
+      # The pushed digest is pulled back and tested: what is smoke-tested is byte for byte what gets tagged.
+      - name: Smoke test on ${{ matrix.platform.runner }}
+        env:
+          REF: ${{ inputs.push && format('{0}@{1}', steps.name.outputs.ref, steps.build.outputs.digest) || format('smoke/{0}:{1}', matrix.image.name, matrix.platform.arch) }}
+        run: .github/scripts/smoke.sh "$IMAGE" "$REF" "$ARCH" "$VERSION"
