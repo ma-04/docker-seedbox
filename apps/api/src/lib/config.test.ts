@@ -32,6 +32,17 @@ describe('hosts layout', () => {
     });
   });
 
+  it('logout link: the portal in authelia mode; LOGOUT_URL (http(s) only) or none in external mode', () => {
+    expect(loadConfig({ ...base, APP_HOST: 'a.example.test' }).logoutUrl).toBe('https://a.example.test/auth/logout');
+    expect(loadConfig({ ...base, APP_HOST: 'a.example.test', AUTH_HOST: 'login.example.test' }).logoutUrl).toBe('https://login.example.test/logout');
+    // external: no portal exists, whatever AUTH_HOST still says
+    expect(loadConfig({ ...base, APP_HOST: 'a.example.test', AUTH_HOST: 'login.example.test', AUTH_MODE: 'external' }).logoutUrl).toBeNull();
+    expect(loadConfig({ ...base, APP_HOST: 'a.example.test', AUTH_MODE: ' External ', LOGOUT_URL: ' https://sso.example.test/sign_out ' }).logoutUrl).toBe('https://sso.example.test/sign_out');
+    for (const bad of ['javascript:alert(1)', 'data:text/html,x', '/relative', 'not a url']) {
+      expect(() => loadConfig({ ...base, APP_HOST: 'a.example.test', AUTH_MODE: 'external', LOGOUT_URL: bad }), bad).toThrow(/LOGOUT_URL/);
+    }
+  });
+
   it('loadConfig applies the layout and PUBLIC_SCHEME (empty -> https)', () => {
     const c = loadConfig({ ...base, APP_HOST: 'a.example.test', PUBLIC_SCHEME: '' });
     expect(c.authPortalUrl).toBe('https://a.example.test/auth');

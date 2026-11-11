@@ -19,6 +19,8 @@ x-app-env: &app-env
   APP_HOST: ${APP_HOST:?APP_HOST is required}
   AUTH_HOST: ${AUTH_HOST:-}         # empty = login portal at APP_HOST/auth/ (single domain)
   FILES_HOST: ${FILES_HOST:-}       # empty = downloads at APP_HOST/dl/ (single domain)
+  AUTH_MODE: ${AUTH_MODE:-authelia}
+  LOGOUT_URL: ${LOGOUT_URL:-}       # AUTH_MODE=external only: your SSO's sign-out page (empty = no "Log out" link)
   PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
   ADMIN_GROUP: ${ADMIN_GROUP:-admins}
   DATA_DIR: /data

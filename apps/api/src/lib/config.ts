@@ -18,6 +18,11 @@ export interface Config {
   authPortalUrl: string;
   /** Default base URL of local-destination download links (a destination's publicBaseUrl wins): https://<filesHost>. */
   filesBaseUrl: string;
+  /**
+   * The web UI's "Log out" target: the Authelia portal's /logout (AUTH_MODE=authelia), or LOGOUT_URL with
+   * AUTH_MODE=external (there is no portal then; unset = no logout link).
+   */
+  logoutUrl: string | null;
   publicScheme: string;
   adminGroup: string;
   dataDir: string;
@@ -55,6 +60,16 @@ export function hostLayout(env: NodeJS.ProcessEnv, scheme: string): HostLayout {
   };
 }
 
+/** LOGOUT_URL (AUTH_MODE=external): your SSO's sign-out page. Rendered as a link, so only absolute http(s) URLs. */
+function externalLogoutUrl(raw: string | undefined): string | null {
+  const v = (raw ?? '').trim();
+  if (!v) return null;
+  let u: URL;
+  try { u = new URL(v); } catch { throw new Error(`LOGOUT_URL must be an absolute http(s) URL (got '${v}')`); }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error(`LOGOUT_URL must be an absolute http(s) URL (got '${v}')`);
+  return u.toString();
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const appSecret = env.APP_SECRET ?? req('APP_SECRET');
   if (appSecret.length < 32) throw new Error('APP_SECRET must be at least 32 characters');
@@ -63,12 +78,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error('TRACKER_LIST_ALLOW_PRIVATE is for the hermetic test stack only (it also needs E2E_HERMETIC=1); unset it');
   }
   const publicScheme = env.PUBLIC_SCHEME || 'https';
+  const layout = hostLayout(env, publicScheme);
   return {
     appSecret,
     trackerListAllowPrivate,
     gatewaySecret: env.GATEWAY_SECRET ?? req('GATEWAY_SECRET'),
     vpnControlToken: env.VPN_CONTROL_TOKEN ?? req('VPN_CONTROL_TOKEN'),
-    ...hostLayout(env, publicScheme),
+    ...layout,
+    logoutUrl: (env.AUTH_MODE ?? 'authelia').trim().toLowerCase() === 'external' ? externalLogoutUrl(env.LOGOUT_URL) : `${layout.authPortalUrl}/logout`,
     publicScheme,
     adminGroup: env.ADMIN_GROUP ?? 'admins',
     dataDir: env.DATA_DIR ?? '/data',
