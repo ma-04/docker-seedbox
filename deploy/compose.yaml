@@ -34,7 +34,7 @@ services:
   # first start, whichever container happens to touch a volume first. `library` is world-readable
   # (the gateway runs as nginx, uid 101, and serves it read-only).
   init:
-    image: busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+    image: busybox:1.38@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
     restart: "no"
     user: "0:0"
     command:
