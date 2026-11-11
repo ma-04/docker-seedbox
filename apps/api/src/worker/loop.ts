@@ -451,7 +451,7 @@ export class Worker {
     this.db.transaction(() => {
       this.db.prepare("UPDATE torrents SET state = 'error', error = ?, dl_speed = 0, cleanup_pending = 1 WHERE id = ?").run(message, t.id);
       this.db.prepare(`UPDATE jobs SET state = 'failed', error = ?, updated_at = ? WHERE torrent_id = ? AND state IN ${ACTIVE}`).run(message, now(), t.id);
-    })();
+    }).immediate();
     this.missingSince.delete(t.id);
     this.lastProgress.delete(t.id);
     this.addBefore.delete(t.id);

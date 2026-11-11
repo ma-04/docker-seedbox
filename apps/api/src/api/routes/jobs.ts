@@ -71,7 +71,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
       assertCapacity(user);
       db.prepare("UPDATE jobs SET state = 'queued', error = NULL, upload_progress = 0, upload_speed = 0, completed_at = NULL, updated_at = ? WHERE id = ?").run(now(), job.id);
       resetTorrentIfDead(job.torrent_id);
-    })();
+    }).immediate();
   }
 
   const ownJob = (user: UserRow, id: number): JobJoin => {
@@ -144,7 +144,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
       const info = db.prepare("INSERT INTO jobs (user_id, torrent_id, destination_id, state, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?)")
         .run(user.id, tor.id, dest.id, t, t);
       return { id: Number(info.lastInsertRowid), created: true };
-    })();
+    }).immediate();
     return reply.code(result.created ? 201 : 200).send(jobDto(getJobJoin(db, result.id)!));
   });
 
