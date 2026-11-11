@@ -74,7 +74,8 @@ export function trackersDto(db: Db): TrackersDto {
   return {
     enabled: eff.enabled, urls, refreshHours: getSetting(db, 'trackers.refreshHours'), maxTrackers: getSetting(db, 'trackers.maxTrackers'),
     lists, manualCount: eff.manualCount, effectiveCount: eff.trackers.length,
-    refreshRequestedAt: req > getSetting(db, 'trackers.refreshDoneAt') ? req : null,
+    // Pending only when the worker will act on it (it neither fetches while disabled nor without URLs).
+    refreshRequestedAt: eff.enabled && urls.length > 0 && req > getSetting(db, 'trackers.refreshDoneAt') ? req : null,
   };
 }
 

@@ -32,6 +32,15 @@ describe('admin tracker lists API', () => {
     expect(j.refreshRequestedAt).toBeGreaterThan(0); // the worker fetches the new URLs right away
   });
 
+  it('clearing the URLs (or changing them while switched off) requests no refresh nobody would acknowledge', async () => {
+    const env = setup();
+    await env.call(root, 'PUT', URL, { urls: [A] });
+    setSetting(env.db, 'trackers.refreshDoneAt', getSetting(env.db, 'trackers.refreshRequestedAt'));
+    expect((await env.call(root, 'PUT', URL, { urls: [] })).json().refreshRequestedAt).toBeNull();
+    setSetting(env.db, 'trackers.enabled', false);
+    expect((await env.call(root, 'PUT', URL, { urls: [A] })).json().refreshRequestedAt).toBeNull();
+  });
+
   it('a settings-only change does not request a refresh; the generic settings endpoint hides and ignores tracker keys', async () => {
     const env = setup();
     await env.call(root, 'PUT', URL, { refreshHours: 6 });

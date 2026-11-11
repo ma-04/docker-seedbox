@@ -33,7 +33,7 @@ describe('tracker lists form', () => {
   });
 
   it.each([
-    ['http scheme', { urls: 'http://a.example.org/x' }, /https/],
+    ['ftp scheme', { urls: 'ftp://a.example.org/x' }, /web URL/],
     ['credentials', { urls: 'https://u:p@a.example.org/x' }, /credentials/],
     ['not a URL', { urls: 'nope' }, /valid URL/],
     ['six URLs', { urls: Array.from({ length: 6 }, (_, i) => `https://l${i}.example.org/x`).join('\n') }, /At most 5/],
@@ -45,6 +45,10 @@ describe('tracker lists form', () => {
     ['max 1001', { maxTrackers: '1001' }, /1 to 1000/],
   ])('validates: %s', (_n, o, re) => {
     expect(validateTrackersForm({ ...trackersToForm(dto()), ...o })).toMatch(re);
+  });
+
+  it('leaves the https / public-host rules to the server', () => {
+    expect(validateTrackersForm({ urls: 'http://lists.example.org/a.txt', refreshHours: '24', maxTrackers: '200' })).toBeNull();
   });
 
   it('accepts a good form and an empty URL list', () => {

@@ -308,7 +308,7 @@ worker writes manual + fetched trackers to the engine (see "Tracker lists"). If 
 
 Admins can load extra trackers from up to five public `https` plain-text lists and have them added to new downloads.
 The **app** fetches and validates the lists; qBittorrent's own "add trackers from URL" preference
-(`add_trackers_from_url_enabled`, `add_trackers_url`, qBittorrent >= 5.0) is deliberately left off (the worker re-asserts it on every
+(`add_trackers_from_url_enabled`, `add_trackers_url`; present in the pinned qBittorrent 5.3.0) is deliberately left off (the worker re-asserts it on every
 check): its fetch runs inside the VPN namespace, validates nothing (no scheme/host check, no size cap) and gives the UI no status.
 
 - `GET /admin/trackers` -> `TrackersDto`: `enabled`, `urls`, `refreshHours`, `maxTrackers`, per-list status (`url`, `lastFetchedAt`,

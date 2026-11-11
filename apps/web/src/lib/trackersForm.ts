@@ -24,7 +24,7 @@ export const addUrlLine = (text: string, url: string): string => {
   return (urls.includes(url) ? urls : [...urls, url]).join('\n');
 };
 
-/** First problem a user can fix before saving, or null. The server remains the authority (https, public host). */
+/** First problem a user can fix before saving, or null. The server is the authority for https and public hosts (a test stack may allow more), so only shape problems are caught here. */
 export function validateTrackersForm(f: TrackersForm): string | null {
   const urls = parseUrlLines(f.urls);
   if (urls.length > MAX_LIST_URLS) return `At most ${MAX_LIST_URLS} list URLs`;
@@ -32,7 +32,7 @@ export function validateTrackersForm(f: TrackersForm): string | null {
     if (u.length > MAX_URL_CHARS) return `URL is longer than ${MAX_URL_CHARS} characters`;
     let p: URL;
     try { p = new URL(u); } catch { return `Not a valid URL: ${u.slice(0, 60)}`; }
-    if (p.protocol !== 'https:') return `List URLs must use https: ${u.slice(0, 60)}`;
+    if (p.protocol !== 'https:' && p.protocol !== 'http:') return `Not a web URL: ${u.slice(0, 60)}`; // https and public hosts are enforced by the server
     if (p.username || p.password) return 'List URLs must not contain credentials';
   }
   const h = Number(f.refreshHours), m = Number(f.maxTrackers);
