@@ -39,9 +39,10 @@ lan_policy() { # mode-label
   check "$1: uid 1000 -> sibling container :9999 times out (dropped)" test "$(probe_rc http://172.31.250.51:9999/)" = 28
   check "$1: uid 1000 -> bridge gateway (the host) :22 times out (dropped)" test "$(probe_rc http://172.31.250.1:22/)" = 28
   check "$1: uid 1000 -> allow-listed IP on another port (client:9001) times out" test "$(probe_rc http://172.31.250.50:9001/)" = 28
-  check "$1: uid 1000 -> allow-listed ip:port (VPN_LAN_ALLOW_OUT client:9000) works" test "$(probe_rc http://172.31.250.50:9000/)" = 0
-  check "$1: positive control: root (the sidecar) reaches the sibling :9999" $DC exec -T -u 0 probe curl -fsS -m 4 http://172.31.250.51:9999/
-  check "$1: positive control: the in-namespace listener answers on loopback" probe curl -fsS -m 4 http://127.0.0.1:9100/
+  # positive probes retry (first packets after a container start can be slow on a loaded host); "blocked" ones never do
+  check "$1: uid 1000 -> allow-listed ip:port (VPN_LAN_ALLOW_OUT client:9000) works" retry 5 sh_ '[ "$(probe_rc http://172.31.250.50:9000/)" = 0 ]'
+  check "$1: positive control: root (the sidecar) reaches the sibling :9999" retry 5 $DC exec -T -u 0 probe curl -fsS -m 4 http://172.31.250.51:9999/
+  check "$1: positive control: the in-namespace listener answers on loopback" retry 5 probe curl -fsS -m 4 http://127.0.0.1:9100/
   check "$1: sibling -> in-namespace listener :9100 times out (LAN input only reaches the WebUI/control ports)" test "$($DC exec -T lan-intruder curl -s -m 4 -o /dev/null -w '%{http_code}' http://vpn:9100/)" = 000
   check "$1: sibling -> WebUI :8080 still answers (403: not whitelisted)" test "$(intruder_code http://vpn:8080/api/v2/app/version)" = 403
 }
@@ -95,7 +96,7 @@ sleep 1
 # ---------------------------------------------------------------- 1
 section "1. off mode"
 check "status mode=off, not connected" test "$(status | jqs '.mode+" "+(.connected|tostring)')" = "off false"
-check "namespace reaches the direct echo service" sh_ "probe_ip 172.31.251.20 | grep -q '^direct 172.31.251.2\$'"
+check "namespace reaches the direct echo service" retry 10 sh_ "probe_ip 172.31.251.20 | grep -q '^direct 172.31.251.2\$'"
 check "WebUI :8080 reachable from LAN client" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
 check "resolv.conf = Docker resolver" $DC exec -T probe grep -q 127.0.0.11 /etc/resolv.conf
 check "qBittorrent healthy" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
@@ -111,7 +112,7 @@ check "start a listener as uid 1000 inside the namespace (for the inbound checks
 sleep 1
 section "1a. LAN policy in off mode (internet-direct stays open, LAN is restricted)"
 lan_policy off
-check "off: uid 1000 still reaches the 'internet' directly" test "$(probe_rc http://172.31.251.20/)" = 0
+check "off: uid 1000 still reaches the 'internet' directly" retry 5 sh_ '[ "$(probe_rc http://172.31.251.20/)" = 0 ]'
 check "qBittorrent runs as uid 1000" bash -c "$DC exec -T qbittorrent sh -c 'ps -o user,args | grep \"[q]bittorrent-nox\"' | grep -q qbtUser"
 
 section "1b. /connect is refused (409) in off mode"
