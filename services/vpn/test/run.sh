@@ -131,7 +131,7 @@ check "off: the public (TEST-NET) 'internet' is reachable from uid 1000 while ev
 section "1a2. qbittorrent container hardening (read-only rootfs, reduced capabilities, no root write access to /config)"
 QC=$($DC ps -q qbittorrent)
 check "qbittorrent: root filesystem is read-only" test "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$QC")" = true
-check "qbittorrent: capabilities added = CHOWN SETUID SETGID KILL only (no DAC_OVERRIDE, no FOWNER)" test "$(docker inspect -f '{{range .HostConfig.CapAdd}}{{.}} {{end}}' "$QC" | sed 's/CAP_//g' | tr ' ' '\n' | sort | tr '\n' ' ')" = "CHOWN KILL SETGID SETUID "
+check "qbittorrent: capabilities added = CHOWN SETUID SETGID KILL only (no DAC_OVERRIDE, no FOWNER)" test "$(docker inspect -f '{{range .HostConfig.CapAdd}}{{.}} {{end}}' "$QC" | sed 's/CAP_//g' | tr ' ' '\n' | sort | xargs)" = "CHOWN KILL SETGID SETUID"
 check "qbittorrent: capabilities dropped = ALL" test "$(docker inspect -f '{{range .HostConfig.CapDrop}}{{.}} {{end}}' "$QC" | sed 's/CAP_//g' | tr -d ' ')" = ALL
 checkno "qbittorrent: /entrypoint.sh is not writable (even as root)" $DC exec -T -u 0 qbittorrent sh -c 'echo pwned >> /entrypoint.sh'
 checkno "qbittorrent: /seed-config.sh is not writable (even as root)" $DC exec -T -u 0 qbittorrent sh -c 'echo pwned >> /seed-config.sh'
