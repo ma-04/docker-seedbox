@@ -116,6 +116,8 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            VITE_APP_VERSION=${{ github.ref_name }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ steps.name.outputs.ref }},push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max

@@ -10,6 +10,7 @@ import Downloads from './pages/Downloads';
 import AddHandler from './pages/AddHandler';
 import Storage from './pages/Storage';
 import type { MeDto } from './lib/api';
+import { buildInfo } from './lib/buildInfo';
 
 const navCls = ({ isActive }: { isActive: boolean }) =>
   cx('block rounded-md px-3 py-2 text-sm font-medium', isActive ? 'bg-brand-600 text-white' : 'text-slate-700 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800');
@@ -46,6 +47,11 @@ function Layout({ me }: { me: MeDto }) {
         <main className="mx-auto max-w-6xl p-4 md:p-6">
           <Outlet />
         </main>
+        <footer data-testid="app-footer" className="mx-auto max-w-6xl px-4 pb-6 text-xs text-slate-500 md:px-6">
+          <a href={buildInfo.sourceUrl} target="_blank" rel="noopener noreferrer" className="hover:underline">Source code (AGPL-3.0)</a>
+          {' · '}
+          <span data-testid="app-version">{buildInfo.version}</span>
+        </footer>
       </div>
     </div>
   );

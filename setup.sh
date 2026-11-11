@@ -648,9 +648,15 @@ or continue with --accept-new-secret if you want a new secret and will re-enter 
   print_summary "$generated_pw"
 }
 
+build_version() { # shown in the web footer: git describe when this is a clone, else the pinned version (or dev)
+  local v; v=$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null) || v=${SEEDBOX_BUILD_VERSION:-dev}
+  printf '%s' "$v"
+}
+
 ensure_images() { # pull the pinned version, or build from this clone
   if [ "$BUILD" = 1 ]; then
     step "Building images from this clone (first build takes a few minutes)"
+    export SEEDBOX_BUILD_VERSION; SEEDBOX_BUILD_VERSION=$(build_version)
     dc build
   else
     step "Pulling images ($(env_get SEEDBOX_VERSION))"
@@ -711,6 +717,7 @@ cmd_update() {
     step "Rebuilding images from this clone"
     say "Version: ${cur} -> local build of $(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo 'this clone')${run:+   (running now: $run)}"
     env_put SEEDBOX_VERSION local
+    export SEEDBOX_BUILD_VERSION; SEEDBOX_BUILD_VERSION=$(build_version)
     dc build --pull
   else
     target=$VERSION_IN

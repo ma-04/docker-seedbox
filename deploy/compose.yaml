@@ -113,7 +113,13 @@ services:
   # ---------------------------------------------------------------- web
   web:
     image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-web:${SEEDBOX_VERSION:-latest}
-    build: { context: .., dockerfile: apps/web/Dockerfile }
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Footer: version + source link (AGPL). setup.sh sets SEEDBOX_BUILD_VERSION for local builds.
+        VITE_APP_VERSION: ${SEEDBOX_BUILD_VERSION:-dev}
+        VITE_SOURCE_URL: ${SEEDBOX_SOURCE_URL:-https://github.com/ma-04/docker-seedbox}
     restart: unless-stopped
     read_only: true
     tmpfs: ["/tmp:uid=101,gid=101"]
