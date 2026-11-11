@@ -11,7 +11,8 @@ name: Release images
 #                         On any other ref only with dry-run: true.
 #   pull request that changes this pipeline, or dispatch with dry-run: true
 #                      -> DRY RUN: the full native build + smoke tests + arm64 VPN/e2e suites + merge + attestation +
-#                         verification, under the throw-away tag :pr-<N>-test (:dryrun-<run id>), deleted at the end.
+#                         verification and a tag move, under the throw-away tags :pr-<N>-test (:dryrun-<run id>) and
+#                         :<that>-moved, deleted at the end.
 #                         Fork and Dependabot PRs (read-only token) build and smoke-test but push nothing.
 #
 # Order: guard -> { CI suite (ci.yml) | native build of 5 images x 2 arches, pushed untagged by digest | arm64 VPN +
@@ -279,13 +280,14 @@ jobs:
   publish:
     name: Move the tags (all five images)
     needs: [guard, merge]
-    if: needs.guard.outputs.kind != 'dryrun' && needs.merge.result == 'success'
+    if: needs.merge.result == 'success'
     runs-on: ubuntu-24.04
     # One tag move at a time per kind: two release runs never interleave (each computes "highest version" from the
     # repository's tags at that moment, so their order does not matter). NOTE: GitHub keeps one PENDING job per group;
     # a third release run arriving meanwhile cancels the waiting one, which then simply needs a re-run.
+    # A dry run moves only its own throw-away tag and never waits for (or blocks) a real release.
     concurrency:
-      group: release-publish-${{ needs.guard.outputs.kind == 'edge' && 'edge' || 'versions' }}
+      group: release-publish-${{ needs.guard.outputs.kind == 'dryrun' && format('dryrun-{0}', github.run_id) || needs.guard.outputs.kind == 'edge' && 'edge' || 'versions' }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -325,6 +327,13 @@ jobs:
             prerelease) moving="" ;;
             # Fresh list of the repository's tags, read now (not when this run started).
             release) moving=$(git ls-remote --tags "$url" 'v*' | .github/scripts/release-tags.sh "$VERSION" | paste -sd' ' -) ;;
+            # Dry run: exercise the same tag move with a second throw-away tag (same digest, so the same package
+            # version: the cleanup job deletes both), and show what a release would get today.
+            dryrun)
+              moving="$IMMUTABLE-moved"
+              for v in 0.1.0 1.0.0; do
+                echo "A release v$v now would get: $v $(git ls-remote --tags "$url" 'v*' | .github/scripts/release-tags.sh "$v" | paste -sd' ' -)" | tee -a "$GITHUB_STEP_SUMMARY"
+              done ;;
             *) echo "::error::unexpected kind '$KIND'"; exit 1 ;;
           esac
           echo "moving=$moving" >> "$GITHUB_OUTPUT"
@@ -355,9 +364,7 @@ jobs:
   verify:
     name: Verify attestations
     needs: [guard, merge, publish]
-    if: >-
-      !cancelled() && needs.merge.result == 'success'
-      && (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && needs.guard.outputs.kind == 'dryrun'))
+    if: needs.merge.result == 'success' && needs.publish.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -457,7 +464,7 @@ jobs:
 
   cleanup:
     name: Delete the dry-run tag
-    needs: [guard, merge, verify]
+    needs: [guard, merge, publish, verify]
     # Also after a failure: the throw-away tag must not outlive the run.
     if: always() && needs.guard.outputs.kind == 'dryrun' && needs.guard.outputs.push == 'true' && needs.merge.result != 'skipped'
     runs-on: ubuntu-24.04
@@ -467,7 +474,7 @@ jobs:
       IMMUTABLE: ${{ needs.guard.outputs.immutable }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      # Deletes only the package version carrying the throw-away tag (the multi-arch index). Its per-arch children stay
+      # Deletes only the package version carrying the throw-away tags (the multi-arch index). Its per-arch children stay
       # as untagged versions, like those of every superseded :edge build.
       - run: |
           set -uo pipefail

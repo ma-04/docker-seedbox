@@ -37,7 +37,7 @@ shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh
 ./setup.sh --domain seedbox.example.com --admin-email me@example.com --proxy none --yes --no-start
 ```
 
-`docker compose build` builds every image from a clone. CI runs typecheck, unit tests, the compose/shellcheck checks, a build of every image, the VPN sidecar test (`services/vpn/test/run.sh`, needs Docker with Compose 2.33+ and a kernel with WireGuard) and the end-to-end suite. All of it must pass before anything is published: see [docs/releasing.md](docs/releasing.md).
+`docker compose build` builds every image from a clone. CI runs typecheck, unit tests, the compose/shellcheck checks, a native build and smoke test of every image for linux/amd64 and linux/arm64 (arm64 on GitHub's arm runner), the VPN sidecar test (`services/vpn/test/run.sh`, needs Docker with Compose 2.33+ and a kernel with WireGuard) and the end-to-end suite. All of it must pass before anything is published: see [docs/releasing.md](docs/releasing.md).
 
 ```sh
 services/vpn/test/run.sh        # kill switch, LAN policy, rotation, qBittorrent seeding; project name sbvpn, cleans up after itself

@@ -33,7 +33,7 @@ cd docker-seedbox
 
 `setup.sh` asks for your domain and an admin e-mail, generates every secret, creates the admin login, starts the stack and prints the URLs. Re-running it is safe. Already have a reverse proxy? It detects a running `nginx-proxy` and joins it instead (see [docs/deployment.md](docs/deployment.md)). Non-interactive: `./setup.sh --domain seedbox.example.com --admin-email me@example.com --yes`.
 
-`setup.sh` installs the newest release of the published images; while none exists yet it offers to build them from your clone instead. Then: log in, open **Admin**, add a destination, optionally upload WireGuard configs. Useful later: `./setup.sh add-user`, `./setup.sh update` (shows `1.2.3 -> 1.3.0`, `--version` pins), `./setup.sh backup` / `restore`, `./setup.sh doctor`. Requires Docker Engine 26+ and Compose 2.26+.
+`setup.sh` installs the newest release of the published images (`ghcr.io/ma-04/docker-seedbox-*`, multi-arch: **linux/amd64 and linux/arm64**, e.g. a Raspberry Pi 4/5 with a 64-bit OS or an ARM cloud server), pinned as its exact version; before the first release it uses `:edge` (the CI-tested head of `main`), and without either it offers to build from your clone. Tags: `X.Y.Z` / `X.Y` / `latest` = releases, `edge` = `main` ([details](docs/deployment.md#versions-upgrades-and-verification)). Then: log in, open **Admin**, add a destination, optionally upload WireGuard configs. Useful later: `./setup.sh add-user`, `./setup.sh update` (shows `1.2.3 -> 1.3.0`; `--version X.Y.Z|latest|edge` pins), `./setup.sh backup` / `restore`, `./setup.sh doctor`. Requires Docker Engine 26+ and Compose 2.26+.
 
 ## Architecture
 

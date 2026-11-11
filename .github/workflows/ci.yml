@@ -87,7 +87,7 @@ jobs:
   # false) because its own build of the same matrix is a superset (it also pushes and tests the pushed digests).
   images:
     name: Images
-    if: inputs.build-images != false
+    if: format('{0}', inputs.build-images) != 'false'   # null (pull_request) == false in Actions' loose comparison
     uses: ./.github/workflows/images.yml
     permissions:
       contents: read

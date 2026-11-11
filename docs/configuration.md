@@ -41,7 +41,7 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `COMPOSE_PROFILES` | `authelia` | Starts Authelia; empty for `AUTH_MODE=external`. |
 | `COMPOSE_PROJECT_NAME` | `seedbox` | Prefix of containers, network and volumes. |
 | `SEEDBOX_REGISTRY` | `ghcr.io/ma-04` | Registry/owner of the prebuilt images. |
-| `SEEDBOX_VERSION` | newest release (pinned by `setup.sh`) | Image tag: `X.Y.Z`, `X.Y`, `latest`, `edge`, or `local` (built from the clone). See [deployment.md](deployment.md#versions-upgrades-and-verification). |
+| `SEEDBOX_VERSION` | newest release (pinned by `setup.sh`) | Image tag: `X.Y.Z`, `X.Y`, `latest`, `edge`, `sha-<commit>`, or `local` (built from the clone). Multi-arch (amd64, arm64). See [deployment.md](deployment.md#versions-upgrades-and-verification). |
 | `AUTH_POLICY` | `one_factor` | Authelia policy for the app host; `two_factor` requires TOTP. |
 | `AUTHELIA_SESSION_SECRET`, `AUTHELIA_STORAGE_ENCRYPTION_KEY`, `AUTHELIA_JWT_SECRET` | generated | Authelia secrets (session, SQLite encryption, password-reset tokens). |
 | `ACME_EMAIL` | empty | Let's Encrypt contact (bundled/external nginx-proxy). |
