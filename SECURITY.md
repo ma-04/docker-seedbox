@@ -24,7 +24,8 @@ Nothing but the gateway is exposed. `api`, `worker`, `web`, `authelia`, `vpn` an
 
 **Hosts and origins.** By default one hostname serves the SPA, `/api`, the Authelia portal (`/auth/`) and local downloads (`/dl/`), so user-supplied file content is served from the same origin as the app and the login portal. What keeps a downloaded file inert there in current browsers:
 
-- the API answers every `/dl/` request with `Content-Type: application/octet-stream` and `Content-Disposition: attachment` (nginx keeps both across `X-Accel-Redirect`, so the file extension never picks a type), plus `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and `Referrer-Policy: no-referrer`;
+- every **successful** file response (200/206) carries `Content-Type: application/octet-stream` and `Content-Disposition: attachment`: the API sets both on its `X-Accel-Redirect` answer and nginx keeps them, so the file extension never picks a type;
+- **every** `/dl/` response, errors included (the API's 403/404/410 JSON, nginx's own 403/404/416 and its 404 for other methods), carries `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and `Referrer-Policy: no-referrer`; error bodies are short fixed texts, never file content;
 - a navigation therefore downloads instead of rendering; were it rendered anyway, the sandbox gives the document an opaque origin with no script; `nosniff` with a non-script type stops `<script src>`, stylesheets and service-worker registration (which requires a JavaScript MIME type), so a file cannot run code in, or take control of paths of, the app's origin; the app registers no service worker of its own;
 - Authelia's session cookie is `HttpOnly`, `Secure`, `SameSite=Lax`. The browser does send it with `/dl/` requests on the shared host; the gateway blanks it before the API, nothing echoes it, and neither nginx nor the API logs cookies or the query.
 

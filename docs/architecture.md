@@ -354,10 +354,10 @@ check): its fetch runs inside the VPN namespace, validates nothing (no scheme/ho
 | `GATEWAY_SECRET` | gateway, api | required; shared header secret |
 | `VPN_CONTROL_TOKEN` | vpn, api, worker | required |
 | `APP_HOST` | gateway, api, authelia | required; hostname, no scheme |
-| `AUTH_HOST`, `FILES_HOST` | gateway, api, authelia | optional separate hosts; empty or `= APP_HOST` = `/auth/`, `/dl/` on `APP_HOST` |
-| `COOKIE_DOMAIN` | authelia | session cookie domain; empty = `APP_HOST`; with a separate `AUTH_HOST` a parent of both |
+| `AUTH_HOST`, `FILES_HOST` | gateway, api, authelia | optional separate hosts; empty or `= APP_HOST` = `/auth/`, `/dl/` on `APP_HOST`; all host values are trimmed and lowercased by every component |
+| `COOKIE_DOMAIN` | authelia | only with a separate `AUTH_HOST` (required: a parent of both); otherwise the cookie is scoped to `APP_HOST` |
 | `PUBLIC_SCHEME` | api | `https` |
-| `AUTH_MODE` | gateway | `authelia` \| `external` |
+| `AUTH_MODE` | gateway, api | `authelia` \| `external` (no portal: `AUTH_HOST` ignored, logout link from `LOGOUT_URL`) |
 | `ADMIN_GROUP` | api | `admins` |
 | `DATA_DIR` | api, worker | `/data` (SQLite at `$DATA_DIR/seedbox.db`) |
 | `DOWNLOADS_DIR` | api, worker | `/downloads` (`incomplete/`, `library/`) |

@@ -14,11 +14,12 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `GATEWAY_SECRET` | gateway, api | Required. Header secret that proves a request came through the gateway. |
 | `VPN_CONTROL_TOKEN` | vpn, api, worker | Required. Bearer token for the VPN control API. |
 | `APP_HOST` | gateway, api, authelia | Required. Hostname without scheme of the web UI and `/api`; by default also of the login portal (`https://APP_HOST/auth/`) and local downloads (`https://APP_HOST/dl/`). See [Hosts layout](deployment.md#hosts-layout). |
-| `FILES_HOST` | gateway, api | Empty (default) = downloads under `APP_HOST/dl/`. A different hostname = local downloads on their own origin (recommended hardening, see [SECURITY.md](../SECURITY.md)); `/dl/` on `APP_HOST` then answers 404. Best outside `COOKIE_DOMAIN`. |
-| `AUTH_HOST` | gateway, api, authelia | Empty (default) = Authelia portal under `APP_HOST/auth/`. A different hostname = the portal on its own host (the layout before single-domain support); `COOKIE_DOMAIN` must then be a parent of both. |
-| `COOKIE_DOMAIN` | authelia | Domain of Authelia's session cookie. Empty = `APP_HOST` (`setup.sh` writes `APP_HOST`). With a separate `AUTH_HOST`: a parent domain of `APP_HOST` and `AUTH_HOST`. |
+| `FILES_HOST` | gateway, api | Empty (default) = downloads under `APP_HOST/dl/`. A different hostname = local downloads on their own origin (recommended hardening, see [SECURITY.md](../SECURITY.md)); `/dl/` on `APP_HOST` then answers 404. Best outside `APP_HOST`'s domain (another registrable domain). Leave empty rather than repeating `APP_HOST`. |
+| `AUTH_HOST` | gateway, api, authelia | Empty (default) = Authelia portal under `APP_HOST/auth/`. A different hostname = the portal on its own host (the layout before single-domain support); `COOKIE_DOMAIN` must then be a parent of both. Ignored with `AUTH_MODE=external`. Leave empty rather than repeating `APP_HOST`. |
+| `COOKIE_DOMAIN` | authelia | Domain of Authelia's session cookie, used only with a separate `AUTH_HOST` and then required: a parent domain of `APP_HOST` and `AUTH_HOST` (Authelia refuses to start without it, naming this variable). With the portal on `APP_HOST` the cookie is always scoped to `APP_HOST`, whatever this says (`setup.sh` writes `APP_HOST`). |
 | `PUBLIC_SCHEME` | api | `https`. Only change for local experiments over plain http. |
-| `AUTH_MODE` | gateway | `authelia` (default) or `external` ([external SSO](deployment.md#external-sso-mode)). |
+| `AUTH_MODE` | gateway, api | `authelia` (default) or `external` ([external SSO](deployment.md#external-sso-mode)). |
+| `LOGOUT_URL` | api | `AUTH_MODE=external` only: absolute http(s) URL of your SSO's sign-out page for the web UI's "Log out" link. Empty = no link. |
 | `ADMIN_GROUP` | api | `admins`. Users in this group are admins. |
 | `DATA_DIR` | api, worker | `/data` (fixed in compose; SQLite at `$DATA_DIR/seedbox.db`). |
 | `DOWNLOADS_DIR` | api, worker | `/downloads` (fixed in compose; `incomplete/`, `library/`). |

@@ -27,7 +27,7 @@ Two independent options, each one more DNS record pointing at the server:
 | `FILES_HOST=dl.example.net` | Local downloads move to `https://dl.example.net/dl/...`; `/dl/` on `APP_HOST` answers 404. **Recommended hardening**: downloaded files (user-supplied content) then never share the app's origin, see [SECURITY.md](../SECURITY.md) ("Hosts and origins"). Pick a host **outside** `COOKIE_DOMAIN` (ideally a different registrable domain) so the browser does not even send the login cookie there. `./setup.sh --files-host dl.example.net`. |
 | `AUTH_HOST=auth.seedbox.example.com` | The portal moves to its own host (served at `/`), with `COOKIE_DOMAIN` a parent of both hosts. This is the layout every install had before single-domain support; there is little reason to choose it for a new one. `./setup.sh --auth-host auth.seedbox.example.com`. |
 
-Empty, or equal to `APP_HOST`, means "on `APP_HOST`". `COOKIE_DOMAIN` defaults to `APP_HOST`. The gateway, Authelia and
+Empty means "on `APP_HOST`" (a value equal to `APP_HOST` means the same, but leave it empty: it would be listed twice for the proxy; `setup.sh` empties it). Host values are trimmed and lowercased by every component. With the portal on `APP_HOST` the login cookie is always scoped to `APP_HOST`, whatever `COOKIE_DOMAIN` says; with a separate `AUTH_HOST`, `COOKIE_DOMAIN` is required (a parent of both) and Authelia refuses to start without it. With `AUTH_MODE=external` there is no portal and `AUTH_HOST` is ignored. The gateway, Authelia and
 the API all derive their layout from these variables, so `deploy/.env` is the only place to change it (then
 `cd deploy && docker compose up -d`, or re-run `./setup.sh`, which also updates the DNS list it prints).
 
@@ -35,7 +35,7 @@ the API all derive their layout from these variables, so `deploy/.env` is the on
 the gateway renders the same three server blocks and Authelia gets byte-identical settings. Differences: `/dl/` on
 `APP_HOST` now answers 404 instead of falling through to the SPA, the portal host no longer forwards client-supplied
 `Remote-*` headers to Authelia, and `/dl/` no longer forwards the browser's `Cookie`/`Authorization` to the API. To move
-to one domain: `./setup.sh --single-domain` (or empty `AUTH_HOST`/`FILES_HOST` and set `COOKIE_DOMAIN=APP_HOST`),
+to one domain: `./setup.sh --single-domain` (or empty `AUTH_HOST`/`FILES_HOST` by hand: the cookie then follows `APP_HOST` on its own),
 `docker compose up -d`. Everyone has to log in once more (the cookie's domain changes), links already handed out on the
 old files host stop working (create them again from the Files panel), and the old DNS records can go once nothing uses
 them. Keep `FILES_HOST` if you want the origin isolation.
@@ -142,7 +142,7 @@ Images come from `ghcr.io/ma-04/docker-seedbox-*` (`SEEDBOX_REGISTRY`, `SEEDBOX_
 If you already have an SSO proxy (oauth2-proxy, Authentik, Pomerium, a Cloudflare Access setup, ...):
 
 1. In `deploy/.env` set `AUTH_MODE=external` and clear `COMPOSE_PROFILES` (this stops Authelia).
-2. Your proxy must authenticate users and send `Remote-User`, `Remote-Groups` (comma-separated, containing `admins` for admins), `Remote-Email` and `Remote-Name` to the gateway for `APP_HOST`. There is no `/auth/` portal in this mode.
+2. Your proxy must authenticate users and send `Remote-User`, `Remote-Groups` (comma-separated, containing `admins` for admins), `Remote-Email` and `Remote-Name` to the gateway for `APP_HOST`. There is no `/auth/` portal in this mode (a set `AUTH_HOST` is ignored); set `LOGOUT_URL` to your SSO's sign-out page to get a "Log out" link in the web UI.
 3. **The gateway must be reachable only from that proxy.** Do not publish its port and do not put it on a shared network with untrusted containers: in this mode anyone who can reach the gateway can claim any identity. Prefer `external` proxy mode with a dedicated network.
 4. Downloads must stay **public** (no SSO): links are protected by their signatures. With the default layout that means your proxy must let `https://APP_HOST/dl/...` through without a login (or set a separate `FILES_HOST` and leave that host public).
 5. The gateway always sets `X-Gateway-Secret` itself, but in this mode it does **not** remove client-supplied `Remote-*` headers: your SSO proxy has to overwrite them.
