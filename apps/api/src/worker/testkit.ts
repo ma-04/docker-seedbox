@@ -66,6 +66,7 @@ export class FakeDownloader implements Downloader {
   }
   async status(ref: string): Promise<DownloadStatus | null> { return this.items.get(ref) ?? null; }
   async remove(ref: string, deleteData: boolean): Promise<void> { this.removed.push({ ref, deleteData }); this.items.delete(ref); }
+  async list(): Promise<string[]> { return [...this.items.keys()]; }
   set(ref: string, patch: Partial<DownloadStatus>): void {
     const cur = this.items.get(ref) ?? { state: 'downloading', name: '', totalSize: 0, progress: 0, dlSpeed: 0, ratio: 0, contentPath: '', savePath: '' };
     this.items.set(ref, { ...cur, ...patch });

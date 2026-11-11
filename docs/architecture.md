@@ -102,9 +102,21 @@ socket `lookup`, so it also connects to the vetted address.
 control characters anywhere, or more than 8 KiB, are rejected (400); a canonical magnet is rebuilt from `xt=urn:btih:<40 hex>`
 (v1 only), `dn` (control characters stripped, <= 255 bytes) and up to 50 trackers (`http`, `https`, `udp`, `ws`, `wss`; parseable;
 no credentials; host not an IP literal in a non-public range, not a single-label/internal name; no DNS). Every other
-parameter (`ws`, `xs`, `as`, `x.pe`, `so`, `kt`, unknown) is dropped. Uploaded `.torrent` files are re-encoded with the info
-dict copied byte for byte (infohash unchanged), `announce`/`announce-list` filtered the same way and `url-list`,
-`httpseeds`, `nodes` removed. The worker re-canonicalises stored magnets when it adds them (rows from before this policy),
+parameter (`ws`, `xs`, `as`, `x.pe`, `so`, `kt`, unknown) is dropped; exactly ONE `xt` is allowed and it must be a v1 btih (40 hex / 32 base32),
+so hybrid/multi-`xt` magnets are rejected and the recorded infohash is that single value. Uploaded `.torrent` files are parsed by
+`lib/bencode-strict.ts`, a canonical-only decoder (any duplicate or unsorted dict key, leading-zero/`-0` integer, bad string length,
+trailing byte, nesting > 16, > 2,000,000 elements or > 5 MB anywhere in the file is a 400), because a lenient decode + re-encode
+(parse-torrent) keeps the LAST duplicate key and re-sorts keys while libtorrent hashes the RAW bytes of the FIRST `info` value. The
+infohash is SHA-1 of the raw `info` bytes (`lib/torrent-file.ts`); the info dict must be v1 (v2/hybrid: `meta version`, `file tree`,
+`piece layers` are rejected), `name`/`piece length`/`pieces` well-formed, exactly one of `length`/`files`, safe file paths (no
+`.`/`..`/separators/NUL, no BEP 47 symlinks), total size <= MAX_SAFE_INTEGER and `ceil(total/pieceLength) == pieces/20`, so the declared
+size that `limits.maxTorrentBytes` checks is trustworthy. The stored file is BUILT FROM SCRATCH: a root dict with only the verbatim
+`info` bytes plus sanitised `announce`/`announce-list` (`url-list`, `httpseeds`, `nodes`, `comment`, everything else dropped);
+parse-torrent must agree on the infohash of both the upload and the rebuilt file. The worker passes every stored source through the
+same strict rebuild on each add and fails the torrent (and its jobs) if it does not validate or its hash differs from the row's;
+afterwards the engine must know exactly the expected infohash (an untracked torrent appearing instead is removed with its data and the
+torrent fails with "engine reported a different torrent"), and every 30 s the `seedbox` category is swept of torrents matching no
+non-removed row. The worker re-canonicalises stored magnets when it adds them (rows from before this policy),
 and the qBittorrent client refuses a `urls` value containing CR/LF/whitespace and sends exactly one URL, because
 qBittorrent splits `urls` on newlines. Torrents are deduplicated by infohash across users: the first source is kept and
 later submissions only add (sanitised) trackers to it; there is no per-user isolation of a torrent's data or trackers.

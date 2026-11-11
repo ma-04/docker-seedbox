@@ -144,6 +144,12 @@ export class QbittorrentDownloader implements Downloader {
     };
   }
 
+  async list(): Promise<string[]> {
+    const res = await this.call(`/torrents/info?category=${encodeURIComponent(this.category)}`);
+    const list = (await res.json()) as QbtTorrent[];
+    return list.map((x) => x.hash.toLowerCase());
+  }
+
   async remove(ref: string, deleteData: boolean): Promise<void> {
     await this.call('/torrents/delete', this.form({ hashes: ref.toLowerCase(), deleteFiles: deleteData ? 'true' : 'false' }));
   }

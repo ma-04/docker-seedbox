@@ -83,17 +83,21 @@ export function canonicalizeMagnet(input: string): CanonicalMagnet {
   if (WS_OR_CONTROL.test(m)) throw new SourceError('Magnet link contains whitespace or control characters');
   if (!/^magnet:\?/i.test(m)) throw new SourceError('Not a valid magnet link');
   const params = new URLSearchParams(m.slice('magnet:?'.length));
-  let infohash: string | null = null;
+  const xts: string[] = [];
   let name: string | null = null;
   const trackers: string[] = [];
   for (const [k, v] of params) {
-    if (k === 'xt') {
-      const x = /^urn:btih:([0-9a-z]+)$/i.exec(v);
-      if (x && !infohash) infohash = normalizeInfohash(x[1]);
+    if (k === 'xt' || /^xt\.\d+$/.test(k)) {
+      xts.push(v);
     } else if (k === 'dn') {
       if (name === null) name = sanitiseDisplayName(v);
     } else if (k === 'tr' || /^tr\.\d+$/.test(k)) trackers.push(v);
   }
+  // Exactly one exact-topic, and it must be a v1 btih (40 hex / 32 base32): the recorded infohash is that one value, so
+  // a magnet carrying a second `xt` (hybrid/v2, or a decoy) cannot make the app and the engine disagree.
+  if (xts.length !== 1) throw new SourceError(xts.length ? 'Magnet link must contain exactly one xt (hybrid and multi-hash magnets are not supported)' : 'Magnet link has no valid BitTorrent v1 infohash');
+  const x = /^urn:btih:([0-9a-f]{40}|[a-z2-7]{32})$/i.exec(xts[0]!);
+  const infohash = x ? normalizeInfohash(x[1]) : null;
   if (!infohash) throw new SourceError('Magnet link has no valid BitTorrent v1 infohash');
   const clean = sanitiseTrackers(trackers);
   return { infohash, name, trackers: clean, magnet: buildMagnet(infohash, name, clean) };
