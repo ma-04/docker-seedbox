@@ -9,9 +9,11 @@
 services:
   gateway:
     environment:
-      VIRTUAL_HOST: ${APP_HOST},${AUTH_HOST},${FILES_HOST}
+      # Exactly the hosts in use: AUTH_HOST / FILES_HOST are empty in the single-domain layout (setup.sh never writes one
+      # equal to APP_HOST).
+      VIRTUAL_HOST: ${APP_HOST}${AUTH_HOST:+,${AUTH_HOST}}${FILES_HOST:+,${FILES_HOST}}
       VIRTUAL_PORT: "8080"
-      LETSENCRYPT_HOST: ${APP_HOST},${AUTH_HOST},${FILES_HOST}
+      LETSENCRYPT_HOST: ${APP_HOST}${AUTH_HOST:+,${AUTH_HOST}}${FILES_HOST:+,${FILES_HOST}}
       LETSENCRYPT_EMAIL: ${ACME_EMAIL:-}
 
   nginx-proxy:
