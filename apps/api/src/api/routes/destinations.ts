@@ -149,7 +149,7 @@ function makeHelpers(ctx: Ctx) {
       const info = db.prepare('INSERT INTO destinations (owner_user_id, name, type, config_enc, enabled, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(ownerId, body.name, body.type, encryptConfig(secret, cfg), body.enabled === false ? 0 : 1, isDefault, now());
       return db.prepare('SELECT * FROM destinations WHERE id = ?').get(info.lastInsertRowid) as DestinationRow;
-    })();
+    }).immediate();
   }
 
   async function update(row: DestinationRow, body: z.infer<typeof updateSchema>, allowDefault: boolean): Promise<DestinationRow> {
@@ -161,7 +161,7 @@ function makeHelpers(ctx: Ctx) {
         body.name ?? row.name, body.enabled === undefined ? row.enabled : body.enabled ? 1 : 0,
         allowDefault && body.isDefault !== undefined ? (body.isDefault ? 1 : 0) : row.is_default,
         newConfig ? encryptConfig(secret, newConfig) : row.config_enc, row.id);
-    })();
+    }).immediate();
     return db.prepare('SELECT * FROM destinations WHERE id = ?').get(row.id) as DestinationRow;
   }
 

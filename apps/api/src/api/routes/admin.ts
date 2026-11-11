@@ -128,7 +128,7 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx): void {
     }
     db.transaction(() => {
       for (const [k, v] of Object.entries(patch)) if (v !== undefined) setSetting(db, k as SettingKey, v as never);
-    })();
+    }).immediate();
     if (newMode && newMode !== prevMode) {
       try { await vpn.setMode(newMode); } catch { /* worker reconciles */ }
     }

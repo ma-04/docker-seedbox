@@ -234,7 +234,7 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
       db.prepare('DELETE FROM job_files WHERE job_id = ?').run(jobId);
       const ins = db.prepare('INSERT INTO job_files (job_id, path, size) VALUES (?, ?, ?)');
       for (const f of files) ins.run(jobId, f.path, f.size);
-    })();
+    }).immediate();
     log.info({ jobId, files: files.length }, 'upload completed');
   } catch (err) {
     if (err instanceof RcloneAborted || signal.aborted) {

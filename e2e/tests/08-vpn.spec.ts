@@ -76,9 +76,16 @@ test.describe('8. VPN', () => {
     // outside LAN_CIDRS: direct host unreachable, through-tunnel echo reachable (and it sees the WireGuard server)
     const direct = await probe(DIRECT);
     expect(direct.reachable, JSON.stringify(direct)).toBe(false);
-    const behind = await probe(BEHIND);
-    expect(behind.reachable, JSON.stringify(behind)).toBe(true);
-    expect(behind.body.trim()).toBe(`behind ${second}`);
+    // Positive probe only (the "must be blocked" ones above are never retried): the first request through a tunnel
+    // that has just been rotated once got "curl: (52) Empty reply" on CI although status.publicIp had already been
+    // fetched through it (issue #5). Poll briefly and record when more than one attempt was needed.
+    let attempts = 0;
+    await expect.poll(async () => {
+      attempts++;
+      const behind = await probe(BEHIND);
+      return behind.reachable ? behind.body.trim() : JSON.stringify(behind);
+    }, { timeout: 15_000, intervals: [1_000] }).toBe(`behind ${second}`);
+    if (attempts > 1) testInfo.annotations.push({ type: 'retried', description: `through-tunnel probe needed ${attempts} attempts (#5)` });
     // LAN stays reachable (tracker/seeder, and the WebUI for api/worker)
     expect((await probe(TRACKER)).status).toBe(200);
     await close();

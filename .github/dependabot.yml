@@ -1,16 +1,24 @@
 # Keeps the pinned things pinned *and* current: npm packages, base images (Dockerfiles and compose files carry
-# `image:tag@sha256:...` digests), GitHub Actions (pinned to full commit SHAs with a version comment) and Go modules.
+# `image:tag@sha256:...` digests; Dependabot moves tag and digest together, and only sees literal FROM lines, not
+# ARG-indirect ones), GitHub Actions (pinned to full commit SHAs with a version comment) and Go modules.
+#
+# Policy: minor/patch updates arrive as ONE grouped PR per ecosystem per week. Major versions are ignored for now
+# (they need code changes: tailwind 4, zod 4, react 19, vite/vitest majors...) and are upgraded deliberately by hand.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule: { interval: weekly }
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]
 
   - package-ecosystem: docker
+    # /e2e is not listed: its Playwright base image tag is derived from @playwright/test in e2e/package.json (npm).
     directories:
       - /apps/api
       - /apps/web
@@ -18,16 +26,30 @@ updates:
       - /services/vpn
       - /services/qbittorrent
       - /services/vpn/test
-      - /e2e
     schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      base-images:
+        patterns: ["*"]
 
   - package-ecosystem: docker-compose
     directory: /deploy
     schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      compose-images:
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    open-pull-requests-limit: 5
     groups:
       actions:
         patterns: ["*"]
@@ -35,3 +57,7 @@ updates:
   - package-ecosystem: gomod
     directory: /services/vpn/src
     schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      go-modules:
+        patterns: ["*"]
