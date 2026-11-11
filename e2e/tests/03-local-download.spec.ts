@@ -169,12 +169,15 @@ test.describe('3. .torrent upload -> local destination -> signed downloads', () 
       ['404/403 unknown file (API)', raw(missing.toString()), 0],
       ['404 POST (nginx)', raw(url, { method: 'POST', body: 'x' }), 404],
     ];
+    // nginx runs the header filters twice for its own 416, so add_header ... always repeats there ("nosniff, nosniff");
+    // a repeat of the same value means the same to a browser, any other value would not
+    const only = (v: string | string[] | undefined, want: string): boolean => typeof v === 'string' && v.split(', ').every((x) => x === want);
     for (const [what, p, status] of cases) {
       const r = await p;
       if (status) expect(r.status, what).toBe(status); else expect([403, 404], what).toContain(r.status);
-      expect(r.headers['x-content-type-options'], what).toBe('nosniff');
-      expect(r.headers['content-security-policy'], what).toBe("default-src 'none'; sandbox");
-      expect(r.headers['referrer-policy'], what).toBe('no-referrer');
+      expect(only(r.headers['x-content-type-options'], 'nosniff'), `${what}: ${r.headers['x-content-type-options']}`).toBe(true);
+      expect(only(r.headers['content-security-policy'], "default-src 'none'; sandbox"), `${what}: ${r.headers['content-security-policy']}`).toBe(true);
+      expect(only(r.headers['referrer-policy'], 'no-referrer'), `${what}: ${r.headers['referrer-policy']}`).toBe(true);
       if (r.status === 200 || r.status === 206) {
         expect(r.headers['content-type'], what).toBe('application/octet-stream');
         expect(r.headers['content-disposition'], what).toMatch(/^attachment;/);
