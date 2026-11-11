@@ -27,10 +27,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -44,7 +44,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Shellcheck
@@ -180,7 +180,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Hermetic WireGuard stack (kill switch, rotation, LAN policy, qBittorrent seeding)
@@ -202,7 +202,7 @@ jobs:
           - { layout: split-files, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/15-layout.spec.ts" }
           - { layout: multi, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/15-layout.spec.ts" }
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Hermetic stack + Playwright suite
@@ -212,7 +212,7 @@ jobs:
         run: e2e/run.sh --layout "${{ matrix.layout }}" -- $SPECS
       - name: Upload report, traces and container logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-output-${{ matrix.layout }}
           path: e2e/.out
