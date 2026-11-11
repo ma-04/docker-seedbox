@@ -113,6 +113,47 @@ describe('worker: nothing may run untracked', () => {
     expect(torrent(s.db, t).state).toBe('error');
   });
 
+  it('an engine that lists the new torrent late and rejects duplicate adds: the stray is still caught, without a second add', async () => {
+    class Late extends FakeDownloader {
+      adds = 0; listCalls = 0;
+      override async add(i: DownloadAddInput): Promise<void> {
+        this.adds++;
+        if (this.adds > 1) throw new Error('qBittorrent rejected the torrent'); // "Fails." for a duplicate
+        this.added.push(i);
+      }
+      override async list(): Promise<string[]> {
+        this.listCalls++;
+        if (this.adds >= 1 && this.listCalls >= 3) this.set('6'.repeat(40), { state: 'metadata-pending' }); // appears a little later
+        return [...this.items.keys()];
+      }
+    }
+    const dl = new Late();
+    const s = setup(dl);
+    const { t, j } = s.tor(HASH, { torrentB64: b64(makeTorrent(INFO)) });
+    for (let i = 0; i < 4; i++) await s.worker.tick();
+    expect(dl.adds).toBe(1);
+    expect(torrent(s.db, t).state).toBe('error');
+    expect(torrent(s.db, t).error).toMatch(/different torrent/);
+    expect(job(s.db, j).state).toBe('failed');
+    expect(dl.items.has('6'.repeat(40))).toBe(false);
+  });
+
+  it('an unrelated pre-existing stray is removed by the sweep but does not fail an innocent torrent that is listed late', async () => {
+    class Slow extends FakeDownloader {
+      override async add(i: DownloadAddInput): Promise<void> { this.added.push(i); /* listed only on the next tick */ setTimeout(() => this.set(HASH, { state: 'metadata-pending' }), 0); }
+    }
+    const dl = new Slow();
+    dl.set('5'.repeat(40), { state: 'downloading' });
+    const s = setup(dl);
+    const { t } = s.tor(HASH, { torrentB64: b64(makeTorrent(INFO)) });
+    await s.worker.tick();
+    await new Promise((r) => setTimeout(r, 5));
+    await s.worker.tick();
+    expect(torrent(s.db, t).state).toBe('downloading');
+    expect(dl.items.has('5'.repeat(40))).toBe(false);
+    expect(dl.items.has(HASH)).toBe(true);
+  });
+
   it('periodic sweep removes (with data) category torrents that match no non-removed row, keeps tracked ones', async () => {
     const s = setup();
     const { t } = s.tor(HASH, { torrentB64: b64(makeTorrent(INFO)) });

@@ -118,6 +118,28 @@ describe('info dict shape', () => {
     rejects(raw({ name: bs('d'), 'piece length': bi(16384), pieces: bs(Buffer.alloc(20)), files: bl(file) }));
   });
 
+  it.each([
+    ['single-file info with attr l', { attr: bs('l') }],
+    ['single-file info with symlink path', { 'symlink path': bl(bs('x')) }],
+    ['name.utf-8 = ..', { 'name.utf-8': bs('..') }],
+    ['name.utf-8 with a slash', { 'name.utf-8': bs('a/b') }],
+    ['name.utf-8 not a string', { 'name.utf-8': bi(1) }],
+  ])('%s', (_n, extra) => {
+    rejects(T({ extra }));
+  });
+
+  it.each([['..'], ['a/b'], ['a\\b'], ['.']])('name %s', (name) => {
+    rejects(T({ name }));
+  });
+
+  it('file entries: path.utf-8 gets the same rules as path', () => {
+    const f = (pu: Buffer) => raw({ name: bs('d'), 'piece length': bi(16384), pieces: bs(Buffer.alloc(20)), files: bl(bd({ length: bi(1), path: bl(bs('a')), 'path.utf-8': pu })) });
+    rejects(f(bl(bs('..'))));
+    rejects(f(bl(bs('a/b'))));
+    rejects(f(bl()));
+    expect(parseStrictTorrent(f(bl(bs('ä')))).totalSize).toBe(1);
+  });
+
   it('accepts padding files (BEP 47 attr p) and unicode / private / source keys', () => {
     const t = parseStrictTorrent(makeTorrent(makeInfo({
       name: 'Ünï cødé 日本語 #1 100%',

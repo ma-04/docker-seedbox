@@ -31,11 +31,10 @@ export function parseMagnet(input: string | null | undefined): MagnetResult {
   if (!/^magnet:\?/i.test(uri)) return { ok: false, error: 'That is not a magnet link (it must start with "magnet:?").' };
   let params: URLSearchParams;
   try { params = new URLSearchParams(uri.slice('magnet:?'.length)); } catch { return { ok: false, error: 'The magnet link is malformed.' }; }
-  let infohash: string | null = null;
-  for (const xt of params.getAll('xt')) {
-    const m = BTIH.exec(xt);
-    if (m) { infohash = m[1]!; break; }
-  }
+  // Exactly one xt (the API rejects hybrid / multi-hash magnets, see apps/api/src/lib/source.ts).
+  const xts = [...params.entries()].filter(([k]) => k === 'xt' || /^xt\.\d+$/.test(k)).map(([, v]) => v);
+  const m = xts.length === 1 ? BTIH.exec(xts[0]!) : null;
+  const infohash: string | null = m ? m[1]! : null;
   if (!infohash) return { ok: false, error: 'The magnet link has no valid BitTorrent info hash (xt=urn:btih:...).' };
   const dn = params.get('dn')?.trim();
   const name = dn ? (dn.length > MAX_NAME_LENGTH ? `${dn.slice(0, MAX_NAME_LENGTH)}...` : dn) : null;

@@ -82,6 +82,8 @@ export class Worker {
   private diskChecked = new Set<number>();
   private vpnApplied = false;
   private lastStray = 0;
+  /** Torrent id -> category hashes present just before its first add (until the engine lists it): anything new afterwards is blamed on it. */
+  private addBefore = new Map<number, Set<string>>();
   private readonly egress: EgressProxy;
 
   private clock(): number { return (this.d.nowMs ?? Date.now)(); }
@@ -215,6 +217,9 @@ export class Worker {
       if (r.infohash !== t.infohash) throw new SourceError('The stored torrent file does not match the recorded infohash');
       source = { torrent: r.file };
     }
+    if (!this.addBefore.has(t.id)) {
+      try { this.addBefore.set(t.id, new Set(await this.d.downloader.list())); } catch { /* engine down: the add below fails the same way */ }
+    }
     await this.d.downloader.add({ id: t.infohash, source, savePath });
     return savePath;
   }
@@ -298,6 +303,7 @@ export class Worker {
         const st = await downloader.status(t.infohash);
         if (!st) return this.handleMissing(t);
         this.missingSince.delete(t.id);
+        this.addBefore.delete(t.id);
         if (st.state === 'error') return this.failTorrent(t, `The downloader reported an error (${st.rawState ?? 'error'})`);
         if (st.state === 'metadata-pending') {
           const limitMin = getSetting(db, 'limits.metadataTimeoutMinutes');
@@ -338,6 +344,9 @@ export class Worker {
     const nowMs = this.clock();
     const since = this.missingSince.get(t.id) ?? nowMs;
     this.missingSince.set(t.id, since);
+    // Before re-adding: an untracked torrent that appeared since the first add means the engine parsed something else
+    // (and a re-add of a duplicate would only answer "Fails." and hide that).
+    if (await this.engineHoldsDifferentTorrent(t)) return;
     try {
       await this.addToDownloader(t);
       if (await this.engineHoldsDifferentTorrent(t)) return;
@@ -345,6 +354,7 @@ export class Worker {
     } catch (err) {
       if (err instanceof SourceError) { this.missingSince.delete(t.id); return this.failTorrent(t, `Invalid torrent source: ${err.message}`); }
       if (err instanceof DownloaderUnavailableError) { this.missingSince.delete(t.id); throw err; }
+      if (await this.engineHoldsDifferentTorrent(t)) return;
       if (nowMs - since > MISSING_FAIL_AFTER_MS) {
         this.missingSince.delete(t.id);
         return this.failTorrent(t, 'The torrent disappeared from the downloader and could not be added again');
@@ -370,14 +380,17 @@ export class Worker {
    * After an add the engine must hold exactly the expected infohash. If it does not (yet) know it but holds an
    * untracked torrent, the engine parsed something other than what we recorded: remove that torrent with its data and
    * fail the torrent. Until metadata arrives a magnet is already listed under its infohash, so the same rule applies.
-   * An engine that simply has not listed the new torrent yet and has no stray is left alone (the next tick re-checks).
+   * Only hashes that appeared after the snapshot taken before the add are blamed. An engine that has not listed the new torrent
+   * yet and shows no new stray is left alone: the check also runs before every re-add and the periodic sweep removes strays anyway.
    */
   private async engineHoldsDifferentTorrent(t: TorrentRow): Promise<boolean> {
     try {
-      if (await this.d.downloader.status(t.infohash)) return false;
-      const strays = await this.strayHashes();
-      if (!strays.length) return false;
-      for (const h of strays) { this.log.warn({ torrentId: t.id, hash: h }, 'removing a torrent the engine started that matches no torrents row'); await this.removeStray(h); }
+      if (await this.d.downloader.status(t.infohash)) { this.addBefore.delete(t.id); return false; }
+      const before = this.addBefore.get(t.id);
+      if (!before) return false; // no snapshot (worker restarted): the periodic sweep removes strays, a re-add takes a snapshot
+      const blamed = (await this.strayHashes()).filter((h) => !before.has(h));
+      if (!blamed.length) return false;
+      for (const h of blamed) { this.log.warn({ torrentId: t.id, hash: h }, 'removing a torrent the engine started that matches no torrents row'); await this.removeStray(h); }
       this.failTorrent(t, 'The engine reported a different torrent than the one recorded (engine reported a different torrent); it was removed');
       return true;
     } catch (err) {
@@ -441,6 +454,7 @@ export class Worker {
     })();
     this.missingSince.delete(t.id);
     this.lastProgress.delete(t.id);
+    this.addBefore.delete(t.id);
   }
 
   /**

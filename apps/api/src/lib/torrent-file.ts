@@ -46,11 +46,28 @@ function checkPathPart(p: Buffer): void {
   if (s === '.' || s === '..' || /[/\\\0]/.test(s)) bad('Torrent has an unsafe path component');
 }
 
+/** BEP 47 symlink entries would make the engine create symlinks inside the download directory. */
+function checkNoSymlink(d: DictNode): void {
+  if (dictGet(d, 'symlink path') !== undefined) bad('Torrents containing symlinks are not supported');
+  const attr = dictGet(d, 'attr');
+  if (attr !== undefined && (attr.type !== 'str' || attr.data.includes(0x6c))) bad('Torrents containing symlinks are not supported');
+}
+
 /** Everything about the info dict that decides what the downloader will do; mirrors what libtorrent will derive. */
 function validateInfo(info: DictNode): { totalSize: number; pieceLength: number; pieceCount: number; name: Buffer } {
   if (dictGet(info, 'meta version') || dictGet(info, 'file tree')) bad('BitTorrent v2 / hybrid torrents are not supported (v1 only)');
   const name = asStr(dictGet(info, 'name'), 'name').data;
   if (name.length === 0 || name.length > MAX_NAME_BYTES) bad('Torrent name is empty or too long');
+  checkPathPart(name);
+  // libtorrent prefers the .utf-8 variants when present, so they get exactly the same rules (old clients emit them).
+  const nameUtf8 = dictGet(info, 'name.utf-8');
+  if (nameUtf8 !== undefined) {
+    const d = asStr(nameUtf8, 'name.utf-8').data;
+    if (d.length > MAX_NAME_BYTES) bad('Torrent name is too long');
+    checkPathPart(d);
+  }
+  // libtorrent also reads `attr` / `symlink path` from a single-file info dict.
+  checkNoSymlink(info);
   const pl = nonNegInt(dictGet(info, 'piece length'), 'piece length');
   if (pl <= 0n) bad('piece length must be positive');
   const pieces = asStr(dictGet(info, 'pieces'), 'pieces').data;
@@ -70,10 +87,12 @@ function validateInfo(info: DictNode): { totalSize: number; pieceLength: number;
       const path = dictGet(fd, 'path');
       if (!path || path.type !== 'list' || path.items.length === 0) bad('file path must be a non-empty list');
       else for (const part of path.items) checkPathPart(asStr(part, 'path component').data);
-      // BEP 47 symlink entries would make the engine create symlinks inside the download directory.
-      if (dictGet(fd, 'symlink path') !== undefined) bad('Torrents containing symlinks are not supported');
-      const attr = dictGet(fd, 'attr');
-      if (attr !== undefined && (attr.type !== 'str' || attr.data.includes(0x6c))) bad('Torrents containing symlinks are not supported');
+      const pu = dictGet(fd, 'path.utf-8');
+      if (pu !== undefined) {
+        if (pu.type !== 'list' || pu.items.length === 0) bad('file path.utf-8 must be a non-empty list');
+        else for (const part of pu.items) checkPathPart(asStr(part, 'path.utf-8 component').data);
+      }
+      checkNoSymlink(fd);
     }
   }
   if (total > BigInt(Number.MAX_SAFE_INTEGER)) bad('Torrent size is out of range');
