@@ -35,6 +35,18 @@ services:
       default: {}
       inet: { ipv4_address: 198.51.100.2, gw_priority: 100 }   # the "normal" default route, as in services/vpn/test
 
+  # TEST ONLY: tracker lists may be fetched over http from the private front (lists.seedbox.test). The app refuses this
+  # flag unless E2E_HERMETIC=1 is set too, and a real deployment never sets either.
+  api:
+    environment:
+      TRACKER_LIST_ALLOW_PRIVATE: "1"
+      E2E_HERMETIC: "1"
+
+  worker:
+    environment:
+      TRACKER_LIST_ALLOW_PRIVATE: "1"
+      E2E_HERMETIC: "1"
+
   qbittorrent:
     environment:
       QBT_TRUSTED_IPS: ${API_IP:-172.31.250.3},${WORKER_IP:-172.31.250.4}   # no default in the image: empty locks the WebUI
@@ -157,7 +169,7 @@ services:
       retries: 30
     networks:
       default:
-        aliases: [app.seedbox.test, auth.seedbox.test, files.seedbox.test, s3.seedbox.test, fixtures.seedbox.test, ctl.seedbox.test]
+        aliases: [lists.seedbox.test, app.seedbox.test, auth.seedbox.test, files.seedbox.test, s3.seedbox.test, fixtures.seedbox.test, ctl.seedbox.test]
 
   ctl:
     <<: *fixture

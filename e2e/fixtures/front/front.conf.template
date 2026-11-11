@@ -66,3 +66,16 @@ server {
     proxy_read_timeout 120s;
   }
 }
+
+# Tracker-list fixtures for 14-tracker-lists.spec.ts. Plain http on purpose: the stack runs with TRACKER_LIST_ALLOW_PRIVATE
+# (test-only, see deploy/compose.e2e.yaml) so the worker may fetch http lists from this private address.
+server {
+  listen 80;
+  server_name lists.seedbox.test;
+  root /srv/lists;
+  default_type text/plain;
+  add_header Cache-Control "no-store";
+  location = /redirect.txt { return 302 http://lists.seedbox.test/trackers.txt; }
+  location = /page.html { default_type text/html; }
+  location / { try_files $uri =404; }
+}
