@@ -27,6 +27,10 @@ services:
     environment:
       PUBLIC_IP_URL: http://172.31.252.20/     # "what is my IP" echo behind the WireGuard servers
       HANDSHAKE_TIMEOUT_SEC: "10"
+      # TEST ONLY. The kill switch lets nothing in the namespace that runs as qBittorrent's uid open a connection to the
+      # LAN; the hermetic fixtures live on it by IP, so exactly these two (ip:port) are allowed: the tracker's announce
+      # port and the seeder's (transmission) peer port. The seeder may also dial in. Never set this in a real deployment.
+      VPN_LAN_ALLOW_OUT: 172.31.250.30:6969,172.31.250.31:51413
     networks:
       default: {}
       inet: { ipv4_address: 172.31.251.2, gw_priority: 100 }   # the "normal" default route, as in services/vpn/test

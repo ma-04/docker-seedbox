@@ -44,11 +44,11 @@ func TestRejectBad(t *testing.T) {
 }
 
 func TestRuleset(t *testing.T) {
-	r := buildRuleset("required", nil, nil, "8000, 8080")
+	r := buildRuleset("required", testPolicy(), nil)
 	if !strings.Contains(r, "policy drop") || !strings.Contains(r, "meta nfproto ipv6") {
 		t.Fatal(r)
 	}
-	if strings.Contains(buildRuleset("off", nil, nil, "8000"), "policy drop; \n    ip") {
+	if strings.Contains(buildRuleset("off", testPolicy(), nil), "policy drop; \n    ip") {
 		t.Fatal("off must not drop")
 	}
 }
@@ -97,13 +97,13 @@ func TestResolveMTUPrecedence(t *testing.T) {
 
 func TestRulesetMSSClamp(t *testing.T) {
 	for _, mode := range []string{"required", "off"} {
-		r := buildRuleset(mode, nil, nil, "8000")
+		r := buildRuleset(mode, testPolicy(), nil)
 		if !strings.Contains(r, `oifname "wg*" tcp flags syn tcp option maxseg size set rt mtu`) {
 			t.Fatalf("%s: no MSS clamp\n%s", mode, r)
 		}
 	}
 	// the clamp must not add any accept to the kill-switch output chain
-	r := buildRuleset("required", nil, nil, "8000")
+	r := buildRuleset("required", testPolicy(), nil)
 	out := r[strings.Index(r, "chain output"):]
 	if strings.Contains(out, "maxseg") {
 		t.Fatal("clamp leaked into output chain")
