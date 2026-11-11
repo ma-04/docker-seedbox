@@ -1,0 +1,16 @@
+# --- AUTH_HOST: Authelia portal (separate login host; rendered by 25-gateway-auth-mode.sh) -----------------------
+server {
+  listen 8080;
+  server_name @HOST@;
+  server_tokens off;
+
+  location = /healthz {
+    access_log off;
+    default_type text/plain;
+    return 200 "ok\n";
+  }
+
+  location / {
+    include /etc/nginx/snippets/authelia-portal.conf;
+  }
+}

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Docker test: the gateway's /_protected/ location must never serve through a symlink (`disable_symlinks on`).
-# Serves a throwaway tree with the same alias + directive as templates/gateway.conf.template and checks that a regular
+# Serves a throwaway tree with the same alias + directive as snippets/files-locations.conf and checks that a regular
 # file is served while a symlink to a file, a symlink to a directory and a file below a symlinked directory are refused.
 # Usage: GATEWAY_IMAGE=<any nginx image with wget> services/gateway/test/symlinks.sh
 set -u
@@ -14,10 +14,10 @@ bad() { FAILN=$((FAILN+1)); printf '  FAIL %s\n' "$1"; }
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1; rm -rf "$W"; }
 trap cleanup EXIT
 
-# the real template carries the directive inside the /_protected/ location
-if awk '/location \/_protected\//{f=1} f&&/disable_symlinks on;/{found=1} f&&/^  }/{f=0} END{exit !found}' "$HERE/templates/gateway.conf.template"; then
-  ok "templates/gateway.conf.template: /_protected/ has 'disable_symlinks on;'"
-else bad "templates/gateway.conf.template: /_protected/ lacks 'disable_symlinks on;'"; fi
+# the real snippet (included for whichever host serves downloads) carries the directive inside the /_protected/ location
+if awk '/location \/_protected\//{f=1} f&&/disable_symlinks on;/{found=1} f&&/^}/{f=0} END{exit !found}' "$HERE/snippets/files-locations.conf"; then
+  ok "snippets/files-locations.conf: /_protected/ has 'disable_symlinks on;'"
+else bad "snippets/files-locations.conf: /_protected/ lacks 'disable_symlinks on;'"; fi
 
 mkdir -p "$W/library/alice-1/Pack" "$W/outside/dir"
 echo "plain file" > "$W/library/alice-1/Pack/ok.txt"
