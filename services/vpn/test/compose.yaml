@@ -1,0 +1,110 @@
+# Hermetic kill-switch / rotation test stack (project name: sbvpn). Driven by run.sh.
+name: sbvpn
+networks:
+  lan:    { ipam: { config: [ { subnet: 172.31.250.0/24 } ] } }   # stands in for the compose network
+  inet:   { ipam: { config: [ { subnet: 198.51.100.0/24 } ] } }   # stands in for "the internet"
+  behind: { ipam: { config: [ { subnet: 203.0.113.0/24 } ] } }   # only the WG servers sit here
+  priv:   { ipam: { config: [ { subnet: 10.77.0.0/24 } ] } }      # a private range the vpn container is attached to (must NOT be reachable from the namespace)
+volumes: { qbt-config: {}, downloads: {} }
+x-tools: &tools
+  image: sbvpn-tools
+  volumes: ["./:/t:ro"]
+services:
+  tools-build:
+    <<: *tools
+    build: { context: ., dockerfile: Dockerfile.tools }
+    command: ["true"]
+    restart: "no"
+  echo-direct:   # reachable directly from the vpn container; must NOT be reachable in required mode
+    <<: *tools
+    command: ["/t/echo.sh"]
+    environment: { ECHO_NAME: direct }
+    networks: { inet: { ipv4_address: 198.51.100.20 } }
+  echo-behind:   # only reachable through a WireGuard server
+    <<: *tools
+    command: ["/t/echo.sh"]
+    environment: { ECHO_NAME: behind }
+    networks: { behind: { ipv4_address: 203.0.113.20 } }
+  echo-priv:   # alive on a private range that the vpn namespace has a route to: the firewall alone keeps it unreachable
+    <<: *tools
+    command: ["/t/echo.sh"]
+    environment: { ECHO_NAME: priv }
+    networks: { priv: { ipv4_address: 10.77.0.20 } }
+  priv-client:   # positive control: echo-priv does answer on its own network
+    <<: *tools
+    command: ["sleep", "infinity"]
+    networks: { priv: { ipv4_address: 10.77.0.50 } }
+  wg1:
+    <<: *tools
+    command: ["/t/wg-server.sh"]
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv4.ip_forward: "1" }
+    environment: { WG_PRIVATE: "${WG1_PRIV:-}", PEER_PUBLIC: "${CLIENT_PUB:-}", TUN_NET: 10.99.1 }
+    networks: { inet: { ipv4_address: 198.51.100.11 }, behind: { ipv4_address: 203.0.113.11 } }
+  wg2:
+    <<: *tools
+    command: ["/t/wg-server.sh"]
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv4.ip_forward: "1" }
+    environment: { WG_PRIVATE: "${WG2_PRIV:-}", PEER_PUBLIC: "${CLIENT_PUB:-}", TUN_NET: 10.99.2 }
+    networks: { inet: { ipv4_address: 198.51.100.12 }, behind: { ipv4_address: 203.0.113.12 } }
+
+  # ---- the two services under test (README.md has the deployable versions) ----
+  vpn:
+    build: ..
+    image: sbvpn-vpn
+    cap_drop: [ALL]   # same as deploy/compose.yaml: NET_ADMIN is the only capability the sidecar needs
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv6.conf.all.disable_ipv6: "1" }
+    environment:
+      VPN_CONTROL_TOKEN: test-token-0123456789
+      LAN_CIDRS: 172.31.250.0/24
+      CONTROL_TRUSTED_IPS: 172.31.250.50        # only lan-client may reach the control API (the intruder may not)
+      VPN_LAN_ALLOW_OUT: 172.31.250.50:9000     # TEST ONLY: one LAN ip:port qBittorrent may dial (positive control for the LAN rules)
+      VPN_MTU: ${VPN_MTU:-}                     # unset = 1280; run.sh asserts precedence
+      VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-}   # unset/empty must mean "required" (fail closed); run.sh asserts it
+      PUBLIC_IP_URL: http://203.0.113.20/
+      HANDSHAKE_TIMEOUT_SEC: "8"
+    tmpfs: [/tmp]
+    networks:
+      lan:  { ipv4_address: 172.31.250.2 }
+      inet: { ipv4_address: 198.51.100.2, gw_priority: 100 }   # the "normal" default route
+      priv: { ipv4_address: 10.77.0.2 }
+  qbittorrent:
+    build: ../../qbittorrent
+    image: sbvpn-qbittorrent
+    network_mode: service:vpn
+    cap_drop: [ALL]   # same as deploy/compose.yaml: proves the entrypoint works with exactly these capabilities
+    cap_add: [CHOWN, SETUID, SETGID, KILL]
+    read_only: true   # as deploy/compose.yaml
+    tmpfs: [/tmp]
+    environment: { LAN_CIDRS: 172.31.250.0/24, QBT_TRUSTED_IPS: 172.31.250.50 }   # only lan-client may use the WebUI
+    volumes:
+      - qbt-config:/config
+      - { type: volume, source: downloads, target: /downloads/incomplete, volume: { subpath: incomplete } }   # as deploy/compose.yaml
+    depends_on:
+      init: { condition: service_completed_successfully }
+      vpn: { condition: service_healthy, restart: true }
+  init:   # as deploy/compose.yaml: the subpath must exist before qbittorrent is created
+    image: sbvpn-tools
+    user: "0:0"
+    restart: "no"
+    command: ["sh", "-c", "mkdir -p /downloads/incomplete /downloads/library && chown 1000:1000 /downloads/incomplete"]
+    volumes: ["downloads:/downloads"]
+    depends_on: { tools-build: { condition: service_completed_successfully } }
+  # test helpers
+  probe:   # shares the vpn netns, like qbittorrent does
+    <<: *tools
+    network_mode: service:vpn
+    command: ["sleep", "infinity"]
+    depends_on: { vpn: { condition: service_healthy } }
+  lan-client:
+    <<: *tools
+    command: ["/t/listen.sh"]
+    environment: { VPN_CONTROL_TOKEN: test-token-0123456789, LISTEN_NAME: client, LISTEN_PORTS: "9000 9001" }
+    networks: { lan: { ipv4_address: 172.31.250.50 } }
+  lan-intruder:   # a "compromised sibling container": same network, not in QBT_TRUSTED_IPS
+    <<: *tools
+    command: ["/t/listen.sh"]
+    environment: { LISTEN_NAME: intruder, LISTEN_PORTS: "9999" }
+    networks: { lan: { ipv4_address: 172.31.250.51 } }

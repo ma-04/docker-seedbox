@@ -1,0 +1,22 @@
+name = "seedbox-drive-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-01-15"
+workers_dev = true
+
+[vars]
+# Drive folder id that holds <userSlug>-<userId>/<torrent name> [<8 hex>]/... (the destination's root folder id).
+ROOT_FOLDER_ID = ""
+# Optional:
+# ALLOWED_ORIGINS = "https://seedbox.example.com"   # comma separated, or "*"; default: no CORS headers
+# CACHE_TTL_SECONDS = "300"                          # path -> Drive id lookup cache
+
+# Secrets (never put these in this file). Set each with `npx wrangler secret put <NAME>`:
+#   GDRIVE_CLIENT_ID
+#   GDRIVE_CLIENT_SECRET
+#   GDRIVE_REFRESH_TOKEN
+#   SIGNING_KEY
+#
+# Custom domain: either add it in the dashboard (Workers & Pages > seedbox-drive-proxy >
+# Settings > Domains & Routes) or uncomment one of these (the zone must be on your account):
+# routes = [{ pattern = "drive.example.com", custom_domain = true }]
+# routes = [{ pattern = "drive.example.com/*", zone_name = "example.com" }]

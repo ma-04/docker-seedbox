@@ -1,0 +1,215 @@
+# Hermetic end-to-end stack (test-only). Layered on compose.yaml:
+#
+#   docker compose --env-file e2e/.state/e2e.env -f deploy/compose.yaml -f deploy/compose.e2e.yaml \
+#       --profile authelia --profile runner -p sbe2e ...
+#
+# e2e/run.sh does all of this. The real gateway, authelia, web, api, worker, vpn and qbittorrent run
+# unchanged; around them sit test fixtures on fixed-subnet networks with static IPs:
+#
+#   default 172.31.250.0/24  the compose LAN (LAN_CIDRS): tracker .30, seeder .31, vpn .2 (from compose.yaml)
+#   inet    198.51.100.0/24  stand-in for "the internet" (the vpn's normal default route, gw_priority): echo-direct .20, WireGuard servers .11 / .12;
+#                            the vpn container is attached too (.2), so the kill switch has something to block
+#   behind  203.0.113.0/24  only reachable through a WireGuard server: echo-behind .20
+#
+# The tracker and seeder are addressed by IP: while a tunnel is up the vpn namespace cannot resolve compose names.
+
+x-fixture: &fixture
+  restart: "no"
+  logging: { driver: json-file, options: { max-size: "10m", max-file: "2" } }
+
+x-net: &net
+  <<: *fixture
+  image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/e2e-net:${SEEDBOX_VERSION:-latest}
+
+services:
+  # ---------------------------------------------------------------- overrides of real services
+  vpn:
+    environment:
+      PUBLIC_IP_URL: http://203.0.113.20/     # "what is my IP" echo behind the WireGuard servers
+      HANDSHAKE_TIMEOUT_SEC: "10"
+      # TEST ONLY. The kill switch lets nothing in the namespace that runs as qBittorrent's uid open a connection to the
+      # LAN; the hermetic fixtures live on it by IP, so exactly these two (ip:port) are allowed: the tracker's announce
+      # port and the seeder's (transmission) peer port. The seeder may also dial in. Never set this in a real deployment.
+      VPN_LAN_ALLOW_OUT: 172.31.250.30:6969,172.31.250.31:51413
+    networks:
+      default: {}
+      inet: { ipv4_address: 198.51.100.2, gw_priority: 100 }   # the "normal" default route, as in services/vpn/test
+
+  qbittorrent:
+    environment:
+      QBT_TRUSTED_IPS: ${API_IP:-172.31.250.3},${WORKER_IP:-172.31.250.4}   # no default in the image: empty locks the WebUI
+
+  authelia:
+    environment:
+      AUTH_POLICY: one_factor
+    volumes:
+      - users:/users                          # replaces the ./authelia/users bind mount
+    depends_on:
+      users-init: { condition: service_completed_successfully }
+
+  gateway:
+    depends_on:
+      authelia: { condition: service_started }
+
+  # ---------------------------------------------------------------- fixtures
+  users-init:
+    <<: *fixture
+    image: authelia/authelia:4.39.28
+    entrypoint: ["/bin/sh", "/users-init.sh"]
+    environment:
+      E2E_ADMIN_PASSWORD: ${E2E_ADMIN_PASSWORD:?}
+      E2E_ALICE_PASSWORD: ${E2E_ALICE_PASSWORD:?}
+      E2E_BOB_PASSWORD: ${E2E_BOB_PASSWORD:?}
+      E2E_CAROL_PASSWORD: ${E2E_CAROL_PASSWORD:?}
+    volumes:
+      - users:/users
+      - ../e2e/fixtures/users-init.sh:/users-init.sh:ro
+
+  tracker:
+    <<: *fixture
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/e2e-tracker:${SEEDBOX_VERSION:-latest}
+    build: { context: ../e2e/fixtures/tracker }
+    networks:
+      default: { ipv4_address: 172.31.250.30 }
+
+  seeder:
+    <<: *fixture
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/e2e-seeder:${SEEDBOX_VERSION:-latest}
+    build: { context: ../e2e/fixtures/seeder }
+    environment:
+      TRACKER_URL: http://172.31.250.30:6969/announce
+      SLOW_KBPS: ${E2E_SLOW_KBPS:-250}
+    volumes:
+      - fixtures:/fixtures
+    depends_on:
+      tracker: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /fixtures/manifest.json"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+    networks:
+      default: { ipv4_address: 172.31.250.31 }
+
+  net-echo-direct:
+    <<: *net
+    build: { context: ../e2e/fixtures/net }
+    command: ["/echo.sh"]
+    environment: { ECHO_NAME: direct }
+    networks:
+      inet: { ipv4_address: 198.51.100.20 }
+
+  net-echo-behind:
+    <<: *net
+    command: ["/echo.sh"]
+    environment: { ECHO_NAME: behind }
+    networks:
+      behind: { ipv4_address: 203.0.113.20 }
+
+  wg1: &wg
+    <<: *net
+    command: ["/wg-server.sh"]
+    cap_add: [NET_ADMIN]
+    sysctls: { net.ipv4.ip_forward: "1" }
+    environment: { NAME: wg1, TUN_NET: 10.99.1, ENDPOINT_IP: 198.51.100.11, KEYS_DIR: /fixtures }
+    volumes:
+      - fixtures:/fixtures
+    networks:
+      inet: { ipv4_address: 198.51.100.11 }
+      behind: { ipv4_address: 203.0.113.11 }
+
+  wg2:
+    <<: *wg
+    environment: { NAME: wg2, TUN_NET: 10.99.2, ENDPOINT_IP: 198.51.100.12, KEYS_DIR: /fixtures }
+    networks:
+      inet: { ipv4_address: 198.51.100.12 }
+      behind: { ipv4_address: 203.0.113.12 }
+
+  minio:
+    <<: *fixture
+    image: bitnamilegacy/minio:2025.4.22   # real MinIO; creates the bucket at start (the official images are no longer published)
+    environment:
+      MINIO_ROOT_USER: ${E2E_MINIO_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${E2E_MINIO_PASSWORD:?}
+      MINIO_DEFAULT_BUCKETS: seedbox-e2e
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/seedbox-e2e/ | grep -q 403"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  front:
+    <<: *fixture
+    restart: unless-stopped
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/e2e-front:${SEEDBOX_VERSION:-latest}
+    build: { context: ../e2e/fixtures/front }
+    volumes:
+      - fixtures:/srv/fixtures:ro
+    depends_on:
+      gateway: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      seeder: { condition: service_healthy }
+      ctl: { condition: service_started }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks:
+      default:
+        aliases: [app.seedbox.test, auth.seedbox.test, files.seedbox.test, s3.seedbox.test, fixtures.seedbox.test, ctl.seedbox.test]
+
+  ctl:
+    <<: *fixture
+    restart: unless-stopped
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/e2e-ctl:${SEEDBOX_VERSION:-latest}
+    build: { context: ../e2e/fixtures/ctl }
+    environment:
+      E2E_CTL_TOKEN: ${E2E_CTL_TOKEN:?}
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-sbe2e}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # ---------------------------------------------------------------- the test runner (profile "runner")
+  playwright:
+    <<: *fixture
+    profiles: ["runner"]
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/e2e-playwright:${SEEDBOX_VERSION:-latest}
+    build: { context: ../e2e, dockerfile: Dockerfile, args: { PW_VERSION: "${PW_VERSION:-1.65.0}" } }
+    user: "${E2E_UID:-1000}:${E2E_GID:-1000}"
+    working_dir: /e2e
+    environment:
+      HOME: /tmp
+      CI: ${CI:-}
+      E2E_BASE_URL: https://app.seedbox.test
+      E2E_ADMIN_PASSWORD: ${E2E_ADMIN_PASSWORD:?}
+      E2E_ALICE_PASSWORD: ${E2E_ALICE_PASSWORD:?}
+      E2E_BOB_PASSWORD: ${E2E_BOB_PASSWORD:?}
+      E2E_CAROL_PASSWORD: ${E2E_CAROL_PASSWORD:?}
+      E2E_MINIO_USER: ${E2E_MINIO_USER:-minioadmin}
+      E2E_MINIO_PASSWORD: ${E2E_MINIO_PASSWORD:?}
+      E2E_CTL_TOKEN: ${E2E_CTL_TOKEN:?}
+      E2E_WORKERS: ${E2E_WORKERS:-1}
+    volumes:
+      - ../e2e/.out:/e2e/.out
+    depends_on:
+      front: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      wg1: { condition: service_started }
+      wg2: { condition: service_started }
+      net-echo-direct: { condition: service_started }
+      net-echo-behind: { condition: service_started }
+      worker: { condition: service_started }
+    networks:
+      default: {}
+
+networks:
+  inet:
+    ipam: { config: [ { subnet: 198.51.100.0/24 } ] }
+  behind:
+    internal: true
+    ipam: { config: [ { subnet: 203.0.113.0/24 } ] }
+
+volumes:
+  users:
+  fixtures:

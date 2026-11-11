@@ -1,0 +1,13 @@
+# Proxy mode 3: "none". Publishes the gateway on a host port; you terminate TLS elsewhere
+# (Cloudflare Tunnel, a proxy on another machine, ...).
+#
+# Authelia sets Secure cookies, so users must reach APP_HOST and AUTH_HOST over https and
+# the outer proxy must send X-Forwarded-Proto: https. Bound to localhost by default; set
+# HTTP_BIND=0.0.0.0 to listen on all interfaces (only do that behind a firewall).
+#
+# Selected by setup.sh (COMPOSE_FILE=compose.yaml:compose.proxy-none.yaml).
+
+services:
+  gateway:
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}:8080"

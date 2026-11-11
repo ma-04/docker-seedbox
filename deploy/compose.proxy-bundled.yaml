@@ -1,0 +1,58 @@
+# Proxy mode 1: "bundled". Ships nginx-proxy + acme-companion (Let's Encrypt) on ports 80/443.
+# For a fresh server where nothing else listens on 80/443. Selected by setup.sh
+# (COMPOSE_FILE=compose.yaml:compose.proxy-bundled.yaml).
+#
+# NOTE: nginx-proxy and acme-companion mount the Docker socket to discover the gateway and
+# issue certificates (access to it is effectively root on the host; ':ro' does not limit the
+# API). This is the only place the socket is mounted. Do not want that? Use compose.proxy-external.yaml / compose.proxy-none.yaml with a proxy you run yourself.
+
+services:
+  gateway:
+    environment:
+      VIRTUAL_HOST: ${APP_HOST},${AUTH_HOST},${FILES_HOST}
+      VIRTUAL_PORT: "8080"
+      LETSENCRYPT_HOST: ${APP_HOST},${AUTH_HOST},${FILES_HOST}
+      LETSENCRYPT_EMAIL: ${ACME_EMAIL:-}
+
+  nginx-proxy:
+    image: nginxproxy/nginx-proxy:1.11.6-alpine@sha256:99376e95c8754547213d411222a2c4dca046d974e753ae2a1c9aef09b2c03364
+    container_name: ${COMPOSE_PROJECT_NAME:-seedbox}-nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    labels:
+      com.github.nginx-proxy.nginx: ""   # lets acme-companion find this container
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - proxy-certs:/etc/nginx/certs:ro
+      - proxy-vhost:/etc/nginx/vhost.d
+      - proxy-html:/usr/share/nginx/html
+      - ./proxy/seedbox.conf:/etc/nginx/conf.d/seedbox.conf:ro
+    environment:
+      TRUST_DOWNSTREAM_PROXY: "false"
+    security_opt: ["no-new-privileges:true"]
+    # nginx master (root) binds 80/443, chowns its cache dirs and drops its workers to the nginx user; docker-gen
+    # (root) writes the generated config. Nothing else is needed. (acme-companion keeps its default capabilities.)
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER]
+
+  acme-companion:
+    image: nginxproxy/acme-companion:2.8@sha256:e3c5fb08bf623ae93dbc945d78fe50040c1fa107ddf59f7ee04ba6a61f34cbc1
+    restart: unless-stopped
+    depends_on: [nginx-proxy]
+    environment:
+      DEFAULT_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - proxy-certs:/etc/nginx/certs
+      - proxy-vhost:/etc/nginx/vhost.d
+      - proxy-html:/usr/share/nginx/html
+      - proxy-acme:/etc/acme.sh
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  proxy-certs:
+  proxy-vhost:
+  proxy-html:
+  proxy-acme:

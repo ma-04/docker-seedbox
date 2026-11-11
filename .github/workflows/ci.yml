@@ -1,0 +1,142 @@
+name: CI
+
+# Runs on pull requests, and as a reusable workflow: release.yml calls it and publishes only if every job here is green
+# for the exact commit being released (a push to main goes through release.yml, so it is tested exactly once).
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # github.workflow is the CALLER's name inside a reusable workflow, so a release run and a PR run never share a group.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Typecheck and unit tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  compose:
+    name: Validate compose files and scripts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Shellcheck
+        run: shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh services/qbittorrent/seed-config.sh services/qbittorrent/conf-edit.sh
+      - name: qBittorrent entrypoint cannot be steered through planted symlinks (plain sh, no Docker)
+        run: sh services/qbittorrent/test/symlink.sh
+      - name: Gateway refuses to serve through symlinks
+        run: |
+          docker build -q -t gateway-under-test services/gateway
+          GATEWAY_IMAGE=gateway-under-test services/gateway/test/symlinks.sh
+      - name: docker compose config (every proxy mode)
+        working-directory: deploy
+        env:
+          APP_HOST: seedbox.example.com
+          AUTH_HOST: auth.seedbox.example.com
+          FILES_HOST: files.seedbox.example.com
+          COOKIE_DOMAIN: seedbox.example.com
+          APP_SECRET: ci
+          GATEWAY_SECRET: ci
+          VPN_CONTROL_TOKEN: ci
+          AUTHELIA_SESSION_SECRET: ci
+          AUTHELIA_STORAGE_ENCRYPTION_KEY: ci
+          AUTHELIA_JWT_SECRET: ci
+          PROXY_NETWORK: proxy
+          COMPOSE_PROFILES: authelia
+        run: |
+          for mode in bundled external none; do
+            COMPOSE_FILE="compose.yaml:compose.proxy-$mode.yaml" docker compose config -q
+          done
+      - name: setup.sh non-interactive smoke test
+        run: |
+          ./setup.sh --domain seedbox.example.com --admin-email admin@example.com \
+            --proxy none --yes --no-start
+          test -s deploy/authelia/users/users_database.yml
+          test "$(stat -c %a deploy/.env)" = 600
+          test "$(stat -c %a deploy/authelia/users/users_database.yml)" = 600
+
+  images:
+    name: Build ${{ matrix.image }} image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: api, context: ., file: apps/api/Dockerfile }
+          - { image: web, context: ., file: apps/web/Dockerfile }
+          - { image: gateway, context: services/gateway, file: services/gateway/Dockerfile }
+          - { image: vpn, context: services/vpn, file: services/vpn/Dockerfile }
+          - { image: qbittorrent, context: services/qbittorrent, file: services/qbittorrent/Dockerfile }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: false
+          build-args: |
+            VITE_APP_VERSION=ci-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+  vpn-sidecar:
+    name: VPN sidecar kill-switch test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Hermetic WireGuard stack (kill switch, rotation, LAN policy, qBittorrent seeding)
+        run: services/vpn/test/run.sh
+
+  e2e:
+    name: End-to-end (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Hermetic stack + Playwright suite
+        run: e2e/run.sh
+      - name: Upload report, traces and container logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-output
+          path: e2e/.out
+          retention-days: 7
+          if-no-files-found: ignore
+          include-hidden-files: true   # e2e/.out is a hidden directory: without this nothing was uploaded
