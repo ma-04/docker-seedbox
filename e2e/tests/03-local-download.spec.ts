@@ -157,6 +157,31 @@ test.describe('3. .torrent upload -> local destination -> signed downloads', () 
     if (env.layout !== 'single') expect((await raw(`${env.filesURL}/`)).status).toBe(404);
   });
 
+  test('every /dl/ response, errors included, carries nosniff and the sandbox CSP (SECURITY.md)', async () => {
+    const url = links.find((x) => decodeURIComponent(new URL(x.url).pathname).endsWith('/plain.bin') && !new URL(x.url).pathname.includes('deeper'))!.url;
+    const bad = new URL(url); bad.searchParams.set('sig', '0'.repeat(64));
+    const missing = new URL(url); missing.pathname = missing.pathname.replace('plain.bin', 'no-such-file.bin');
+    const cases: [string, Promise<import('../lib/net').RawResponse>, number][] = [
+      ['200 file', raw(url), 200],
+      ['206 range', raw(url, { headers: { range: 'bytes=0-9' } }), 206],
+      ['416 unsatisfiable range (nginx)', raw(url, { headers: { range: 'bytes=999999999-' } }), 416],
+      ['403 bad signature (API)', raw(bad.toString()), 403],
+      ['404/403 unknown file (API)', raw(missing.toString()), 0],
+      ['404 POST (nginx)', raw(url, { method: 'POST', body: 'x' }), 404],
+    ];
+    for (const [what, p, status] of cases) {
+      const r = await p;
+      if (status) expect(r.status, what).toBe(status); else expect([403, 404], what).toContain(r.status);
+      expect(r.headers['x-content-type-options'], what).toBe('nosniff');
+      expect(r.headers['content-security-policy'], what).toBe("default-src 'none'; sandbox");
+      expect(r.headers['referrer-policy'], what).toBe('no-referrer');
+      if (r.status === 200 || r.status === 206) {
+        expect(r.headers['content-type'], what).toBe('application/octet-stream');
+        expect(r.headers['content-disposition'], what).toMatch(/^attachment;/);
+      }
+    }
+  });
+
   test('an expired link -> 410', async ({ browser }, testInfo) => {
     const a = await userPage(browser, testInfo, 'admin');
     const alice = await userPage(browser, testInfo, 'alice');

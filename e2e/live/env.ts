@@ -17,7 +17,7 @@ const need = (k: string): string => {
 const opt = (k: string, d = ''): string => process.env[k] ?? d;
 const lines = (k: string): string[] => opt(k).split(',').map((s) => s.trim()).filter(Boolean);
 
-const domain = opt('LIVE_DOMAIN', 'seedbox.invalid');
+const domain = opt('LIVE_DOMAIN', 'seedbox.invalid').trim().toLowerCase();
 // Hosts layout of the deployment under test. Unset: the three-host layout (auth.<domain>, files.<domain>). Set to an
 // empty value (or to LIVE_DOMAIN): served on the app host, i.e. the portal at <domain>/auth/ and downloads at /dl/.
 const sep = (k: string, d: string): string | null => { const v = opt(k, d).trim().toLowerCase(); return v && v !== domain ? v : null; };
