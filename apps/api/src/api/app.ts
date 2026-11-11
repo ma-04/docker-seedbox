@@ -12,6 +12,7 @@ import type { Ctx } from './context.js';
 import { QbittorrentDownloader } from '../downloaders/qbittorrent.js';
 import type { EngineClient } from './engine.js';
 import { ApiError } from './errors.js';
+import { loggerOptions } from './logging.js';
 import { registerAdmin } from './routes/admin.js';
 import { registerAdminDestinations, registerDestinations } from './routes/destinations.js';
 import { registerDl } from './routes/dl.js';
@@ -22,7 +23,7 @@ import { registerAdminJobs, registerJobs } from './routes/jobs.js';
 export interface BuildAppOptions {
   db: Db; config: Config; vpn?: VpnClient; engine?: EngineClient; fetchImpl?: typeof fetch;
   logger?: boolean | object; ssePollMs?: number; ssePingMs?: number;
-  sseMaxPerUser?: number; sseMaxTotal?: number; limiter?: RateLimiter; lookup?: GuardOptions['lookup'];
+  sseMaxPerUser?: number; sseMaxTotal?: number; vpnLockWaitMs?: number; limiter?: RateLimiter; lookup?: GuardOptions['lookup'];
 }
 
 export interface RouteInfo { method: string | string[]; url: string; config?: { guard?: string } }
@@ -43,9 +44,10 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     sseMaxPerUser: opts.sseMaxPerUser ?? envInt('SSE_MAX_PER_USER', 5),
     sseMaxTotal: opts.sseMaxTotal ?? envInt('SSE_MAX_TOTAL', 200),
     limiter: opts.limiter ?? new RateLimiter(),
+    vpnLockWaitMs: opts.vpnLockWaitMs ?? 15_000,
     lookup: opts.lookup,
   };
-  const app = Fastify({ logger: opts.logger ?? false, trustProxy: true });
+  const app = Fastify({ logger: loggerOptions(opts.logger) as never, trustProxy: true });
 
   app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 5 } });
   const routeTable: RouteInfo[] = [];
@@ -83,6 +85,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
         user: { id: u.id, username: u.username, email: u.email, displayName: u.display_name },
         isAdmin: !!u.is_admin,
         limits: { maxActiveJobs: u.max_active_jobs ?? getSetting(db, 'limits.maxActiveJobsPerUser'), maxTorrentBytes: getSetting(db, 'limits.maxTorrentBytes') },
+        cleanup: { deleteRemoteOnJobDelete: getSetting(db, 'cleanup.deleteRemoteOnJobDelete') },
         googleConnectAvailable: false,
         logoutUrl: `${config.publicScheme}://${config.authHost}/logout`,
       };

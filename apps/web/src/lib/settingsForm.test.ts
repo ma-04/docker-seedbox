@@ -7,10 +7,18 @@ const settings = (o: Partial<SettingsDto> = {}): SettingsDto => ({
   'vpn.mode': 'off', 'vpn.rotation': 'manual', 'vpn.rotationMinutes': 360, 'vpn.activeConfigId': null,
   'limits.maxActiveJobsPerUser': 5, 'limits.maxTorrentBytes': 0, 'limits.minFreeDiskBytes': 2 * GB, 'seeding.ratio': 0,
   'google.oauthClientId': '', 'google.oauthClientSecret': '',
-  'cleanup.failedGraceMinutes': 60, 'limits.metadataTimeoutMinutes': 30, 'seeding.maxMinutes': 0, ...o,
+  'cleanup.failedGraceMinutes': 60, 'cleanup.deleteRemoteOnJobDelete': false, 'limits.metadataTimeoutMinutes': 30, 'seeding.maxMinutes': 0, ...o,
 });
 
 describe('limits form', () => {
+  it('toggles cleanup.deleteRemoteOnJobDelete', () => {
+    const cur = settings();
+    const f = limitsToForm(cur);
+    expect(f.deleteRemote).toBe(false);
+    expect(limitsPatch(cur, f)).toEqual({});
+    expect(limitsPatch(cur, { ...f, deleteRemote: true })).toEqual({ 'cleanup.deleteRemoteOnJobDelete': true });
+  });
+
   it('shows the three new settings and produces no patch when nothing changed', () => {
     const cur = settings({ 'cleanup.failedGraceMinutes': 15, 'limits.metadataTimeoutMinutes': 0, 'seeding.maxMinutes': 90 });
     const f = limitsToForm(cur);

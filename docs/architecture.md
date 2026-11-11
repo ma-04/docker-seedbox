@@ -75,8 +75,39 @@ address the name resolves to must be public (not loopback, RFC 1918, CGNAT, link
 unspecified, multicast, or IPv4-mapped forms). It is enforced on create, update, `test` and when
 building file links. Admin-created (shared) destinations may use `http:` and private addresses
 (e.g. a MinIO container) but still no credentials in the URL. `publicBaseUrl`/`proxyBaseUrl` are
-`http(s)` only everywhere. The worker must call `assertPublicEndpoint` again right before uploading
-for user-owned destinations (DNS rebinding: a check here cannot bind the later connection).
+`http(s)` only everywhere. The check above is a pre-flight only: it cannot bind the later connection, and rclone follows
+HTTP redirects. So uploads to **user-owned** destinations are enforced at connect time by the **egress proxy**
+(`apps/api/src/worker/egress-proxy.ts`): see "Egress proxy" below. Shared (admin) destinations keep direct egress.
+
+### Egress proxy (worker, user-owned S3 destinations)
+
+A tiny in-process forward proxy (Node `http` + `net`, no dependencies), started lazily on `127.0.0.1:<ephemeral port>` the
+first time a user-owned upload (or purge) needs it. rclone for such a destination is started with
+`HTTPS_PROXY`/`HTTP_PROXY` = `http://seedbox:<random per-process token>@127.0.0.1:<port>` and `NO_PROXY=` (that child only). For
+every `CONNECT host:port` (and, if `EGRESS_ALLOW_PLAIN_HTTP=1`, absolute-URI `http://` request) the proxy requires the
+`Proxy-Authorization` token (407 otherwise), resolves the name itself, answers 403 unless EVERY resolved address is public
+(`lib/netguard.ts` rules) and the port is in `EGRESS_ALLOWED_PORTS` (default `443,80`), and then connects to the vetted IP
+literal, never the name, so redirects (`https://evil` -> 307 -> `http://<internal>`) and DNS rebinding cannot reach internal
+hosts. Connect timeout 10 s, idle timeout 5 min. Policy and resolver are injectable for tests
+(`worker/egress-proxy.test.ts` runs the real rclone binary against a redirecting local "S3"). Known gap: Go's net/http never
+proxies `localhost`/loopback hosts, so a redirect to loopback bypasses the proxy; in the worker container nothing but this
+token-protected proxy listens there. The API's S3 SDK client (`lib/s3client.ts`, destination test; presigning does no
+network) pins `followRegionRedirects: false` and, for user-owned destinations, resolves and vets the address inside the
+socket `lookup`, so it also connects to the vetted address.
+
+### Torrent sources
+
+`lib/source.ts` is the only way a source enters the system. A magnet is never stored or forwarded as typed: whitespace or
+control characters anywhere, or more than 8 KiB, are rejected (400); a canonical magnet is rebuilt from `xt=urn:btih:<40 hex>`
+(v1 only), `dn` (control characters stripped, <= 255 bytes) and up to 50 trackers (`http`, `https`, `udp`, `ws`, `wss`; parseable;
+no credentials; host not an IP literal in a non-public range, not a single-label/internal name; no DNS). Every other
+parameter (`ws`, `xs`, `as`, `x.pe`, `so`, `kt`, unknown) is dropped. Uploaded `.torrent` files are re-encoded with the info
+dict copied byte for byte (infohash unchanged), `announce`/`announce-list` filtered the same way and `url-list`,
+`httpseeds`, `nodes` removed. The worker re-canonicalises stored magnets when it adds them (rows from before this policy),
+and the qBittorrent client refuses a `urls` value containing CR/LF/whitespace and sends exactly one URL, because
+qBittorrent splits `urls` on newlines. Torrents are deduplicated by infohash across users: the first source is kept and
+later submissions only add (sanitised) trackers to it; there is no per-user isolation of a torrent's data or trackers.
+
 `POST .../test` returns only a short category (`unreachable`, `auth failed`, `bucket not found`,
 `tls error`, `timeout`) to non-admins; admins see the detailed message.
 
@@ -99,6 +130,8 @@ Authoritative schema: `apps/api/migrations/001_init.sql`. Timestamps are unix se
   handed to the downloader (metadata timeout).
 - `jobs(id, user_id, torrent_id, destination_id, state, upload_progress, upload_speed, remote_path, folder_url, error, created_at, updated_at, completed_at)`
 - `job_files(id, job_id, path, size)` — relative paths, recorded when the upload finishes.
+- `pending_deletions(id, destination_id, remote_path, kind, full_path, config_enc, user_owned, attempts, retry_at, last_error, created_at)` (migration 004) —
+  files of deleted jobs/destinations the worker still has to remove (see "Deleting jobs").
 - `vpn_configs(id, name UNIQUE, config_enc, endpoint_host, enabled, last_used_at, last_error, created_at)`
 - `settings(key PRIMARY KEY, value_json)`
 - `oauth_states(state PRIMARY KEY, user_id, payload_json, expires_at)`
@@ -179,7 +212,7 @@ Wire types: `apps/api/src/lib/dto.ts` (authoritative; the web app imports it typ
 
 ```
 GET    /health
-GET    /me                                   -> { user, isAdmin, limits }
+GET    /me                                   -> { user, isAdmin, limits, cleanup }
 GET    /destinations                         -> shared (enabled) + own; secrets masked
 POST   /destinations                         -> create own (s3 only; gdrive comes from OAuth)
 PATCH  /destinations/:id   DELETE /destinations/:id      (own only)
@@ -188,7 +221,7 @@ GET    /oauth/google/start?name=             -> 302 to Google (scope drive.file,
 GET    /oauth/google/callback                -> creates user-owned gdrive destination, 302 /storage
 GET    /jobs?state=                          -> own jobs (with torrent progress)
 POST   /jobs       JSON { magnet, destinationId } | multipart { torrent, destinationId }
-GET    /jobs/:id   DELETE /jobs/:id (cancel+remove)   POST /jobs/:id/retry
+GET    /jobs/:id   DELETE /jobs/:id (cancel; or remove a finished job and, see below, its files)   POST /jobs/:id/retry
 GET    /jobs/:id/files                       -> [{ path, size, url }] + { folderUrl? }
 GET    /events                               -> SSE: `job` events with the job JSON
 
@@ -206,9 +239,30 @@ Settings keys (defaults): `vpn.mode` (`"off"` | `"required"`, default `"off"` un
 config exists), `vpn.rotation` (`"manual"` | `"interval"` | `"on-failure"`),
 `vpn.rotationMinutes` (360), `limits.maxActiveJobsPerUser` (5),
 `limits.maxTorrentBytes` (0 = unlimited), `limits.minFreeDiskBytes` (2 GiB),
-`limits.metadataTimeoutMinutes` (30; 0 = never), `cleanup.failedGraceMinutes` (60),
+`limits.metadataTimeoutMinutes` (30; 0 = never), `cleanup.failedGraceMinutes` (60), `cleanup.deleteRemoteOnJobDelete` (false; S3 only),
 `seeding.ratio` (0 = stop when complete), `seeding.maxMinutes` (0 = no cap; with `seeding.ratio` > 0, stop seeding after this long), `google.oauthClientId`,
 `google.oauthClientSecret` (encrypted; used for user "Connect Google Drive").
+
+**Deleting jobs.** Cancelling an active job never touches files. Deleting a finished job (user `DELETE /jobs/:id` or admin
+`DELETE /admin/jobs/:id`) or a destination removes the rows and, in the same transaction, queues the delivered files in
+`pending_deletions` (finished jobs that chose a `remote_path`; the worker's reference check makes a failed/cancelled sibling harmless). Local destinations: always; the worker removes
+`library/<fullRemotePath(remote_path)>` (must stay under the library root; any `..`, empty segment, symlinked parent or the
+`.staging` dir is refused) only if no other job row references the same destination + remote_path (nor another local
+destination mapping to the same library path), no active job still needs it as its library copy and no active job exists for the deleted job's torrent and destination (delete + immediate re-add): those cases are deferred, not dropped. It then clears
+`torrents.library_path` pointers into it, then prunes empty parent directories (never the library root); failures retry
+with backoff (12 attempts). S3: remote data is kept unless `cleanup.deleteRemoteOnJobDelete` is on, then the worker runs
+`rclone purge DST:<bucket>/<prefix>/<exact job dir>` (asserted: one segment for user-owned, two for shared, ending in
+` [<8 hex>]`, strictly below the prefix; user-owned goes through the egress proxy). Deleting a *destination* only ever removes
+local files, never remote data. Google Drive data is never deleted automatically. The deletion pass runs off the tick (an S3
+purge can be slow) and is aborted on shutdown. The web UI's Remove confirmation for completed jobs states which of these applies (`GET /me` -> `cleanup`).
+
+**VPN changes are serialised.** The worker's reconcile and `POST /admin/vpn/rotate` hold the `vpn.lock` row of `settings`
+(`{token, until}`, 60 s expiry, compare-and-set in an immediate transaction) while they call `/connect`; whoever finds it
+held skips (worker) or waits up to 15 s and then answers 409 (admin). The worker re-reads `vpn.mode` right before connecting and treats a sidecar 409
+from `/connect` ("mode is off") as nothing to do.
+
+**Logging.** The API logger never records query strings (signed `/dl` links carry `exp`/`sig` there), magnet links, or
+`Authorization`/`Cookie`/`X-Gateway-Secret` headers (`api/logging.ts`: `req` serializer plus `redact`).
 
 Infohashes are stored lowercase hex (v1, 40 chars); base32 magnets are converted before
 the UNIQUE check. A user re-adding a torrent they already have for the same
@@ -255,6 +309,8 @@ a whitelist is the only safe surface. If the engine is unreachable the API answe
 | `QBT_TRUSTED_IPS` | qbittorrent | comma-separated addresses allowed to use the WebUI without a password (`/32` implied); empty = nobody |
 | `VPN_MTU` | vpn | WireGuard interface MTU 576-1500; unset = 1280; a config `MTU =` wins |
 | `VPN_DEFAULT_MODE` | vpn | `required` (default) \| `off`; mode right after a container start |
+| `EGRESS_ALLOWED_PORTS` | worker | `443,80`: destination ports the egress proxy allows for user-owned S3 destinations |
+| `EGRESS_ALLOW_PLAIN_HTTP` | worker | `1` lets the egress proxy forward plain `http://` requests (default off: user destinations must be https) |
 | `LOG_LEVEL` | all | `info` |
 
 Ports inside the compose network: `gateway:8080`, `web:8080`, `api:3000`,
@@ -275,7 +331,8 @@ Every transition that can race with the API (which inserts/retries jobs at any t
 statement or one immediate transaction evaluated *after* slow work; a final self-heal step catches the rest.
 
 0. Self-heal: a torrent in `removed`/`error` that has an active job (`queued`/`downloading`/`uploading`) is
-   reset to `pending` (re-download) instead of stranding the job.
+   reset to `pending` instead of stranding the job; its `library_path` is kept while the library copy exists, so it is
+   served from there without a re-download.
 1. New `pending` torrents → add to qBittorrent (category `seedbox`, save path
    `/downloads/incomplete/<infohash>`). Enforce limits; refuse if `vpn.mode=required`
    and VPN is not connected. A pending torrent whose only jobs are dead is retired
@@ -296,8 +353,9 @@ statement or one immediate transaction evaluated *after* slow work; a final self
 3. For each job of a downloaded torrent in `downloading` → `uploading`: run
    `rclone copy` (local: copy/move to `/downloads/library/...`), parse
    `--use-json-log --stats 1s` for progress, record `job_files`, then `completed`. S3 endpoints go through an
-   SSRF guard first (the shared `lib/netguard.ts` `assertPublicEndpoint`; user-owned destinations: private ranges
-   refused; shared/admin ones: allowed). When an S3 copy fails the worker probes the bucket root with the same
+   SSRF pre-flight first (the shared `lib/netguard.ts` `assertPublicEndpoint`; user-owned destinations: private ranges
+   refused; shared/admin ones: allowed), and for user-owned destinations rclone then runs through the egress proxy, which
+   enforces the same rules on every connection it makes (redirects, DNS rebinding). When an S3 copy fails the worker probes the bucket root with the same
    credentials, and if the server rejects them the job error says so (rclone's own copy message can be misleading). rclone gets
    SIGTERM then SIGKILL after 10 s on abort, and is failed after 30 min without byte progress. Local copies abort
    on cancel and remove their partial target. Local *move* is claimed with one conditional UPDATE that also records
@@ -307,6 +365,7 @@ statement or one immediate transaction evaluated *after* slow work; a final self
    the torrent goes back to `pending`). After a failed upload the data is kept for
    `cleanup.failedGraceMinutes` so "Retry" does not re-download. Seeding stops at `seeding.ratio` or, if set,
    after `seeding.maxMinutes`.
+5b. Deleted jobs/destinations: consume `pending_deletions` (see "Deleting jobs").
 5. VPN: apply `vpn.mode` (only when the sidecar's reported mode differs), health-check, rotate per `vpn.rotation`.
 Crash-safe: all state lives in SQLite; on boot, `uploading` jobs restart their upload.
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { getSetting } from '../lib/settings.js';
+import { acquireVpnLock, releaseVpnLock, VpnHttpError } from '../lib/vpn.js';
 import { alice, fakeVpn, root, setup } from './testutil.js';
 
 const WG = `[Interface]
@@ -42,6 +43,32 @@ describe('admin vpn', () => {
     expect((await env.call(root, 'POST', '/api/admin/vpn/rotate', {})).statusCode).toBe(409);
     expect((await env.call(root, 'DELETE', `/api/admin/vpn/configs/${id}`)).statusCode).toBe(204);
     expect((await env.call(alice, 'GET', '/api/admin/vpn/configs')).statusCode).toBe(403);
+  });
+
+  it('rotate is serialised with the worker (409 while the DB lock is held) and maps the sidecar\'s off-mode 409', async () => {
+    const vpn = fakeVpn();
+    const env = setup(vpn, undefined, { vpnLockWaitMs: 0 });
+    await env.call(root, 'POST', '/api/admin/vpn/configs', { name: 'one', config: WG });
+    const token = acquireVpnLock(env.db)!;
+    const busy = await env.call(root, 'POST', '/api/admin/vpn/rotate', {});
+    expect(busy.statusCode).toBe(409);
+    expect(vpn.calls).not.toContain('connect:one');
+    // with a wait budget the admin rotate gets in as soon as the worker releases the lock
+    const waiting = setup(fakeVpn(), undefined, { vpnLockWaitMs: 3000 });
+    await waiting.call(root, 'POST', '/api/admin/vpn/configs', { name: 'one', config: WG });
+    const held = acquireVpnLock(waiting.db)!;
+    setTimeout(() => releaseVpnLock(waiting.db, held), 400);
+    expect((await waiting.call(root, 'POST', '/api/admin/vpn/rotate', {})).statusCode).toBe(200);
+    releaseVpnLock(env.db, token);
+    expect((await env.call(root, 'POST', '/api/admin/vpn/rotate', {})).statusCode).toBe(200);
+    expect(env.db.prepare("SELECT 1 FROM settings WHERE key = 'vpn.lock'").get()).toBeUndefined(); // released after use
+
+    const off = setup(fakeVpn({ connect: async () => { throw new VpnHttpError('VPN control POST /connect failed (409)', 409); } }));
+    await off.call(root, 'POST', '/api/admin/vpn/configs', { name: 'one', config: WG });
+    const r = await off.call(root, 'POST', '/api/admin/vpn/rotate', {});
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error.message).toMatch(/mode is off/);
+    expect(off.db.prepare("SELECT 1 FROM settings WHERE key = 'vpn.lock'").get()).toBeUndefined();
   });
 
   it('status falls back when the sidecar is unreachable', async () => {

@@ -28,6 +28,16 @@ export function mapQbtState(state: string, progress: number): DownloadState {
   return 'downloading';
 }
 
+/**
+ * qBittorrent's `urls` field is newline separated: anything with a CR/LF would add extra downloads (or make it fetch
+ * arbitrary URLs). Exactly one magnet URI, no whitespace or control characters, ever.
+ */
+export function singleUrl(u: string): string {
+  // eslint-disable-next-line no-control-regex
+  if (!/^magnet:\?[^\s\u0000-\u001f\u007f-\u009f]+$/i.test(u)) throw new Error('Refusing to send a malformed magnet link to qBittorrent');
+  return u;
+}
+
 export class QbittorrentDownloader implements Downloader {
   readonly kind = 'torrent';
   private readonly base: string;
@@ -98,7 +108,7 @@ export class QbittorrentDownloader implements Downloader {
     await this.ensureCategory();
     const build = () => {
       const fd = new FormData();
-      if ('magnet' in input.source) fd.append('urls', input.source.magnet);
+      if ('magnet' in input.source) fd.append('urls', singleUrl(input.source.magnet));
       else fd.append('torrents', new Blob([new Uint8Array(input.source.torrent)], { type: 'application/x-bittorrent' }), `${input.id}.torrent`);
       fd.append('category', this.category);
       fd.append('savepath', input.savePath);

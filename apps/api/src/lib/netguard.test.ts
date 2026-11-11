@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertPublicEndpoint, isBlockedAddress } from './netguard.js';
+import { assertPublicEndpoint, isBlockedAddress, isPublicHostSync } from './netguard.js';
 
 const pub = async () => [{ address: '93.184.216.34', family: 4 }];
 const guard = (url: string, lookup = pub, allowPrivate = false) => assertPublicEndpoint(url, { allowPrivate, lookup });
@@ -13,6 +13,27 @@ describe('isBlockedAddress', () => {
   it.each(['93.184.216.34', '8.8.8.8', '172.15.0.1', '172.32.0.1', '100.63.0.1', '100.128.0.1', '2606:4700:4700::1111', '::ffff:8.8.8.8'])('allows %s', (ip) => {
     expect(isBlockedAddress(ip)).toBe(false);
   });
+});
+
+describe('isBlockedAddress: reserved and transition ranges', () => {
+  it.each([
+    // IPv4
+    '0.1.2.3', '0.255.255.255', '192.0.0.8', '192.0.2.1', '198.18.0.1', '198.19.255.254', '198.51.100.7', '203.0.113.9', '240.0.0.1', '250.1.1.1', '192.88.99.1',
+    // IPv4-translated / NAT64 / 6to4 / Teredo
+    '::ffff:0:7f00:1', '::ffff:0:8.8.8.8', '64:ff9b::a00:1', '64:ff9b::10.0.0.1', '64:ff9b::192.168.1.1', '64:ff9b:1::1', '64:ff9b:1:ffff::8.8.8.8',
+    '2002:c0a8:101::1', '2002:a00:1::', '2002:7f00:1::1', '2001::1', '2001:0:4136:e378:8000:63bf:3fff:fdd2',
+    // deprecated / documentation / benchmark / misc
+    'fec0::1', 'feff::1', '2001:db8::1', '2001:db8:ffff::1', '3fff::1', '3fff:fff::1', '2001:2::1', '2001:10::1', '2001:2f::1', '100::1', '100::dead:beef', '5f00::1',
+  ])('blocks %s', (ip) => { expect(isBlockedAddress(ip)).toBe(true); });
+  it.each([
+    '1.1.1.1', '192.0.3.1', '192.88.98.1', '198.17.255.255', '198.20.0.1', '198.51.101.1', '203.0.112.255', '203.0.114.1', '223.255.255.255',
+    '2001:4860:4860::8888', '2a00:1450:4001::1', '64:ff9b::808:808', '2002:808:808::1', '2001:1::1', '2001:30::1', '2606:4700::1111', '::ffff:1.1.1.1',
+  ])('allows %s', (ip) => { expect(isBlockedAddress(ip)).toBe(false); });
+});
+
+describe('isPublicHostSync', () => {
+  it.each(['tracker.example.com', 'tracker.example.com.', '93.184.216.34', '[2606:4700::1111]', 'a.b.c.d.example.org'])('accepts %s', (h) => { expect(isPublicHostSync(h)).toBe(true); });
+  it.each(['localhost', 'tracker', 'foo.local', 'x.internal', 'x.lan', 'host.home.arpa', '127.0.0.1', '10.0.0.1', '[::1]', '172.31.250.1', '2130706433', '0x7f.1', '0x7f000001', '1.2.3', 'tracker.1', '', '[fd00::1]'])('rejects %s', (h) => { expect(isPublicHostSync(h)).toBe(false); });
 });
 
 describe('assertPublicEndpoint', () => {

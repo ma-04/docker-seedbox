@@ -5,6 +5,7 @@ import { now } from '../lib/types.js';
 import { Worker } from './loop.js';
 import { FakeDownloader, FakeVpn, makeEnv, SECRET, silent } from './testkit.js';
 import { reconcileVpn } from './vpn.js';
+import { acquireVpnLock, releaseVpnLock, VpnHttpError } from '../lib/vpn.js';
 
 function setup(rotation: 'manual' | 'interval' | 'on-failure') {
   const env = makeEnv();
@@ -154,5 +155,59 @@ describe('vpn reconcile', () => {
     vpn.fail = true;
     const w = new Worker({ db: env.db, config: env.config, downloader: new FakeDownloader(), vpn, log: silent });
     await expect(w.reconcileVpn()).resolves.toBeUndefined();
+  });
+
+  describe('races with the admin', () => {
+    it('re-reads vpn.mode right before connecting: an admin switch to off during the reconcile prevents /connect', async () => {
+      const s = setup('on-failure');
+      s.add('one', null);
+      s.vpn.status_.mode = 'required';
+      // the admin flips the mode to off while the reconcile is between its status snapshot and the connect decision
+      const status = s.vpn.status.bind(s.vpn);
+      s.vpn.status = async () => { const r = await status(); setSetting(s.db, 'vpn.mode', 'off'); return r; };
+      await s.run();
+      expect(s.vpn.connects).toEqual([]);
+    });
+
+    it('treats a 409 from /connect as "mode is off, nothing to do": no throw, no config error recorded', async () => {
+      const s = setup('on-failure');
+      const id = s.add('one', null);
+      s.vpn.connect = async () => { throw new VpnHttpError('VPN control POST /connect failed (409): mode is off', 409); };
+      await expect(s.run()).resolves.toBeUndefined();
+      expect((s.db.prepare('SELECT last_error FROM vpn_configs WHERE id = ?').get(id) as { last_error: string | null }).last_error).toBeNull();
+      // any other sidecar error is still an error
+      s.vpn.connect = async () => { throw new VpnHttpError('boom (500)', 500); };
+      await expect(s.run()).rejects.toThrow(/boom/);
+    });
+
+    it('is serialised with an admin rotate by the DB lock: a held lock skips the pass, an expired one does not', async () => {
+      const s = setup('on-failure');
+      s.add('one', null);
+      const token = acquireVpnLock(s.db)!;
+      expect(token).toBeTruthy();
+      expect(acquireVpnLock(s.db)).toBeNull(); // compare-and-set: only one holder
+      await s.run();
+      expect(s.vpn.connects).toEqual([]);
+      releaseVpnLock(s.db, token);
+      await s.run();
+      expect(s.vpn.connects).toEqual(['one']);
+      expect(s.db.prepare("SELECT 1 FROM settings WHERE key = 'vpn.lock'").get()).toBeUndefined(); // released
+      // an expired lock (crashed holder) does not wedge the guard, and a stale token cannot release a newer lock
+      const old = acquireVpnLock(s.db, 60, now() - 120)!;
+      const fresh = acquireVpnLock(s.db)!;
+      expect(fresh).toBeTruthy();
+      releaseVpnLock(s.db, old);
+      expect(acquireVpnLock(s.db)).toBeNull();
+    });
+
+    it('converges on off when the admin switched during /connect', async () => {
+      const s = setup('on-failure');
+      s.add('one', null);
+      const connect = s.vpn.connect.bind(s.vpn);
+      s.vpn.connect = async (n: string, c: string) => { const r = await connect(n, c); setSetting(s.db, 'vpn.mode', 'off'); return r; };
+      s.vpn.status_.mode = 'required';
+      await s.run();
+      expect(s.vpn.modes).toContain('off');
+    });
   });
 });

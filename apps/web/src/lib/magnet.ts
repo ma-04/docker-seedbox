@@ -1,6 +1,6 @@
 /** Parsing and validation of `magnet:` URIs handed to the app by the browser's protocol handler (`/add?magnet=...`). */
 
-/** Longest accepted magnet URI. Real ones are a few hundred bytes; this only bounds hostile input. */
+/** Longest accepted magnet URI, in UTF-8 bytes. Real ones are a few hundred bytes; this only bounds hostile input. */
 export const MAX_MAGNET_LENGTH = 8192;
 const MAX_NAME_LENGTH = 200;
 
@@ -16,15 +16,18 @@ export interface ParsedMagnet {
 export type MagnetResult = { ok: true; magnet: ParsedMagnet } | { ok: false; error: string };
 
 const BTIH = /^urn:btih:([0-9a-f]{40}|[a-z2-7]{32})$/i;
+// Same rules as the API (apps/api/src/lib/source.ts `canonicalizeMagnet`): any whitespace or control character
+// anywhere (after trimming the ends) and more than 8 KB (bytes) are rejected. The tests in magnet.test.ts and the
+// API's source.test.ts pin the same cases; change both together. The API rebuilds the magnet itself, so this is UX only.
 // eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u001f\u007f]/;
+const WS_OR_CONTROL = /[\s\u0000-\u001f\u007f-\u009f]/u;
 
 /** Validates one already-URL-decoded value (what `URLSearchParams.get('magnet')` returns). Never throws. */
 export function parseMagnet(input: string | null | undefined): MagnetResult {
   if (input === null || input === undefined || input.trim() === '') return { ok: false, error: 'No magnet link was provided.' };
   const uri = input.trim();
-  if (uri.length > MAX_MAGNET_LENGTH) return { ok: false, error: 'The magnet link is too long.' };
-  if (CONTROL.test(uri)) return { ok: false, error: 'The magnet link contains invalid characters.' };
+  if (new TextEncoder().encode(uri).length > MAX_MAGNET_LENGTH) return { ok: false, error: 'The magnet link is too long.' };
+  if (WS_OR_CONTROL.test(uri)) return { ok: false, error: 'The magnet link contains invalid characters.' };
   if (!/^magnet:\?/i.test(uri)) return { ok: false, error: 'That is not a magnet link (it must start with "magnet:?").' };
   let params: URLSearchParams;
   try { params = new URLSearchParams(uri.slice('magnet:?'.length)); } catch { return { ok: false, error: 'The magnet link is malformed.' }; }

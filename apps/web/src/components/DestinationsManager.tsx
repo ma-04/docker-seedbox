@@ -30,7 +30,7 @@ function DestinationCard({ d, editable, admin, onEdit }: { d: DestinationDto; ed
           <Button size="sm" disabled={test.isPending} onClick={() => test.mutate()}>{test.isPending ? 'Testing...' : 'Test'}</Button>
           {admin && <Button size="sm" variant="ghost" disabled={patch.isPending} onClick={() => patch.mutate({ enabled: !d.enabled })}>{d.enabled ? 'Disable' : 'Enable'}</Button>}
           {admin && !d.isDefault && <Button size="sm" variant="ghost" disabled={patch.isPending} onClick={() => patch.mutate({ isDefault: true })}>Make default</Button>}
-          <ConfirmButton label="Delete" confirmLabel="Yes, delete" onConfirm={() => del.mutate()} disabled={del.isPending} />
+          <ConfirmButton label="Delete" confirmLabel="Yes, delete" description={d.type === 'local' ? 'This also removes its finished jobs and deletes the files delivered to this folder from the server.' : 'This also removes its finished jobs from the list. Files already uploaded are kept.'} onConfirm={() => del.mutate()} disabled={del.isPending} />
         </div>
       ) : <p className="mt-2 text-xs text-slate-500">Managed by an administrator (read-only).</p>}
       {result && <p role="status" data-testid="test-result" className={result.ok ? 'mt-2 text-sm text-emerald-700 dark:text-emerald-400' : 'mt-2 text-sm text-red-600 dark:text-red-400'}>{result.ok ? 'OK' : 'Failed'}: {result.message}</p>}

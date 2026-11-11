@@ -1,14 +1,16 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
+import { ListObjectsV2Command } from '@aws-sdk/client-s3';
+import { makeS3Client } from '../../lib/s3client.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { enqueueDeletion } from '../../lib/deletions.js';
 import { encryptConfig, getDestination } from '../../lib/destinations.js';
 import type { TestResultDto } from '../../lib/dto.js';
 import { getAccessToken, getFile } from '../../lib/gdrive.js';
 import { assertPublicEndpoint, NetGuardError } from '../../lib/netguard.js';
-import { now, type DestinationConfig, type DestinationRow, type DestinationType, type UserRow } from '../../lib/types.js';
+import { now, type DestinationConfig, type DestinationRow, type DestinationType, type JobRow, type UserRow } from '../../lib/types.js';
 import type { Ctx } from '../context.js';
 import { applyConfigPatch, validateConfig } from '../destconfig.js';
 import { conflict, forbidden, idParam, notFound, parse, validation } from '../errors.js';
@@ -71,10 +73,7 @@ export async function testDestination(ctx: Ctx, type: DestinationType, config: D
       return { ok: true, message: `Connected. Root folder: ${f.name}` };
     }
     if (config.type === 's3') {
-      const client = new S3Client({
-        endpoint: config.endpoint, region: config.region, forcePathStyle: config.forcePathStyle ?? true, maxAttempts: 1,
-        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
-      });
+      const client = makeS3Client(config, { shared: who.shared, maxAttempts: 1 });
       try {
         const prefix = config.prefix?.replace(/^\/+/, '');
         await client.send(new ListObjectsV2Command({ Bucket: config.bucket, MaxKeys: 1, ...(prefix ? { Prefix: prefix } : {}) }),
@@ -124,10 +123,14 @@ function makeHelpers(ctx: Ctx) {
     const active = db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE destination_id = ? AND state IN ${ACTIVE_SQL}`).get(row.id) as { n: number };
     if (active.n > 0) throw conflict('Destination has active jobs; cancel them first');
     db.transaction(() => {
+      // Delivered files of a LOCAL destination go too (queued while the destination row still exists; the worker works from
+      // the stored path). Remote data is never purged here, whatever cleanup.deleteRemoteOnJobDelete says: deleting a
+      // destination is often how credentials get rotated, and that setting is about job deletes.
+      for (const j of db.prepare("SELECT * FROM jobs WHERE destination_id = ? AND state IN ('completed','failed','cancelled')").all(row.id) as JobRow[]) enqueueDeletion(db, secret, j, { remote: false });
       // Finished jobs reference the destination (no cascade): drop them with it.
       db.prepare('DELETE FROM jobs WHERE destination_id = ?').run(row.id);
       db.prepare('DELETE FROM destinations WHERE id = ?').run(row.id);
-    })();
+    }).immediate();
   }
 
   async function insert(ownerId: number | null, body: z.infer<typeof createSchema>, admin: boolean): Promise<DestinationRow> {

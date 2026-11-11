@@ -341,6 +341,36 @@ describe('rclone destinations', () => {
     expect(fs_.calls[0]!.args).toContain('--s3-no-check-bucket');
   });
 
+  it('user-owned s3 uploads run rclone through the egress proxy (per-process token, empty NO_PROXY); shared ones go direct', async () => {
+    const fs_ = fakeSpawn((_c, _a, _e, p) => p.finish(0));
+    const s = setup({ spawn: fs_.spawn, endpointGuard: async () => undefined });
+    const s3 = { type: 's3' as const, endpoint: 'https://s3.example.test', region: 'r1', accessKeyId: 'AKIAEXAMPLE0000', secretAccessKey: 's3-secret-key', bucket: 'bkt' };
+    const owner = addUser(s.db, 'carol');
+    const userDest = addDest(s.db, s3, owner);
+    const t = addTorrent(s.db, H1);
+    const j1 = addJob(s.db, owner, t, userDest);
+    const sharedDest = addDest(s.db, s3, null);
+    const j2 = addJob(s.db, owner, t, sharedDest);
+    writeFiles(join(s.content(H1), 'Pack'), { 'a.txt': 'A' });
+    await s.worker.tick();
+    s.complete(H1, 'Pack', 1, join(s.content(H1), 'Pack'));
+    await s.worker.tick(); await s.worker.idle();
+    await s.worker.tick(); await s.worker.idle();
+    expect(job(s.db, j1).state).toBe('completed');
+    expect(job(s.db, j2).state).toBe('completed');
+    const byDest = (target: string) => fs_.calls.find((c) => c.args[2]?.startsWith(target) && c.args[0] === 'copy')!;
+    const proxied = fs_.calls.filter((c) => c.env.HTTPS_PROXY);
+    const direct = fs_.calls.filter((c) => !c.env.HTTPS_PROXY);
+    expect(proxied).toHaveLength(1);
+    expect(direct).toHaveLength(1);
+    expect(proxied[0]!.env).toMatchObject({ NO_PROXY: '', no_proxy: '' });
+    expect(proxied[0]!.env.HTTPS_PROXY).toMatch(/^http:\/\/seedbox:[0-9a-f]{48}@127\.0\.0\.1:\d+$/);
+    expect(proxied[0]!.env.HTTP_PROXY).toBe(proxied[0]!.env.HTTPS_PROXY);
+    expect(byDest('DST:bkt')).toBeTruthy();
+    for (const k of ['HTTP_PROXY', 'https_proxy', 'http_proxy', 'NO_PROXY']) expect(direct[0]!.env[k]).toBeUndefined();
+    await s.worker.stop();
+  });
+
   it('cancelling mid-upload kills rclone and leaves the job cancelled', async () => {
     const fs_ = fakeSpawn(); // never exits on its own
     const s = setup({ spawn: fs_.spawn, gdrive: fakeGDrive });

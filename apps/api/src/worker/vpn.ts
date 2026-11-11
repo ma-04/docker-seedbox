@@ -3,12 +3,35 @@ import type { Logger } from 'pino';
 import type { Config } from '../lib/config.js';
 import type { Db } from '../lib/db.js';
 import { getSetting, setSetting } from '../lib/settings.js';
-import { connectVpn, type VpnClient } from '../lib/vpn.js';
+import { acquireVpnLock, connectVpn, isVpnConflict, releaseVpnLock, type VpnClient } from '../lib/vpn.js';
 import { now, type VpnConfigRow } from '../lib/types.js';
 
 export const HANDSHAKE_STALE_SEC = 180;
 
 export interface VpnReconcileDeps { db: Db; config: Config; vpn: VpnClient; log: Logger }
+
+/**
+ * Connect (or rotate) without racing the admin. The reconcile decided from a status snapshot taken earlier; by now the
+ * admin may have switched `vpn.mode` to `off` or be rotating by hand. So: take the DB lock (skip the pass when the admin
+ * holds it), re-read the mode under it, and treat the sidecar's 409 ("mode is off") as nothing to do.
+ */
+async function guardedConnect(d: VpnReconcileDeps, id?: number): Promise<void> {
+  const { db, config, vpn } = d;
+  if (getSetting(db, 'vpn.mode') === 'off') { d.log.info('vpn: mode is off; not connecting'); return; }
+  const token = acquireVpnLock(db);
+  if (!token) { d.log.info('vpn: another VPN change is in progress; skipping this pass'); return; }
+  try {
+    if (getSetting(db, 'vpn.mode') === 'off') { d.log.info('vpn: mode is off; not connecting'); return; }
+    try {
+      await connectVpn(db, config, vpn, id);
+    } catch (err) {
+      if (isVpnConflict(err)) { d.log.info('vpn: the sidecar refused /connect (mode is off); nothing to do'); return; }
+      throw err;
+    }
+    // The admin may have switched to off while /connect was in flight: converge on their choice.
+    if (getSetting(db, 'vpn.mode') === 'off') await vpn.setMode('off');
+  } finally { releaseVpnLock(db, token); }
+}
 
 /**
  * One reconcile pass. `trafficExpected` = torrents are downloading/pending; an idle WireGuard tunnel
@@ -48,7 +71,7 @@ export async function reconcileVpn(d: VpnReconcileDeps, trafficExpected: boolean
     const active = activeId !== null
       ? (db.prepare('SELECT * FROM vpn_configs WHERE id = ? AND enabled = 1').get(activeId) as VpnConfigRow | undefined)
       : undefined;
-    await connectVpn(db, config, vpn, rotation === 'manual' ? active?.id : undefined);
+    await guardedConnect(d, rotation === 'manual' ? active?.id : undefined);
     return;
   }
 
@@ -57,7 +80,7 @@ export async function reconcileVpn(d: VpnReconcileDeps, trafficExpected: boolean
     const minutes = getSetting(db, 'vpn.rotationMinutes');
     if (active && now() - (active.last_used_at ?? 0) > minutes * 60) {
       d.log.info('vpn: rotating (interval)');
-      await connectVpn(db, config, vpn);
+      await guardedConnect(d);
     }
   }
 }

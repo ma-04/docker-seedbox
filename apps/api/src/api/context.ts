@@ -9,6 +9,8 @@ export interface Ctx {
   db: Db; config: Config; vpn: VpnClient; engine: EngineClient; fetchImpl: typeof fetch;
   ssePollMs: number; ssePingMs: number; sseMaxPerUser: number; sseMaxTotal: number;
   limiter: RateLimiter;
+  /** How long POST /admin/vpn/rotate waits for the worker's VPN lock before answering 409. */
+  vpnLockWaitMs: number;
   /** DNS resolver override for the SSRF guard (tests). */
   lookup?: GuardOptions['lookup'];
 }

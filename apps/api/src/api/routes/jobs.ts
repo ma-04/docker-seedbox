@@ -1,13 +1,16 @@
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { makeS3Client } from '../../lib/s3client.js';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { deriveKey, encryptJson } from '../../lib/crypto.js';
+import { decryptJson, deriveKey, encryptJson } from '../../lib/crypto.js';
+import { enqueueDeletion } from '../../lib/deletions.js';
+import { buildMagnet, canonicalizeMagnet, mergeTrackers } from '../../lib/source.js';
 import { fullRemotePath, getDestination } from '../../lib/destinations.js';
 import type { JobFilesDto } from '../../lib/dto.js';
 import { getSetting } from '../../lib/settings.js';
 import { normalizePath, signedUrl } from '../../lib/signing.js';
-import { now, type DestinationRow, type JobFileRow, type JobRow, type TorrentRow, type UserRow } from '../../lib/types.js';
+import { now, type DestinationRow, type JobFileRow, type JobRow, type TorrentRow, type TorrentSource, type UserRow } from '../../lib/types.js';
 import type { Ctx } from '../context.js';
 import { ApiError, idParam, limitExceeded, notFound, parse, validation } from '../errors.js';
 import { ACTIVE_SQL, getJobJoin, JOB_SELECT, jobDto, type JobJoin } from '../mappers.js';
@@ -21,13 +24,31 @@ const stateQuery = z.object({ state: z.enum(['queued', 'downloading', 'uploading
 const TORRENT_FILE_MAX = 5 * 1024 * 1024;
 const WEEK = 7 * 86400;
 
-/** Cancel a live job, or delete a finished one. Used by user and admin DELETE. */
-function cancelOrDeleteJob(db: Ctx['db'], job: JobRow): void {
+/**
+ * Cancel a live job, or delete a finished one. Used by user and admin DELETE. Deleting a completed job queues the removal of
+ * its delivered files (local library always; S3 only with cleanup.deleteRemoteOnJobDelete) in the same transaction.
+ */
+function cancelOrDeleteJob(db: Ctx['db'], appSecret: string, job: JobRow): void {
   if (job.state === 'completed' || job.state === 'failed' || job.state === 'cancelled') {
-    db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id);
+    db.transaction(() => {
+      enqueueDeletion(db, appSecret, job);
+      db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id);
+    }).immediate();
   } else {
     db.prepare("UPDATE jobs SET state = 'cancelled', updated_at = ?, upload_speed = 0 WHERE id = ?").run(now(), job.id);
   }
+}
+
+/** New encrypted source for an existing torrent row after merging `parsed`'s trackers into a stored magnet; null = unchanged. */
+export function mergeSource(secret: string, existingEnc: string, parsed: ParsedSource): string | null {
+  let existing: TorrentSource;
+  try { existing = decryptJson<TorrentSource>(secret, existingEnc); } catch { return null; }
+  if (!('magnet' in existing)) return null; // a stored .torrent file is kept as is
+  let trackers: string[] = [];
+  let name: string | null = null;
+  try { const c = canonicalizeMagnet(existing.magnet); trackers = c.trackers; name = c.name; } catch { /* legacy/unsafe stored value: rebuild from the new submission */ }
+  const magnet = buildMagnet(parsed.infohash, name ?? parsed.name, mergeTrackers(trackers, parsed.trackers));
+  return magnet === existing.magnet ? null : encryptJson(secret, { magnet });
 }
 
 export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
@@ -43,7 +64,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
     db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL WHERE id = ? AND state IN ('error','removed')").run(torrentId);
   }
 
-  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, job);
+  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, ctx.config.appSecret, job);
   function retry(job: JobRow, user: UserRow): void {
     if (job.state !== 'failed' && job.state !== 'cancelled') throw new ApiError(409, 'conflict', 'Only failed or cancelled jobs can be retried');
     db.transaction(() => {
@@ -110,8 +131,11 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
       } else if (tor.state === 'error' || tor.state === 'removed') {
         db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, source_enc = ?, name = COALESCE(?, name), total_size = MAX(total_size, ?) WHERE id = ?")
           .run(sourceEnc, parsed.name, parsed.totalSize, tor.id);
-      } else if (!tor.name && parsed.name) {
-        db.prepare('UPDATE torrents SET name = ? WHERE id = ?').run(parsed.name, tor.id);
+      } else {
+        // Torrents are deduplicated by infohash across users: keep the first source but MERGE the (sanitised) trackers
+        // of this submission into it, and re-write a legacy stored magnet in canonical form.
+        const merged = mergeSource(config.appSecret, tor.source_enc, parsed);
+        db.prepare('UPDATE torrents SET name = COALESCE(name, ?), source_enc = COALESCE(?, source_enc) WHERE id = ?').run(parsed.name, merged, tor.id);
       }
       const existing = db.prepare("SELECT id FROM jobs WHERE user_id = ? AND torrent_id = ? AND destination_id = ? AND state NOT IN ('failed','cancelled') ORDER BY id DESC LIMIT 1")
         .get(user.id, tor.id, dest.id) as { id: number } | undefined;
@@ -166,10 +190,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
       }
     } else {
       const ttl = Math.min(cfg.linkTtlSeconds || 86400, WEEK);
-      const client = new S3Client({
-        endpoint: cfg.endpoint, region: cfg.region, forcePathStyle: cfg.forcePathStyle ?? true,
-        credentials: { accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey },
-      });
+      const client = makeS3Client(cfg, { shared: dest.row.owner_user_id === null }); // presigning does no network
       link = (f) => {
         const key = fullRemotePath(cfg, remote, f.path);
         if (cfg.publicBaseUrl) return `${cfg.publicBaseUrl.replace(/\/+$/, '')}/${key.split('/').map(encodeURIComponent).join('/')}`;
@@ -189,7 +210,7 @@ export function registerAdminJobs(app: FastifyInstance, ctx: Ctx): void {
     if (!j) throw notFound('Job');
     return j;
   };
-  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, job);
+  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, ctx.config.appSecret, job);
   app.get('/api/admin/jobs', async (req) => {
     const { state } = parse(stateQuery, req.query);
     const rows = db.prepare(`${JOB_SELECT} ${state ? 'WHERE j.state = ?' : ''} ORDER BY j.created_at DESC, j.id DESC LIMIT 1000`).all(...(state ? [state] : [])) as JobJoin[];

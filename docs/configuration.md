@@ -27,6 +27,8 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `LAN_IP_RANGE`, `VPN_IPV4`, `API_IP`, `WORKER_IP` | compose | Fixed addresses for `vpn`/`api`/`worker` (defaults `.2`/`.3`/`.4` of the default subnet); other containers get addresses from `LAN_IP_RANGE` (default `172.31.250.128/25`). All must be inside `LAN_CIDRS`. `API_IP` and `WORKER_IP` are the only addresses allowed to use qBittorrent's WebUI without a password (`QBT_TRUSTED_IPS`). |
 | `VPN_MTU` | vpn | MTU of the WireGuard interface, 576-1500. Unset = `1280`. An `MTU =` line in an uploaded WireGuard config takes precedence over this. See [VPN](#vpn). |
 | `VPN_DEFAULT_MODE` | vpn | `required` (default, fail closed) or `off`. Mode of the VPN sidecar after every (re)start, until the worker applies the admin's `vpn.mode` (within seconds). |
+| `EGRESS_ALLOWED_PORTS` | worker | `443,80`. Ports the worker's egress proxy lets rclone reach for **user-owned** S3 destinations (shared/admin destinations connect directly). Add a port (e.g. `443,80,9000`) only if your users' S3 services need it. |
+| `EGRESS_ALLOW_PLAIN_HTTP` | worker | Unset. `1` lets the egress proxy forward plain `http://` requests (user-owned destinations must use https, so only redirects ever need this). |
 | `LOG_LEVEL` | all | `info`. |
 
 ### Deployment variables (compose / setup.sh)
@@ -62,6 +64,7 @@ Open **Admin** after logging in as a member of `admins`.
 | `seeding.maxMinutes` | 0 | With `seeding.ratio` > 0: stop seeding after this many minutes even if the ratio is not reached; 0 = no cap. |
 | `limits.metadataTimeoutMinutes` | 30 | A magnet that gets no metadata (no peers) within this time fails and frees the user's job slot; 0 = never. |
 | `cleanup.failedGraceMinutes` | 60 | After an upload failed, keep the downloaded data this long so "Retry" re-uploads without downloading again. |
+| `cleanup.deleteRemoteOnJobDelete` | off | Removing a completed job already deletes its files from a **local** destination. With this on it also deletes the job folder in an **S3** destination (`rclone purge` of that one folder). Google Drive files are never deleted automatically. |
 | `google.oauthClientId` / `google.oauthClientSecret` | unset | Reserved for the planned per-user Google Drive connect (not a supported feature yet). |
 
 ### VPN

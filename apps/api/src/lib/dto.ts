@@ -12,6 +12,8 @@ export interface MeDto {
   user: { id: number; username: string; email: string | null; displayName: string | null };
   isAdmin: boolean;
   limits: { maxActiveJobs: number; maxTorrentBytes: number };
+  /** What deleting a completed job does to its files: local files are always deleted; S3 files only when true; Drive files are kept. */
+  cleanup: { deleteRemoteOnJobDelete: boolean };
   /** True when an admin has configured the Google OAuth client, so "Connect Google Drive" can work. */
   googleConnectAvailable: boolean;
   /** Authelia logout URL (or null in external auth mode). */

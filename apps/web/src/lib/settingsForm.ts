@@ -5,6 +5,8 @@ import { bytesToGb, gbToBytes } from './format';
 export interface LimitsForm {
   maxJobs: string; maxGb: string; minFreeGb: string; ratio: string;
   seedMaxMinutes: string; failedGraceMinutes: string; metadataTimeoutMinutes: string;
+  /** cleanup.deleteRemoteOnJobDelete (S3 only). */
+  deleteRemote: boolean;
 }
 
 export const limitsToForm = (d: SettingsDto): LimitsForm => ({
@@ -15,6 +17,7 @@ export const limitsToForm = (d: SettingsDto): LimitsForm => ({
   seedMaxMinutes: String(d['seeding.maxMinutes']),
   failedGraceMinutes: String(d['cleanup.failedGraceMinutes']),
   metadataTimeoutMinutes: String(d['limits.metadataTimeoutMinutes']),
+  deleteRemote: d['cleanup.deleteRemoteOnJobDelete'],
 });
 
 /** Only the settings that differ from the stored ones. */
@@ -27,6 +30,7 @@ export function limitsPatch(cur: SettingsDto, f: LimitsForm): Partial<SettingsDt
     'seeding.maxMinutes': Number(f.seedMaxMinutes),
     'cleanup.failedGraceMinutes': Number(f.failedGraceMinutes),
     'limits.metadataTimeoutMinutes': Number(f.metadataTimeoutMinutes),
+    'cleanup.deleteRemoteOnJobDelete': f.deleteRemote,
   };
   const patch: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(want)) if (v !== (cur as unknown as Record<string, unknown>)[k]) patch[k] = v;

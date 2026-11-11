@@ -42,6 +42,10 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
 /** Makes re-runs against a kept stack start clean: no jobs, no e2e destinations, no VPN configs, default settings. */
 async function resetState(admin: import('@playwright/test').Page): Promise<void> {
   await api(admin, 'PUT', '/api/admin/settings', { 'vpn.mode': 'off' });
+  // The app strips trackers on private addresses from submitted magnets and .torrent files (SSRF policy), and the fixture
+  // tracker is a private IP. The torrent engine adds it itself (admin-configured "add trackers to new downloads").
+  const tracker = (await getManifest()).tracker;
+  expect((await api(admin, 'PUT', '/api/admin/engine/settings', { addTrackersEnabled: true, addTrackers: tracker })).status).toBe(200);
   for (const c of (await api(admin, 'GET', '/api/admin/vpn/configs')).json as { id: number }[]) await api(admin, 'DELETE', `/api/admin/vpn/configs/${c.id}`);
   await api(admin, 'PUT', '/api/admin/settings', {
     'vpn.mode': 'off', 'vpn.rotation': 'manual', 'limits.maxActiveJobsPerUser': 5, 'limits.maxTorrentBytes': 0, 'seeding.ratio': 0,

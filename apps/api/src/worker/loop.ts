@@ -7,10 +7,13 @@ import type { Config } from '../lib/config.js';
 import type { Db } from '../lib/db.js';
 import { decryptJson } from '../lib/crypto.js';
 import { getSetting } from '../lib/settings.js';
+import { canonicalizeMagnet, SourceError } from '../lib/source.js';
 import { now, type JobRow, type TorrentRow, type TorrentSource } from '../lib/types.js';
 import type { VpnClient } from '../lib/vpn.js';
 import { DownloaderUnavailableError, type Downloader } from '../downloaders/types.js';
 import type { RcloneProc, SpawnFn } from './rclone.js';
+import { processDeletions } from './deletions.js';
+import { EgressProxy } from './egress-proxy.js';
 import { realGDrive, runUpload, type EndpointGuard, type GDriveOps } from './upload.js';
 import { reconcileVpn } from './vpn.js';
 
@@ -30,6 +33,8 @@ export interface WorkerDeps {
   gdrive?: GDriveOps;
   /** SSRF guard for user-owned S3 endpoints; defaults to the shared lib/netguard.ts `assertPublicEndpoint`. */
   endpointGuard?: EndpointGuard;
+  /** Egress proxy for user-owned destinations (default: a lazily started EgressProxy configured from EGRESS_ALLOWED_PORTS). */
+  egress?: EgressProxy;
   /** Clock in ms (tests). */
   nowMs?: () => number;
   /** How often free disk is re-checked per downloading torrent. Default 60 s. */
@@ -61,6 +66,8 @@ export class Worker {
   private stopped = false;
   private ticking: Promise<void> | null = null;
   private vpnInflight: Promise<void> | null = null;
+  private deletionsInflight: Promise<void> | null = null;
+  private deletionsAc = new AbortController();
   private lastVpn = 0;
   private lastVpnWarn = 0;
   private lastWarn = new Map<string, number>();
@@ -71,6 +78,7 @@ export class Worker {
   private lastDiskCheck = new Map<number, number>();
   private diskChecked = new Set<number>();
   private vpnApplied = false;
+  private readonly egress: EgressProxy;
 
   private clock(): number { return (this.d.nowMs ?? Date.now)(); }
   private nowSec(): number { return Math.floor(this.clock() / 1000); }
@@ -79,10 +87,12 @@ export class Worker {
     this.d = { maxUploads: 2, tickMs: 2000, vpnEveryMs: 15_000, rcloneBin: process.env.RCLONE_BIN || 'rclone', ...deps };
     this.db = deps.db;
     this.log = deps.log;
+    this.egress = deps.egress ?? new EgressProxy();
   }
 
   start(): void {
     this.stopped = false;
+    this.deletionsAc = new AbortController();
     // Apply vpn.mode before anything else: after a restart the sidecar boots fail-closed and qBittorrent has
     // already resumed its torrents; do not wait for the first periodic reconcile.
     this.lastVpn = Date.now();
@@ -102,14 +112,17 @@ export class Worker {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     for (const u of this.uploads.values()) { u.ac.abort(); u.proc?.kill('SIGTERM'); }
+    this.deletionsAc.abort();
     await this.ticking;
     await this.idle();
+    await this.egress.stop();
   }
 
   /** Resolves when no upload is running (tests, shutdown). */
   async idle(): Promise<void> {
     while (this.uploads.size) await Promise.allSettled([...this.uploads.values()].map((u) => u.done));
     if (this.vpnInflight) await this.vpnInflight;
+    if (this.deletionsInflight) await this.deletionsInflight;
   }
 
   private warnOnce(key: string, msg: string, err?: unknown, everyMs = 60_000): void {
@@ -131,6 +144,7 @@ export class Worker {
     await this.step('sweep', () => this.sweepFailed());
     await this.step('uploads', () => this.startUploads());
     await this.step('cleanup', () => this.cleanup());
+    await this.step('deletions', () => this.deletions());
     if (Date.now() - this.lastVpn >= this.d.vpnEveryMs && !this.vpnInflight) {
       this.lastVpn = Date.now();
       this.vpnInflight = this.reconcileVpn().finally(() => { this.vpnInflight = null; });
@@ -160,14 +174,23 @@ export class Worker {
    * worker was tearing the torrent down) goes back to `pending`: its data is re-downloaded rather than the job
    * sitting in `queued` forever.
    */
-  private healStranded(): void {
-    const r = this.db.prepare(
-      `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL,
-         started_at = NULL, library_path = NULL, cleanup_pending = 0
-       WHERE state IN ('removed','error')
+  private async healStranded(): Promise<void> {
+    const rows = this.db.prepare(
+      `SELECT id, library_path FROM torrents WHERE state IN ('removed','error')
          AND EXISTS (SELECT 1 FROM jobs WHERE jobs.torrent_id = torrents.id AND jobs.state IN ${ACTIVE})`,
-    ).run();
-    if (r.changes > 0) this.log.warn({ torrents: r.changes }, 'torrents with active jobs were removed/failed; resetting them to pending');
+    ).all() as { id: number; library_path: string | null }[];
+    let healed = 0;
+    for (const r of rows) {
+      // Keep the library copy when it is still there: addPending then serves the job from it instead of re-downloading.
+      const keep = r.library_path && (await exists(r.library_path)) ? r.library_path : null;
+      healed += this.db.prepare(
+        `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL,
+           started_at = NULL, library_path = ?, cleanup_pending = 0
+         WHERE id = ? AND state IN ('removed','error')
+           AND EXISTS (SELECT 1 FROM jobs WHERE jobs.torrent_id = torrents.id AND jobs.state IN ${ACTIVE})`,
+      ).run(keep, r.id).changes;
+    }
+    if (healed > 0) this.log.warn({ torrents: healed }, 'torrents with active jobs were removed/failed; resetting them to pending');
   }
 
   // --- step 1: pending torrents -> downloader -------------------------------------------------
@@ -177,7 +200,8 @@ export class Worker {
     const savePath = join(this.d.config.downloadsDir, 'incomplete', t.infohash);
     await this.d.downloader.add({
       id: t.infohash,
-      source: 'magnet' in src ? { magnet: src.magnet } : { torrent: Buffer.from(src.torrentB64, 'base64') },
+      // Re-canonicalised on every add: rows stored before the source policy existed may hold the user's raw string.
+      source: 'magnet' in src ? { magnet: canonicalizeMagnet(src.magnet).magnet } : { torrent: Buffer.from(src.torrentB64, 'base64') },
       savePath,
     });
     return savePath;
@@ -231,6 +255,7 @@ export class Worker {
         this.missingSince.delete(t.id);
         this.diskChecked.delete(t.id);
       } catch (err) {
+        if (err instanceof SourceError) { this.failTorrent(t, `Invalid torrent source: ${err.message}`); continue; }
         const n = (this.addFailures.get(t.id) ?? 0) + 1;
         this.addFailures.set(t.id, n);
         this.warnOnce(`add:${t.id}`, `adding torrent ${t.id} failed (attempt ${n})`, err, 30_000);
@@ -412,12 +437,24 @@ export class Worker {
       entry.done = runUpload({
         db, config: this.d.config, downloader: this.d.downloader, log: this.log,
         spawn: this.d.spawn ?? ((cmd, args, opts) => nodeSpawn(cmd, args, { env: opts.env, stdio: ['ignore', 'ignore', 'pipe'] })),
-        rcloneBin: this.d.rcloneBin, gdrive: this.d.gdrive ?? realGDrive, endpointGuard: this.d.endpointGuard,
+        rcloneBin: this.d.rcloneBin, gdrive: this.d.gdrive ?? realGDrive, endpointGuard: this.d.endpointGuard, egress: this.egress,
         onProc: (_id, proc) => { entry.proc = proc; },
       }, c.id, ac.signal).catch((e) => this.log.error({ err: String(e) }, 'upload crashed'))
         .finally(() => { this.uploads.delete(c.id); });
       this.uploads.set(c.id, entry);
     }
+  }
+
+  // --- step 6: delete files of removed jobs ---------------------------------------------------------
+
+  /** Off the tick (an S3 purge can take minutes against a slow endpoint and must not freeze the state machine); one pass at a time. */
+  private deletions(): void {
+    if (this.stopped || this.deletionsInflight) return;
+    this.deletionsInflight = processDeletions({
+      db: this.db, config: this.d.config, log: this.log, rcloneBin: this.d.rcloneBin, egress: this.egress, endpointGuard: this.d.endpointGuard,
+      signal: this.deletionsAc.signal,
+      spawn: this.d.spawn ?? ((cmd, args, opts) => nodeSpawn(cmd, args, { env: opts.env, stdio: ['ignore', 'ignore', 'pipe'] })),
+    }).catch((e) => this.log.error({ err: String(e) }, 'deletions crashed')).finally(() => { this.deletionsInflight = null; });
   }
 
   // --- step 5: release torrents nobody needs ------------------------------------------------------

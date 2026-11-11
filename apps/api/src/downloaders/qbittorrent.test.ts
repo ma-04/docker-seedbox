@@ -34,6 +34,26 @@ function fakeQbt(opts: { requireLogin?: boolean; addReply?: string } = {}) {
 }
 
 describe('QbittorrentDownloader', () => {
+  it.each([
+    ['LF', 'magnet:?xt=urn:btih:' + 'a'.repeat(40) + '&dn=x\nhttp://172.31.250.1/x'],
+    ['CR', 'magnet:?xt=urn:btih:' + 'a'.repeat(40) + '&dn=x\rhttp://172.31.250.1/x'],
+    ['CRLF', 'magnet:?xt=urn:btih:' + 'a'.repeat(40) + '\r\n'],
+    ['space', 'magnet:?xt=urn:btih:' + 'a'.repeat(40) + ' http://x'],
+    ['not a magnet', 'http://172.31.250.1/x'],
+  ])('never sends a urls value with %s', async (_n, bad) => {
+    const q = fakeQbt();
+    const d = new QbittorrentDownloader({ baseUrl: 'http://qbt:8080/', fetchImpl: q.fetchImpl });
+    await expect(d.add({ id: 'a'.repeat(40), source: { magnet: bad }, savePath: '/p' })).rejects.toThrow(/malformed magnet/);
+    expect(q.calls.some((c) => c.path === '/torrents/add')).toBe(false);
+  });
+  it('sends exactly one urls field', async () => {
+    const q = fakeQbt();
+    const d = new QbittorrentDownloader({ baseUrl: 'http://qbt:8080/', fetchImpl: q.fetchImpl });
+    await d.add({ id: 'a'.repeat(40), source: { magnet: 'magnet:?xt=urn:btih:' + 'a'.repeat(40) }, savePath: '/p' });
+    const fd = q.calls.find((c) => c.path === '/torrents/add')!.body as FormData;
+    expect(fd.getAll('urls')).toEqual(['magnet:?xt=urn:btih:' + 'a'.repeat(40)]);
+  });
+
   it('adds a magnet with category, savepath and Original layout', async () => {
     const q = fakeQbt();
     const d = new QbittorrentDownloader({ baseUrl: 'http://qbt:8080/', fetchImpl: q.fetchImpl });
@@ -58,9 +78,9 @@ describe('QbittorrentDownloader', () => {
   it('"Fails." is fine when the torrent already exists, an error otherwise', async () => {
     const q = fakeQbt({ addReply: 'Fails.' });
     const d = new QbittorrentDownloader({ baseUrl: 'http://qbt', fetchImpl: q.fetchImpl });
-    await expect(d.add({ id: 'a'.repeat(40), source: { magnet: 'm' }, savePath: '/p' })).rejects.toThrow(/rejected/);
+    await expect(d.add({ id: 'a'.repeat(40), source: { magnet: 'magnet:?xt=urn:btih:' + 'a'.repeat(40) }, savePath: '/p' })).rejects.toThrow(/rejected/);
     q.torrents.push({ hash: 'a'.repeat(40), name: 'n', size: 1, progress: 0, dlspeed: 0, state: 'metaDL', ratio: 0, content_path: '', save_path: '' });
-    await expect(d.add({ id: 'a'.repeat(40), source: { magnet: 'm' }, savePath: '/p' })).resolves.toBeUndefined();
+    await expect(d.add({ id: 'a'.repeat(40), source: { magnet: 'magnet:?xt=urn:btih:' + 'a'.repeat(40) }, savePath: '/p' })).resolves.toBeUndefined();
   });
 
   it('maps status fields; null when unknown', async () => {
