@@ -3,12 +3,14 @@
 #   docker build -f apps/api/Dockerfile .
 # The worker overrides CMD with `node dist/worker.js`.
 
-ARG NODE_IMAGE=node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
+# Base images are literal `FROM image:tag@sha256:...` lines (not ARGs): Dependabot only sees literal FROM lines, and it
+# updates tag and digest together.
+FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d AS node-base
 # Pinned: a floating tag would change the uploader (and its flags) under a running deployment.
-ARG RCLONE_IMAGE=rclone/rclone:1.74.4@sha256:c61954aaa32328a5486715dd063a81c7879f5195ad3505cd362deddd509dc4a1
+FROM rclone/rclone:1.74.4@sha256:c61954aaa32328a5486715dd063a81c7879f5195ad3505cd362deddd509dc4a1 AS rclone
 
 # --- Build tools for native modules (better-sqlite3 falls back to node-gyp if no prebuilt binary matches).
-FROM ${NODE_IMAGE} AS build-base
+FROM node-base AS build-base
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ \
  && rm -rf /var/lib/apt/lists/*
@@ -41,9 +43,7 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
  && npm cache clean --force
 
 # --- Runtime.
-FROM ${RCLONE_IMAGE} AS rclone
-
-FROM ${NODE_IMAGE} AS runtime
+FROM node-base AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini ca-certificates \
  && rm -rf /var/lib/apt/lists/*
