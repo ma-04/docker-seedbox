@@ -1,65 +1,119 @@
 name: Release images
 
-# Publishes the five images to GHCR as ghcr.io/<owner>/docker-seedbox-<name>. See docs/releasing.md.
+# Publishes the five images to GHCR as ghcr.io/<owner>/docker-seedbox-<name>, each one multi-arch (linux/amd64 +
+# linux/arm64, both built natively: arm64 on GitHub's arm runner, no QEMU). See docs/releasing.md.
 #
-#   tag vX.Y.Z        -> :X.Y.Z, :X.Y and :latest
-#   tag vX.Y.Z-rc.N   -> :X.Y.Z-rc.N only (a pre-release never moves :X.Y or :latest)
-#   push to main      -> :edge only
-#   workflow_dispatch -> same rules, for the ref it is run on (a tag or main; anything else is refused)
+#   tag vX.Y.Z         -> :X.Y.Z, plus :X.Y / :X / :latest each only if X.Y.Z is the highest stable version of that
+#                         line (.github/scripts/release-tags.sh; no :X while X = 0), and a GitHub Release
+#   tag vX.Y.Z-rc.N    -> :X.Y.Z-rc.N only (a pre-release never moves anything)
+#   push to main       -> :sha-<short> (immutable) and :edge (moving; only while that commit is still the head of main)
+#   workflow_dispatch  -> run it ON a tag (`gh workflow run release.yml --ref vX.Y.Z`): the same as pushing that tag.
+#                         On any other ref only with dry-run: true.
+#   pull request that changes this pipeline, or dispatch with dry-run: true
+#                      -> DRY RUN: the full native build + smoke tests + arm64 VPN/e2e suites + merge + attestation +
+#                         verification, under the throw-away tag :pr-<N>-test (:dryrun-<run id>), deleted at the end.
+#                         Fork and Dependabot PRs (read-only token) build and smoke-test but push nothing.
 #
-# Nothing is tagged until (1) the whole CI suite (ci.yml, including the e2e job) is green for this exact commit and
-# (2) all five images were built and pushed (untagged, by digest). Only then one job applies the tags to all five at
-# once, so a red or partial build cannot leave a mixed set of images under :latest / :X.Y.Z.
+# Order: guard -> { CI suite (ci.yml) | native build of 5 images x 2 arches, pushed untagged by digest | arm64 VPN +
+# e2e suites (releases and dry runs) } -> merge (per image: one multi-arch index under the IMMUTABLE tag, provenance
+# attestation) -> publish (one job: the MOVING tags for all five, :latest last) -> verify -> GitHub Release.
+# Nothing gets any tag unless the whole CI suite and all ten builds/smoke tests are green; nothing moves unless all
+# five indexes exist.
 on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/images.yml
+      - .github/scripts/**
   workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Dry run (throw-away tag, deleted afterwards) instead of publishing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+# Runs do not queue behind each other (GitHub keeps only ONE pending run per group and cancels the rest, which could
+# silently drop a release). Moving tags is serialized by the `publish` job's own concurrency group instead.
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('release-pr-{0}', github.event.pull_request.number) || format('release-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
+  IMAGES: api web gateway vpn qbittorrent
 
 jobs:
   guard:
     name: Check the ref
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
-      kind: ${{ steps.ref.outputs.kind }}
+      kind: ${{ steps.ref.outputs.kind }}            # edge | release | prerelease | dryrun
+      version: ${{ steps.ref.outputs.version }}      # baked into the images (web footer, OCI version)
+      immutable: ${{ steps.ref.outputs.immutable }}  # the tag the merge job creates; never moved afterwards
+      push: ${{ steps.ref.outputs.push }}            # false: build + smoke-test only (fork / Dependabot dry runs)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Tag rules self-test
+        run: .github/scripts/release-tags.sh --self-test
       - id: ref
         env:
+          EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          ACTOR: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          if [ "$REF" = refs/heads/main ]; then
-            echo "kind=edge" >> "$GITHUB_OUTPUT"
-          elif [ "${REF#refs/tags/}" != "$REF" ]; then
+          short=${GITHUB_SHA:0:7}
+          push=true
+          version_tag() {
             if ! printf '%s' "$REF_NAME" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
               echo "::error::tag '$REF_NAME' is not vMAJOR.MINOR.PATCH[-prerelease]"; exit 1
             fi
             # A release must be a commit that is on main (it has gone through review and CI there).
-            # fetch-depth: 0 above already fetched every branch, so origin/main exists (no credentials needed here).
-            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            # fetch-depth: 0 above fetched every branch, so origin/main exists (no credentials needed).
+            if ! git merge-base --is-ancestor "$(git rev-parse "$GITHUB_SHA^{commit}")" origin/main; then
               echo "::error::tag '$REF_NAME' points at a commit that is not on main"; exit 1
             fi
-            case "$REF_NAME" in *-*) echo "kind=prerelease" >> "$GITHUB_OUTPUT" ;; *) echo "kind=release" >> "$GITHUB_OUTPUT" ;; esac
+            version=${REF_NAME#v}; immutable=$version
+            case "$version" in *-*) kind=prerelease ;; *) kind=release ;; esac
+          }
+          if [ "$EVENT" = pull_request ]; then
+            kind=dryrun; version="pr-$PR_NUMBER-test"; immutable=$version
+            # A fork's or Dependabot's token cannot write packages: build and smoke-test, push nothing.
+            if [ "$SAME_REPO" != true ] || [ "$ACTOR" = 'dependabot[bot]' ]; then push=false; fi
+          elif [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then
+            kind=dryrun; version="dryrun-$RUN_ID"; immutable=$version
+          elif [ "${REF#refs/tags/}" != "$REF" ]; then
+            version_tag   # push of a tag, or a dispatch run on a tag
+          elif [ "$EVENT" = push ] && [ "$REF" = refs/heads/main ]; then
+            kind=edge; version="edge-$short"; immutable="sha-$short"
           else
-            echo "::error::only tags (vX.Y.Z) and main can be published, not $REF"; exit 1
+            echo "::error::only a vX.Y.Z tag (pushed, or dispatched with --ref vX.Y.Z), a push to main or a dry run can run this, not $EVENT on $REF"; exit 1
           fi
+          {
+            echo "kind=$kind"; echo "version=$version"; echo "immutable=$immutable"; echo "push=$push"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release plan"
+            echo "| kind | version | immutable tag | push | commit |"
+            echo "|---|---|---|---|---|"
+            echo "| $kind | $version | \`$immutable\` | $push | \`$GITHUB_SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   ci:
     name: CI
@@ -67,88 +121,95 @@ jobs:
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
+    with:
+      build-images: false   # the `build` job below builds and smoke-tests the same matrix (and more)
 
-  push-digests:
-    name: Build and push ${{ matrix.image }} (untagged)
-    needs: [guard, ci]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+  build:
+    name: Native build
+    needs: guard
+    uses: ./.github/workflows/images.yml
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - { image: api, context: ., file: apps/api/Dockerfile }
-          - { image: web, context: ., file: apps/web/Dockerfile }
-          - { image: gateway, context: services/gateway, file: services/gateway/Dockerfile }
-          - { image: vpn, context: services/vpn, file: services/vpn/Dockerfile }
-          - { image: qbittorrent, context: services/qbittorrent, file: services/qbittorrent/Dockerfile }
+    with:
+      push: ${{ needs.guard.outputs.push == 'true' }}
+      version: ${{ needs.guard.outputs.version }}
+
+  # The CI suite above runs the VPN and e2e suites on amd64. For releases (and dry runs) they also run on the native
+  # arm64 runner; they build their images from the same commit there. Not run for :edge (smoke tests only).
+  arm64-vpn:
+    name: VPN sidecar kill-switch test (arm64)
+    needs: guard
+    if: needs.guard.outputs.kind != 'edge'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-
-      - name: Lower-case image name
-        id: name
-        run: echo "ref=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/docker-seedbox-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: ${{ steps.name.outputs.ref }}
-          labels: |
-            org.opencontainers.image.licenses=AGPL-3.0-only
-
-      # Pushed by digest only: the image exists in the registry but carries no tag until the `tag` job below.
-      - id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.file }}
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            VITE_APP_VERSION=${{ github.ref_name }}
-          labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ steps.name.outputs.ref }},push-by-digest=true,name-canonical=true,push=true
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,scope=${{ matrix.image }},mode=max
-
-      - name: Record the digest
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+      - name: Kernel WireGuard on this runner
         run: |
-          mkdir -p digests
-          printf '%s' "$DIGEST" > "digests/${{ matrix.image }}"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: digest-${{ matrix.image }}
-          path: digests/${{ matrix.image }}
-          if-no-files-found: error
-          retention-days: 1
+          set -eux
+          uname -a
+          sudo modprobe wireguard || true
+          sudo ip link add wgprobe0 type wireguard
+          sudo ip link del wgprobe0
+      - name: Hermetic WireGuard stack (kill switch, rotation, LAN policy, qBittorrent seeding)
+        run: services/vpn/test/run.sh
 
-  tag:
-    name: Tag all five images
-    needs: [guard, push-digests]
-    runs-on: ubuntu-latest
+  arm64-e2e:
+    name: End-to-end (Playwright, arm64)
+    needs: guard
+    if: needs.guard.outputs.kind != 'edge'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Hermetic stack + Playwright suite
+        run: e2e/run.sh
+      - name: Upload report, traces and container logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-output-arm64
+          path: e2e/.out
+          retention-days: 7
+          if-no-files-found: ignore
+          include-hidden-files: true
+
+  merge:
+    name: Merge ${{ matrix.image }} (amd64 + arm64)
+    needs: [guard, ci, build, arm64-vpn, arm64-e2e]
+    # Every gate must be green; the arm64 suites may only be skipped for :edge. (`!cancelled()` instead of the default
+    # `success()` because a skipped arm64 job would otherwise skip this job.)
+    if: >-
+      !cancelled() && needs.guard.outputs.push == 'true'
+      && needs.guard.result == 'success' && needs.ci.result == 'success' && needs.build.result == 'success'
+      && (needs.arm64-vpn.result == 'success' || (needs.arm64-vpn.result == 'skipped' && needs.guard.outputs.kind == 'edge'))
+      && (needs.arm64-e2e.result == 'success' || (needs.arm64-e2e.result == 'skipped' && needs.guard.outputs.kind == 'edge'))
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+      id-token: write       # sigstore signing identity for the attestation
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        image: [api, web, gateway, vpn, qbittorrent]
+    env:
+      IMAGE: ${{ matrix.image }}
+      IMMUTABLE: ${{ needs.guard.outputs.immutable }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: digest-*
+          pattern: digest-${{ matrix.image }}-*
           path: digests
           merge-multiple: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
@@ -157,58 +218,269 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Apply the tags
-        env:
-          KIND: ${{ needs.guard.outputs.kind }}
-          REF_NAME: ${{ github.ref_name }}
+      - name: Create the multi-arch index
+        id: index
         run: |
           set -euo pipefail
-          case "$KIND" in
-            edge) tags=(edge) ;;
-            prerelease) v=${REF_NAME#v}; tags=("$v") ;;
-            release) v=${REF_NAME#v}; tags=("$v" "${v%.*}" latest) ;;
-            *) echo "::error::unexpected kind '$KIND'"; exit 1 ;;
-          esac
-          owner=${GITHUB_REPOSITORY_OWNER,,}
-          for image in api web gateway vpn qbittorrent; do
-            test -s "digests/$image" || { echo "::error::no digest for $image"; exit 1; }
+          ref="${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/docker-seedbox-${IMAGE}"
+          srcs=()
+          for arch in amd64 arm64; do
+            d=$(cat "digests/${IMAGE}-${arch}")
+            [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest for ${IMAGE}/${arch}"; exit 1; }
+            srcs+=("$ref@$d")
           done
-          for image in api web gateway vpn qbittorrent; do
-            ref="${REGISTRY}/${owner}/docker-seedbox-${image}"
-            args=()
-            for t in "${tags[@]}"; do args+=(-t "$ref:$t"); done
-            docker buildx imagetools create "${args[@]}" "$ref@$(cat "digests/$image")"
-          done
+          # The OCI annotations of the per-arch image manifest (title, description, source, revision, version,
+          # licenses, created; written by images.yml) are copied onto the index.
+          top=$(docker buildx imagetools inspect --raw "${srcs[0]}")
+          m=$(jq -r 'if .manifests then (.manifests[] | select(.platform.architecture == "amd64") | .digest) else empty end' <<<"$top")
+          if [ -n "$m" ]; then man=$(docker buildx imagetools inspect --raw "$ref@$m"); else man=$top; fi
+          ann=()
+          while IFS= read -r kv; do ann+=(--annotation "index:$kv"); done < <(jq -r '.annotations // {} | to_entries[] | "\(.key)=\(.value)"' <<<"$man")
+          [ "${#ann[@]}" -gt 0 ] || { echo "::error::the per-arch manifest carries no annotations"; exit 1; }
+          docker buildx imagetools create "${ann[@]}" -t "$ref:$IMMUTABLE" "${srcs[@]}"
 
-  attest:
-    name: Attest ${{ matrix.image }}
-    needs: [guard, tag]
-    runs-on: ubuntu-latest
+          # Check what was pushed: both platforms, and each one's attestation manifest (provenance + SBOM) survived.
+          raw=$(docker buildx imagetools inspect --raw "$ref:$IMMUTABLE")
+          echo "$raw" | jq .
+          for arch in amd64 arm64; do
+            pd=$(jq -r --arg a "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a) | .digest' <<<"$raw")
+            [ -n "$pd" ] || { echo "::error::index has no linux/$arch image"; exit 1; }
+            jq -e --arg d "$pd" '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest" and .annotations["vnd.docker.reference.digest"] == $d)] | length == 1' <<<"$raw" >/dev/null \
+              || { echo "::error::linux/$arch has no attestation manifest in the index"; exit 1; }
+          done
+          for kind in SBOM Provenance; do
+            out=$(docker buildx imagetools inspect "$ref:$IMMUTABLE" --format "{{ json .$kind }}")
+            for arch in amd64 arm64; do
+              jq -e --arg p "linux/$arch" 'has($p) and (.[$p] | length > 0)' <<<"$out" >/dev/null \
+                || { echo "::error::no $kind for linux/$arch"; echo "$out" | head -c 2000; exit 1; }
+            done
+          done
+          digest=$(docker buildx imagetools inspect "$ref:$IMMUTABLE" --format '{{ json .Manifest }}' | jq -r .digest)
+          [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::cannot read the index digest"; exit 1; }
+          echo "name=$ref" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          mkdir -p index && printf '%s' "$digest" > "index/$IMAGE"
+          echo "\`$ref:$IMMUTABLE\` = \`$digest\` (linux/amd64 + linux/arm64, SBOM + SLSA provenance per platform)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: index-${{ matrix.image }}
+          path: index/${{ matrix.image }}
+          if-no-files-found: error
+          retention-days: 7
+      # GitHub artifact attestation (SLSA build provenance, Sigstore-signed) for the multi-arch index digest:
+      # `gh attestation verify oci://ghcr.io/<owner>/docker-seedbox-<name>:<tag> --repo <owner>/docker-seedbox`.
+      # Dry runs keep it out of the registry (only GitHub's attestation store).
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ steps.index.outputs.name }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: ${{ needs.guard.outputs.kind != 'dryrun' }}
+
+  publish:
+    name: Move the tags (all five images)
+    needs: [guard, merge]
+    if: needs.guard.outputs.kind != 'dryrun' && needs.merge.result == 'success'
+    runs-on: ubuntu-24.04
+    # One tag move at a time per kind: two release runs never interleave (each computes "highest version" from the
+    # repository's tags at that moment, so their order does not matter). NOTE: GitHub keeps one PENDING job per group;
+    # a third release run arriving meanwhile cancels the waiting one, which then simply needs a re-run.
+    concurrency:
+      group: release-publish-${{ needs.guard.outputs.kind == 'edge' && 'edge' || 'versions' }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
-      id-token: write       # sigstore signing identity
-      attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [api, web, gateway, vpn, qbittorrent]
+    outputs:
+      moving: ${{ steps.tags.outputs.moving }}
+      latest: ${{ steps.tags.outputs.latest }}
+    env:
+      KIND: ${{ needs.guard.outputs.kind }}
+      VERSION: ${{ needs.guard.outputs.version }}
+      IMMUTABLE: ${{ needs.guard.outputs.immutable }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: digest-${{ matrix.image }}
-          path: digests
-      - id: d
-        run: |
-          echo "name=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/docker-seedbox-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
-          echo "digest=$(cat "digests/${{ matrix.image }}")" >> "$GITHUB_OUTPUT"
+          pattern: index-*
+          path: index
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+      - name: Decide the moving tags
+        id: tags
+        run: |
+          set -euo pipefail
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          case "$KIND" in
+            edge)
+              head=$(git ls-remote "$url" refs/heads/main | cut -f1)
+              if [ "$head" = "$GITHUB_SHA" ]; then moving=edge
+              else moving=""; echo "::notice::main has moved on to $head; :edge is left to that run (this commit keeps :$IMMUTABLE)"; fi ;;
+            prerelease) moving="" ;;
+            # Fresh list of the repository's tags, read now (not when this run started).
+            release) moving=$(git ls-remote --tags "$url" 'v*' | .github/scripts/release-tags.sh "$VERSION" | paste -sd' ' -) ;;
+            *) echo "::error::unexpected kind '$KIND'"; exit 1 ;;
+          esac
+          echo "moving=$moving" >> "$GITHUB_OUTPUT"
+          case " $moving " in *" latest "*) echo "latest=true" ;; *) echo "latest=false" ;; esac >> "$GITHUB_OUTPUT"
+          echo "Moving tags: ${moving:-none} (immutable: $IMMUTABLE)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Move them
+        env:
+          MOVING: ${{ steps.tags.outputs.moving }}
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          # All five must exist under the immutable tag with the digest this run produced, before anything moves.
+          for image in $IMAGES; do
+            ref="${REGISTRY}/${owner}/docker-seedbox-${image}"; d=$(cat "index/$image")
+            now=$(docker buildx imagetools inspect "$ref:$IMMUTABLE" --format '{{ json .Manifest }}' | jq -r .digest)
+            [ "$now" = "$d" ] || { echo "::error::$ref:$IMMUTABLE is $now, this run built $d"; exit 1; }
+          done
+          # Tag by tag across all five images; release-tags.sh lists `latest` last. Re-running is harmless: the same
+          # digest gets the same tags again.
+          for t in $MOVING; do
+            for image in $IMAGES; do
+              ref="${REGISTRY}/${owner}/docker-seedbox-${image}"; d=$(cat "index/$image")
+              docker buildx imagetools create -t "$ref:$t" "$ref@$d"
+              echo "\`$ref:$t\` -> \`$d\`" >> "$GITHUB_STEP_SUMMARY"
+            done
+          done
+
+  verify:
+    name: Verify attestations
+    needs: [guard, merge, publish]
+    if: >-
+      !cancelled() && needs.merge.result == 'success'
+      && (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && needs.guard.outputs.kind == 'dryrun'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    env:
+      IMMUTABLE: ${{ needs.guard.outputs.immutable }}
+      MOVING: ${{ needs.publish.outputs.moving }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          subject-name: ${{ steps.d.outputs.name }}
-          subject-digest: ${{ steps.d.outputs.digest }}
-          push-to-registry: true
+          pattern: index-*
+          path: index
+          merge-multiple: true
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # What a user runs (docs/deployment.md), by every tag this run wrote: the attestation must exist, be signed for
+      # this repository's release workflow and match the digest the tag resolves to.
+      - name: gh attestation verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          for image in $IMAGES; do
+            ref="${REGISTRY}/${owner}/docker-seedbox-${image}"
+            for t in "$IMMUTABLE" $MOVING; do
+              gh attestation verify "oci://$ref:$t" --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+            done
+            gh attestation verify "oci://$ref@$(cat "index/$image")" --repo "$GITHUB_REPOSITORY" --format json \
+              | jq -r '.[0].verificationResult.statement.subject[0] | "\(.name)@sha256:\(.digest.sha256) verified"'
+          done
+
+  github-release:
+    name: GitHub Release
+    needs: [guard, publish, verify]
+    if: needs.guard.outputs.kind == 'release' && needs.verify.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # the only job that writes to the repository
+    env:
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.guard.outputs.version }}
+      MOVING: ${{ needs.publish.outputs.moving }}
+      LATEST: ${{ needs.publish.outputs.latest }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: index-*
+          path: index
+          merge-multiple: true
+      - name: Create or update the release
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          {
+            echo "## Images"
+            echo
+            echo "Multi-arch (linux/amd64 + linux/arm64). Tags: \`$VERSION\`${MOVING:+, also \`${MOVING// /\`, \`}\`}."
+            echo
+            echo "| Image | Digest |"
+            echo "|---|---|"
+            for image in $IMAGES; do
+              echo "| \`${REGISTRY}/${owner}/docker-seedbox-${image}:${VERSION}\` | \`$(cat "index/$image")\` |"
+            done
+            echo
+            echo "## Upgrade"
+            echo
+            echo '```sh'
+            echo "./setup.sh backup"
+            echo "./setup.sh update --version $VERSION"
+            echo '```'
+            echo
+            echo "Database migrations run when the API starts and cannot be undone: keep the backup until you are happy."
+            echo
+            echo "## Verify"
+            echo
+            echo '```sh'
+            echo "for i in $IMAGES; do gh attestation verify \"oci://${REGISTRY}/${owner}/docker-seedbox-\$i:${VERSION}\" --repo ${GITHUB_REPOSITORY} || break; done"
+            echo '```'
+            echo
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$TAG" --jq .body
+          } > notes.md
+          cat notes.md
+          # setup.sh follows GitHub's "latest release": only the highest stable version may claim it.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes.md --latest="$LATEST"
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md --latest="$LATEST"
+          fi
+
+  cleanup:
+    name: Delete the dry-run tag
+    needs: [guard, merge, verify]
+    # Also after a failure: the throw-away tag must not outlive the run.
+    if: always() && needs.guard.outputs.kind == 'dryrun' && needs.guard.outputs.push == 'true' && needs.merge.result != 'skipped'
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    env:
+      IMMUTABLE: ${{ needs.guard.outputs.immutable }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Deletes only the package version carrying the throw-away tag (the multi-arch index). Its per-arch children stay
+      # as untagged versions, like those of every superseded :edge build.
+      - run: |
+          set -uo pipefail
+          owner=$GITHUB_REPOSITORY_OWNER
+          case "$(gh api "users/$owner" --jq .type)" in Organization) base="orgs/$owner" ;; *) base="users/$owner" ;; esac
+          rc=0
+          for image in $IMAGES; do
+            pkg="docker-seedbox-$image"
+            ids=$(gh api --paginate "$base/packages/container/$pkg/versions?per_page=100" \
+                    --jq ".[] | select(.metadata.container.tags | index(\"$IMMUTABLE\")) | .id") || { rc=1; continue; }
+            for id in $ids; do
+              if gh api -X DELETE "$base/packages/container/$pkg/versions/$id" >/dev/null; then echo "deleted $pkg:$IMMUTABLE (version $id)"
+              else echo "::warning::could not delete $pkg:$IMMUTABLE (version $id)"; rc=1; fi
+            done
+          done
+          exit $rc

@@ -5,6 +5,11 @@ name: CI
 on:
   pull_request:
   workflow_call:
+    inputs:
+      build-images:
+        description: Build and smoke-test the images (release.yml passes false and builds them itself)
+        type: boolean
+        default: true
   workflow_dispatch:
 
 permissions:
@@ -77,34 +82,18 @@ jobs:
           test "$(stat -c %a deploy/.env)" = 600
           test "$(stat -c %a deploy/authelia/users/users_database.yml)" = 600
 
+  # Every image, natively for linux/amd64 AND linux/arm64 (arm64 on GitHub's arm runner, free for public repositories;
+  # per image+arch build cache), each smoke-tested on the runner that built it. release.yml skips this (build-images:
+  # false) because its own build of the same matrix is a superset (it also pushes and tests the pushed digests).
   images:
-    name: Build ${{ matrix.image }} image
-    runs-on: ubuntu-latest
+    name: Images
+    if: inputs.build-images != false
+    uses: ./.github/workflows/images.yml
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { image: api, context: ., file: apps/api/Dockerfile }
-          - { image: web, context: ., file: apps/web/Dockerfile }
-          - { image: gateway, context: services/gateway, file: services/gateway/Dockerfile }
-          - { image: vpn, context: services/vpn, file: services/vpn/Dockerfile }
-          - { image: qbittorrent, context: services/qbittorrent, file: services/qbittorrent/Dockerfile }
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.file }}
-          push: false
-          build-args: |
-            VITE_APP_VERSION=ci-${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+    with:
+      push: false
+      version: ci-${{ github.sha }}
 
   vpn-sidecar:
     name: VPN sidecar kill-switch test

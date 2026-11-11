@@ -6,7 +6,7 @@
 #   ./setup.sh                       interactive install
 #   ./setup.sh --domain seedbox.example.com --admin-email me@example.com --yes
 #   ./setup.sh add-user              add a login (Authelia mode)
-#   ./setup.sh update                move to the newest release (or --version X.Y.Z) and restart
+#   ./setup.sh update                move to the newest release (or --version X.Y.Z|latest|edge) and restart
 #   ./setup.sh backup                archive .env, the Authelia users and the data volume
 #   ./setup.sh restore FILE          put such an archive back
 #   ./setup.sh doctor                check DNS, containers, VPN prerequisites, disk space
@@ -37,7 +37,8 @@ Usage: ./setup.sh [command] [options]
 Commands:
   install (default)   configure, pull/build images and start the stack
   add-user            add an Authelia user (--admin-user NAME --admin-password PW --admin-email MAIL [--group admins])
-  update              move to the newest release (or --version X.Y.Z), pull and restart; add --build to rebuild from this clone
+  update              move to the newest release (or --version X.Y.Z|latest|edge), pull and restart; on edge it stays on
+                      edge unless --version says otherwise; add --build to rebuild from this clone
   backup              archive deploy/.env, the Authelia users and the data volume (--out FILE_OR_DIR)
   restore FILE        put a backup archive back (replaces .env, users and the data volume; asks first unless --yes)
   doctor              diagnose DNS, containers, the WireGuard kernel module, disk space, APP_SECRET and version
@@ -54,8 +55,9 @@ Install options (each also readable from the environment as SEEDBOX_<NAME>, e.g.
   --proxy MODE           bundled | external | none
   --proxy-network NAME   Docker network of your existing reverse proxy (external mode)
   --acme-email MAIL      e-mail for Let's Encrypt (bundled / nginx-proxy + acme-companion)
-  --version VERSION      image version to run: X.Y.Z, edge, or local (default: newest release; with none published
-                         yet, or none for this registry, the images are built from this clone)
+  --version VERSION      image version to run: X.Y.Z, latest (= the newest release, pinned as its X.Y.Z), edge (the
+                         head of main, CI-tested, not for production) or local (default: the newest release; with none
+                         published yet, edge; with neither in the registry, the images are built from this clone)
   --build                build images from this clone instead of pulling from GHCR
   --no-start             write configuration only; do not pull or start anything
   --yes, -y              never prompt; use flags/env/defaults
@@ -151,7 +153,7 @@ reject_ctl "--version" "$VERSION_IN"; reject_ctl "--out" "$BACKUP_OUT"; reject_c
 [ -z "$ACME_EMAIL_IN" ] || valid_email "$ACME_EMAIL_IN" || die "Invalid --acme-email address."
 [ -z "$PROXY_NETWORK_IN" ] || valid_network "$PROXY_NETWORK_IN" || die "Invalid Docker network name '$PROXY_NETWORK_IN'."
 valid_group "$USER_GROUP" || die "Invalid group name '$USER_GROUP' (lowercase letters, digits, '_' or '-')."
-[ -z "$VERSION_IN" ] || valid_version "$VERSION_IN" || die "Invalid --version '$VERSION_IN' (use X.Y.Z, edge or local)."
+[ -z "$VERSION_IN" ] || valid_version "$VERSION_IN" || die "Invalid --version '$VERSION_IN' (use X.Y.Z, latest, edge or local)."
 case "$AUTH_MODE_IN" in ""|authelia|external) ;; *) die "--auth-mode must be authelia or external." ;; esac
 
 # --- small utilities ---------------------------------------------------------------------------
@@ -428,12 +430,16 @@ resolve_images() { # decide pull-vs-build for install; pins SEEDBOX_VERSION in .
   if [ "$BUILD" = 1 ]; then env_put SEEDBOX_VERSION local; return 0; fi
   local cur ver
   cur=$(env_get SEEDBOX_VERSION)
-  if [ -n "$VERSION_IN" ]; then ver=$VERSION_IN
-  elif [ -z "$cur" ] || [ "$cur" = latest ]; then ver=$(latest_release)
-  else ver=$cur; fi
+  if [ -n "$VERSION_IN" ]; then ver=$VERSION_IN; else ver=${cur:-latest}; fi
+  if [ "$ver" = latest ]; then ver=$(latest_release); fi        # pinned as the X.Y.Z it is today
   if [ "$ver" = local ]; then BUILD=1; return 0; fi
   if [ -z "$ver" ]; then
     if [ "$NO_START" = 1 ]; then return 0; fi
+    if [ -z "$VERSION_IN" ] && image_exists edge; then
+      warn "No stable release published yet: using the 'edge' images (the head of main, built and tested by CI). Move to a release later with: ./setup.sh update --version latest"
+      env_put SEEDBOX_VERSION edge
+      return 0
+    fi
     use_local_build "No published release found (none yet, GitHub unreachable or rate-limited). The images are not available from $(registry)."
     env_put SEEDBOX_VERSION local
     return 0
@@ -721,7 +727,8 @@ cmd_update() {
     dc build --pull
   else
     target=$VERSION_IN
-    [ -n "$target" ] || target=$(latest_release)
+    if [ -z "$target" ] && [ "$cur" = edge ]; then target=edge; fi   # edge follows main until you pick a release
+    if [ -z "$target" ] || [ "$target" = latest ]; then target=$(latest_release); fi
     if [ -z "$target" ]; then
       if [ "$cur" = local ]; then
         die "These images were built from this clone. Pull the new source (git pull) and run: ./setup.sh update --build
