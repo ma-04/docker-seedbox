@@ -13,8 +13,10 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `APP_SECRET` | api, worker | Required, >= 32 chars. Encrypts stored credentials and derives the local link key. **Back it up; changing it makes stored secrets unreadable.** |
 | `GATEWAY_SECRET` | gateway, api | Required. Header secret that proves a request came through the gateway. |
 | `VPN_CONTROL_TOKEN` | vpn, api, worker | Required. Bearer token for the VPN control API. |
-| `APP_HOST`, `AUTH_HOST`, `FILES_HOST` | gateway, api, authelia | Hostnames without scheme: web UI, login portal, local downloads. |
-| `COOKIE_DOMAIN` | authelia | Parent domain of `APP_HOST` and `AUTH_HOST`. |
+| `APP_HOST` | gateway, api, authelia | Required. Hostname without scheme of the web UI and `/api`; by default also of the login portal (`https://APP_HOST/auth/`) and local downloads (`https://APP_HOST/dl/`). See [Hosts layout](deployment.md#hosts-layout). |
+| `FILES_HOST` | gateway, api | Empty (default) = downloads under `APP_HOST/dl/`. A different hostname = local downloads on their own origin (recommended hardening, see [SECURITY.md](../SECURITY.md)); `/dl/` on `APP_HOST` then answers 404. Best outside `COOKIE_DOMAIN`. |
+| `AUTH_HOST` | gateway, api, authelia | Empty (default) = Authelia portal under `APP_HOST/auth/`. A different hostname = the portal on its own host (the layout before single-domain support); `COOKIE_DOMAIN` must then be a parent of both. |
+| `COOKIE_DOMAIN` | authelia | Domain of Authelia's session cookie. Empty = `APP_HOST` (`setup.sh` writes `APP_HOST`). With a separate `AUTH_HOST`: a parent domain of `APP_HOST` and `AUTH_HOST`. |
 | `PUBLIC_SCHEME` | api | `https`. Only change for local experiments over plain http. |
 | `AUTH_MODE` | gateway | `authelia` (default) or `external` ([external SSO](deployment.md#external-sso-mode)). |
 | `ADMIN_GROUP` | api | `admins`. Users in this group are admins. |
@@ -48,7 +50,7 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `PROXY_NETWORK` | empty | External mode: Docker network of your proxy. |
 | `HTTP_BIND`, `HTTP_PORT` | `127.0.0.1`, `8080` | None mode: where the gateway is published. |
 
-`setup.sh` also reads `SEEDBOX_DOMAIN`, `SEEDBOX_ADMIN_USER`, `SEEDBOX_ADMIN_PASSWORD`, `SEEDBOX_ADMIN_EMAIL`, `SEEDBOX_PROXY`, `SEEDBOX_PROXY_NETWORK`, `SEEDBOX_ACME_EMAIL`, `SEEDBOX_AUTH_MODE`, `SEEDBOX_VERSION_OVERRIDE`, `SEEDBOX_BUILD`, `SEEDBOX_YES` as alternatives to its flags (`./setup.sh --help`). Values containing newlines or control characters are rejected.
+`setup.sh` also reads `SEEDBOX_DOMAIN`, `SEEDBOX_FILES_HOST`, `SEEDBOX_AUTH_HOST`, `SEEDBOX_COOKIE_DOMAIN`, `SEEDBOX_SINGLE_DOMAIN` (`1`), `SEEDBOX_ADMIN_USER`, `SEEDBOX_ADMIN_PASSWORD`, `SEEDBOX_ADMIN_EMAIL`, `SEEDBOX_PROXY`, `SEEDBOX_PROXY_NETWORK`, `SEEDBOX_ACME_EMAIL`, `SEEDBOX_AUTH_MODE`, `SEEDBOX_VERSION_OVERRIDE`, `SEEDBOX_BUILD`, `SEEDBOX_YES` as alternatives to its flags (`./setup.sh --help`). Values containing newlines or control characters are rejected.
 
 ## Admin UI settings
 
@@ -134,7 +136,7 @@ Admin -> Destinations creates shared destinations visible to every user. Files l
 
 *Backblaze B2 via its S3 API:* create a bucket, then an Application Key limited to that bucket (read/write). Use endpoint `https://s3.<region>.backblazeb2.com` (the region, e.g. `us-west-004`, is shown with the bucket's endpoint), the key's `keyID` as access key id and `applicationKey` as secret. B2 presigned links are valid for at most 7 days. Tip: use a dedicated bucket or prefix for the seedbox so lifecycle rules cannot touch your other data.
 
-**Local folder.** Stored in the `downloads` volume under `library/` and served by the gateway at `https://FILES_HOST/dl/<path>?exp=&sig=` with Range support. `publicBaseUrl` defaults to `https://FILES_HOST`; `linkTtlSeconds` of 0 never expires. This uses the server's disk, so mind `limits.minFreeDiskBytes`. To keep files outside Docker volumes, replace the `downloads` named volume with a bind mount in a `compose.override.yaml` (the gateway reads it as uid 101, so it must be world-readable).
+**Local folder.** Stored in the `downloads` volume under `library/` and served by the gateway at `https://APP_HOST/dl/<path>?exp=&sig=` (or `https://FILES_HOST/dl/...` when a separate download host is set) with Range support. `publicBaseUrl` defaults to that host and, when set, wins over both; `linkTtlSeconds` of 0 never expires. This uses the server's disk, so mind `limits.minFreeDiskBytes`. To keep files outside Docker volumes, replace the `downloads` named volume with a bind mount in a `compose.override.yaml` (the gateway reads it as uid 101, so it must be world-readable).
 
 ## Browser integration
 

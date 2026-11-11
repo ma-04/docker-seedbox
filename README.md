@@ -23,7 +23,7 @@ A self-hosted, multi-user **torrent-to-cloud seedbox** in a handful of container
 
 ## Quick start
 
-You need a Linux server with Docker + Compose v2, ports 80 and 443 free, and three DNS records (`seedbox.example.com`, `auth.seedbox.example.com`, `files.seedbox.example.com`) pointing at it.
+You need a Linux server with Docker + Compose v2, ports 80 and 443 free, and **one** DNS record (e.g. `seedbox.example.com`) pointing at it. The app, the login page (`/auth/`) and local downloads (`/dl/`) all live on that one name; a separate download domain (recommended hardening, see [SECURITY.md](SECURITY.md)) or login host is optional.
 
 ```sh
 git clone https://github.com/ma-04/docker-seedbox.git
@@ -31,7 +31,7 @@ cd docker-seedbox
 ./setup.sh
 ```
 
-`setup.sh` asks for your domain and an admin e-mail, generates every secret, creates the admin login, starts the stack and prints the URLs. Re-running it is safe. Already have a reverse proxy? It detects a running `nginx-proxy` and joins it instead (see [docs/deployment.md](docs/deployment.md)). Non-interactive: `./setup.sh --domain seedbox.example.com --admin-email me@example.com --yes`.
+`setup.sh` asks for your domain (and whether downloads should get a domain of their own) and an admin e-mail, generates every secret, creates the admin login, starts the stack and prints the URLs. Re-running it is safe. Already have a reverse proxy? It detects a running `nginx-proxy` and joins it instead (see [docs/deployment.md](docs/deployment.md)). Non-interactive: `./setup.sh --domain seedbox.example.com --admin-email me@example.com --yes`.
 
 `setup.sh` installs the newest release of the published images (`ghcr.io/ma-04/docker-seedbox-*`, multi-arch: **linux/amd64 and linux/arm64**, both tested in CI on GitHub's runners; 64-bit ARM hosts such as a Raspberry Pi 4/5 or an ARM cloud server are expected to work but are not tested), pinned as its exact version; before the first release it uses `:edge` (the CI-tested head of `main`), and without either it offers to build from your clone. Tags: `X.Y.Z` / `X.Y` / `latest` = releases, `edge` = `main` ([details](docs/deployment.md#versions-upgrades-and-verification)). Then: log in, open **Admin**, add a destination, optionally upload WireGuard configs. Useful later: `./setup.sh add-user`, `./setup.sh update` (shows `1.2.3 -> 1.3.0`; `--version X.Y.Z|latest|edge` pins), `./setup.sh backup` / `restore`, `./setup.sh doctor`. Requires Docker Engine 26+ and Compose 2.26+.
 
@@ -41,10 +41,10 @@ cd docker-seedbox
 flowchart LR
   U[Browser] -->|HTTPS| P[Reverse proxy<br/>nginx-proxy / Traefik / Caddy / tunnel]
   P --> G[gateway<br/>nginx :8080]
-  G -->|auth_request| A[authelia]
-  G -->|app host| W[web<br/>SPA]
+  G -->|auth_request, /auth/ portal| A[authelia]
+  G -->|/| W[web<br/>SPA]
   G -->|/api + secret header| API[api]
-  G -->|files host: /dl, X-Accel-Redirect| D[(downloads volume)]
+  G -->|/dl: signed, X-Accel-Redirect| D[(downloads volume)]
   API --- DB[(data volume<br/>SQLite)]
   WK[worker] --- DB
   WK -->|Web API| Q[qbittorrent]

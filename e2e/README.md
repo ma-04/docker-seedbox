@@ -6,7 +6,7 @@ login page. Nothing leaves the Docker host: no real VPN, cloud or Google credent
 
 | Fixture | What it is |
 |---|---|
-| `front` | nginx with a throw-away self-signed certificate for `app.`, `auth.`, `files.`, `s3.`, `fixtures.`, `ctl.seedbox.test`; forwards `X-Forwarded-Proto: https` to `gateway:8080` (Authelia requires https) |
+| `front` | nginx with a throw-away self-signed certificate for `app.`, `auth.`, `files.`, `s3.`, `fixtures.`, `ctl.seedbox.test` (which of `auth.`/`files.` the gateway answers depends on the layout); forwards `X-Forwarded-Proto: https` to `gateway:8080` (Authelia requires https) |
 | `tracker` (172.31.250.30), `seeder` (.31) | a tiny HTTP tracker and a transmission seeder. The seeder generates, at start, a multi-file torrent (folder, sub-folders, names with spaces, unicode, `#`, `%`, `'`), a single-file torrent and a rate-limited "slow" torrent, and publishes `.torrent` files, magnets and sha256 sums as `https://fixtures.seedbox.test/manifest.json`. The app drops trackers on private addresses from submitted magnets and `.torrent` files (SSRF policy), so global setup sets the engine's "add trackers to new downloads" to the fixture tracker. They are addressed by IP: while a tunnel is up the vpn namespace cannot resolve compose names |
 | `wg1`, `wg2`, `net-echo-direct`, `net-echo-behind` | two WireGuard servers with keys generated at start (client configs at `https://fixtures.seedbox.test/wg/wgN.conf`), an echo service on a network the vpn container can reach directly (`inet`) and one reachable only through the WireGuard servers (`behind`) |
 | `minio` | real MinIO with bucket `seedbox-e2e`; `s3.seedbox.test` exposes it for presigned links |
@@ -22,7 +22,14 @@ Secrets are generated per run into `e2e/.state/e2e.env` (git-ignored, mode 600) 
 e2e/run.sh                          # build, start, run, collect, tear down; exit code = test result
 e2e/run.sh -- tests/03-local-download.spec.ts     # a single spec
 e2e/run.sh --keep --no-build        # leave the stack running; --rmi removes the built images on teardown
+e2e/run.sh --layout multi -- tests/14-layout.spec.ts    # another hosts layout (see below)
 ```
+
+**Hosts layouts** (`--layout`, or `E2E_LAYOUT`; the playwright container gets the same value): `single` (default:
+app, Authelia under `/auth/` and downloads under `/dl/` on `app.seedbox.test`), `split-files` (app + Authelia on
+`app.`, downloads on `files.seedbox.test`), `multi` (`app.`, `auth.`, `files.seedbox.test`, the layout before
+single-domain support). CI runs the whole suite in `single` and the host-dependent specs (`01`, `03`, `12`, `14`) in
+the other two. A kept stack's `e2e/.state/e2e.env` records its layout; tear it down before switching.
 
 Needs Docker with Compose >= 2.33 (`gw_priority`) and a kernel with WireGuard (5.6+). Images are tagged
 `sbe2e/*:e2e`, so they never overwrite a real installation. After a run: `e2e/.out/report` (HTML),
@@ -48,7 +55,7 @@ E2E_ENV_FILE=/tmp/e2e.env E2E_CONNECT=127.0.0.1:18443 npx playwright test
 
 `E2E_CONNECT` makes Chromium map every `*.seedbox.test` host to the tunnel (`--host-resolver-rules`) and makes the
 suite's plain HTTP calls (signed links, spoofed headers, S3) do the same; certificate errors are ignored. Other
-overrides: `E2E_BASE_URL`, `E2E_FILES_URL`, `E2E_S3_URL`, `E2E_FIXTURES_URL`, `E2E_CTL_URL`. The container restarts and
+overrides: `E2E_LAYOUT`, `E2E_BASE_URL`, `E2E_AUTH_URL`, `E2E_FILES_URL`, `E2E_S3_URL`, `E2E_FIXTURES_URL`, `E2E_CTL_URL`. The container restarts and
 the in-namespace probes go through `ctl`, so all scenarios work over the single tunnelled port. The suite resets its
 own state (jobs, `e2e-*` destinations, VPN configs, limits) at start, so it can be re-run against a kept stack.
 
@@ -65,6 +72,13 @@ worker+api, and of vpn+qbittorrent, mid-download.
 header (`X-Requested-With: seedbox`), local `/dl` links revoked when the job is deleted, qBittorrent WebUI refused to
 ordinary containers (`ctl /webui`), and the kill switch holding after a sidecar restart while the worker is stopped
 (`ctl /stop`, `/start`).
+
+`14-layout` (every layout) the logged-out deep link -> portal `?rd=<full URL>` -> back after login, the session cookie's
+scope, bare 401s on `/api/*`, the portal with its assets and API under its base path, spoofed `Remote-*` headers on the
+portal and `/dl/` (behaviour, and the running gateway's `nginx -T` via `ctl /gateway-config`), Authelia's own API and
+`/auth/../api` path tricks as bypass attempts, no SPA/API route shadowed. `03` also checks that an uploaded HTML file is
+an inert attachment (octet-stream, sandbox CSP, nosniff: no render, no script, no service worker) and that `/dl/`
+answers on exactly one host.
 
 ## c) Live suite: a real deployment (opt-in)
 
