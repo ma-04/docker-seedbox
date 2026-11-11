@@ -4,7 +4,7 @@ import { encrypt } from '../../lib/crypto.js';
 import type { SettingsDto, UserDto, VpnConfigDto, VpnStatusDto } from '../../lib/dto.js';
 import { getAllSettings, getSetting, setSetting, type SettingKey } from '../../lib/settings.js';
 import { now, type UserRow, type VpnConfigRow } from '../../lib/types.js';
-import { connectVpn, parseWgConfig } from '../../lib/vpn.js';
+import { acquireVpnLock, connectVpn, isVpnConflict, parseWgConfig, releaseVpnLock } from '../../lib/vpn.js';
 import type { Ctx } from '../context.js';
 import { ApiError, conflict, idParam, notFound, parse, validation } from '../errors.js';
 import { ACTIVE_SQL, userDto } from '../mappers.js';
@@ -97,12 +97,16 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx): void {
   });
   app.post('/api/admin/vpn/rotate', async (req) => {
     const b = parse(rotateBody, req.body ?? {});
+    // Serialised with the worker's reconcile (DB lock): two concurrent connects could leave the tunnel on the wrong config.
+    const token = acquireVpnLock(db);
+    if (!token) throw conflict('Another VPN change is in progress; try again in a moment');
     try {
       await connectVpn(db, config, vpn, b.configId);
     } catch (e) {
       if (String((e as Error).message).startsWith('No enabled VPN config')) throw conflict('No enabled VPN config available');
+      if (isVpnConflict(e)) throw conflict('The VPN mode is off; switch it to required first');
       throw new ApiError(502, 'internal', 'VPN connection failed; see the config\'s last error');
-    }
+    } finally { releaseVpnLock(db, token); }
     const active = getSetting(db, 'vpn.activeConfigId');
     return vpnDto(vpnRow(active!), active);
   });

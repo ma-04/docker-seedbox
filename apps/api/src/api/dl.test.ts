@@ -70,7 +70,7 @@ describe('GET /dl', () => {
   });
   it('403 on tampered signature, path or exp', async () => {
     const good = url();
-    expect((await env.call(null, 'GET', good.replace(/sig=./, 'sig=0'))).statusCode).toBe(403);
+    expect((await env.call(null, 'GET', good.replace(/sig=(.)/, (_m, c: string) => `sig=${c === '0' ? '1' : '0'}`))).statusCode).toBe(403);
     expect((await env.call(null, 'GET', good.replace('file', 'fil3'))).statusCode).toBe(403);
     expect((await env.call(null, 'GET', good.replace(/exp=\d+/, 'exp=0'))).statusCode).toBe(403);
     expect((await env.call(null, 'GET', '/dl/lib/x')).statusCode).toBe(403);

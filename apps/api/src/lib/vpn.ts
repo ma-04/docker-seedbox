@@ -5,6 +5,12 @@ import type { Db } from './db.js';
 import { getSetting, setSetting } from './settings.js';
 import { now, type VpnConfigRow, type VpnStatus } from './types.js';
 
+/** The sidecar answered with an HTTP error status. `/connect` answers 409 when its mode is `off` (nothing to connect to). */
+export class VpnHttpError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+export const isVpnConflict = (e: unknown): boolean => e instanceof VpnHttpError && e.status === 409;
+
 export interface VpnClient {
   status(): Promise<VpnStatus>;
   connect(name: string, wgConfig: string): Promise<VpnStatus>;
@@ -20,7 +26,7 @@ export function vpnClient(config: Pick<Config, 'vpnUrl' | 'vpnControlToken'>, fe
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(45_000),
     });
-    if (!res.ok) throw new Error(`VPN control ${method} ${path} failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) throw new VpnHttpError(`VPN control ${method} ${path} failed (${res.status}): ${(await res.text()).slice(0, 200)}`, res.status);
     return (await res.json().catch(() => ({}))) as T;
   }
   return {
@@ -62,7 +68,35 @@ export async function connectVpn(db: Db, config: Config, client: VpnClient, id?:
     setSetting(db, 'vpn.activeConfigId', row.id);
     return status;
   } catch (err) {
+    // 409 = the sidecar is in `off` mode: not this config's fault.
+    if (isVpnConflict(err)) throw err;
     db.prepare('UPDATE vpn_configs SET last_used_at = ?, last_error = ? WHERE id = ?').run(now(), String((err as Error).message).slice(0, 500), row.id);
     throw err;
   }
+}
+
+// ---- DB-level guard serialising the worker's reconcile and the admin's rotate --------------------------------------
+// A `settings` row `vpn.lock` = {token, until}. Compare-and-set inside an IMMEDIATE transaction, so api and worker (two
+// processes sharing the SQLite file) never both run a connect. The row expires, so a crashed holder cannot wedge it.
+const LOCK_KEY = 'vpn.lock';
+const LOCK_TTL_SEC = 60;
+
+/** Returns a token when the lock was taken, null when someone else holds an unexpired lock. */
+export function acquireVpnLock(db: Db, ttlSec = LOCK_TTL_SEC, nowSec = now()): string | null {
+  const token = `${process.pid}:${Math.random().toString(36).slice(2)}`;
+  return db.transaction((): string | null => {
+    const row = db.prepare('SELECT value_json FROM settings WHERE key = ?').get(LOCK_KEY) as { value_json: string } | undefined;
+    const cur = row ? (JSON.parse(row.value_json) as { token: string; until: number }) : null;
+    if (cur && cur.until > nowSec) return null;
+    db.prepare('INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json')
+      .run(LOCK_KEY, JSON.stringify({ token, until: nowSec + ttlSec }));
+    return token;
+  }).immediate();
+}
+
+export function releaseVpnLock(db: Db, token: string): void {
+  db.transaction(() => {
+    const row = db.prepare('SELECT value_json FROM settings WHERE key = ?').get(LOCK_KEY) as { value_json: string } | undefined;
+    if (row && (JSON.parse(row.value_json) as { token: string }).token === token) db.prepare('DELETE FROM settings WHERE key = ?').run(LOCK_KEY);
+  }).immediate();
 }
