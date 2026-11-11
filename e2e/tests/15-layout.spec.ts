@@ -87,7 +87,8 @@ test.describe(`15. hosts layout (${env.layout})`, () => {
 
     // and the running gateway really blanks them (plus the cookie) towards Authelia and the API
     const conf = await gatewayConfig();
-    const get = (f: string) => conf.get(f) ?? '';
+    // directives only: comments are dropped so a word in an explanation never satisfies or breaks a check
+    const get = (f: string) => (conf.get(f) ?? '').split('\n').map((l) => l.replace(/#.*$/, '')).join('\n');
     const clear = get('/etc/nginx/snippets/remote-clear.conf');
     for (const h of ['Remote-User', 'Remote-Groups', 'Remote-Email', 'Remote-Name']) expect(clear).toContain(`proxy_set_header ${h} "";`);
     const portal = get('/etc/nginx/snippets/authelia-portal.conf');
