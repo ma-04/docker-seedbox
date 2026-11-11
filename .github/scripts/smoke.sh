@@ -22,6 +22,9 @@ trap cleanup EXIT
 # until SECONDS CMD... : retry once a second
 until_ok() { local n=$1 i; shift; for ((i = 0; i < n; i++)); do if "$@" >/dev/null 2>&1; then return 0; fi; sleep 1; done; return 1; }
 ex() { docker exec "$NAME" "$@"; }
+# Output is captured first and then matched: `cmd | grep -q` under pipefail fails at random when grep exits early and
+# cmd gets SIGPIPE.
+has() { grep -q "$@"; }
 
 echo "== smoke test: $IMAGE ($REF) on $(uname -m)"
 case "$ARCH" in
@@ -40,7 +43,7 @@ case "$IMAGE" in
   api)
     run() { docker run --rm --entrypoint "$1" "$REF" "${@:2}"; }
     [ "$(run uname -m)" = "$(uname -m)" ] && ok "container userland runs natively ($(uname -m))" || fail "uname -m inside the image"
-    run /usr/local/bin/rclone version | head -n 1 | grep -q '^rclone v' && ok "rclone version: $(run /usr/local/bin/rclone version | head -n 1)" || fail "rclone version"
+    out=$(run /usr/local/bin/rclone version) && v=${out%%$'\n'*} && [[ $v == "rclone v"* ]] && ok "rclone version: $v" || fail "rclone version"
     # Boot the API against an empty database: it opens SQLite (better-sqlite3, a native module) and applies every
     # migration before it listens.
     docker run -d --name "$NAME" "${HARDEN[@]}" --tmpfs /tmp:uid=1000,gid=1000 -v "$NAME-vol:/data" \
@@ -54,7 +57,7 @@ case "$IMAGE" in
   web)
     docker run -d --name "$NAME" "${HARDEN[@]}" --tmpfs /tmp:uid=101,gid=101 "$REF" >/dev/null
     until_ok 30 ex wget -q -O /dev/null http://127.0.0.1:8080/healthz && ok "web serves /healthz" || fail "web /healthz"
-    ex wget -q -O - http://127.0.0.1:8080/ | grep -qi '<html' && ok "web serves index.html" || fail "web /"
+    out=$(ex wget -q -O - http://127.0.0.1:8080/) && has -i '<html' <<<"$out" && ok "web serves index.html" || fail "web /"
     if [ -n "$VERSION" ]; then
       ex grep -rqF -- "$VERSION" /usr/share/nginx/html/assets && ok "bundle carries version $VERSION" || fail "VITE_APP_VERSION $VERSION not in the bundle"
     fi
@@ -63,7 +66,7 @@ case "$IMAGE" in
     docker run -d --name "$NAME" "${HARDEN[@]}" --tmpfs /tmp:uid=101,gid=101 --tmpfs /etc/nginx/conf.d:uid=101,gid=101 \
       -e APP_HOST=app.smoke.test -e AUTH_HOST=auth.smoke.test -e FILES_HOST=files.smoke.test -e GATEWAY_SECRET=smoke "$REF" >/dev/null
     until_ok 30 ex wget -q -O /dev/null http://127.0.0.1:8080/healthz && ok "gateway serves /healthz" || fail "gateway /healthz"
-    ex nginx -t 2>&1 | grep -q 'test is successful' && ok "nginx -t on the rendered configuration" || fail "nginx -t"
+    out=$(ex nginx -t 2>&1) && has 'test is successful' <<<"$out" && ok "nginx -t on the rendered configuration" || fail "nginx -t: $out"
     ;;
   vpn)
     run() { docker run --rm --entrypoint "$1" "$REF" "${@:2}"; }
@@ -75,7 +78,7 @@ case "$IMAGE" in
     docker run -d --name "$NAME" --cap-drop ALL --cap-add NET_ADMIN --sysctl net.ipv6.conf.all.disable_ipv6=1 \
       -e VPN_CONTROL_TOKEN=smoke "$REF" >/dev/null
     until_ok 30 ex /usr/local/bin/vpn-control healthcheck && ok "vpn-control started, kill switch installed, healthcheck passes" || fail "vpn-control healthcheck"
-    ex nft list ruleset | grep -q 'policy drop' && ok "nftables ruleset is fail-closed (policy drop)" || fail "nft list ruleset"
+    out=$(ex nft list ruleset) && has 'policy drop' <<<"$out" && ok "nftables ruleset is fail-closed (policy drop)" || fail "nft list ruleset"
     if ex ip link add smokewg0 type wireguard 2>/dev/null; then ex ip link del smokewg0; ok "kernel WireGuard available on this runner ($(uname -r))"
     else echo "::warning::kernel WireGuard is not available on this $ARCH runner ($(uname -r)); the image cannot be tested end to end here"; fi
     ;;
