@@ -15,3 +15,6 @@ deploy/**/secrets/
 *.local.env
 e2e/.state/
 e2e/.out/
+
+# Go build output
+services/vpn/src/vpn
