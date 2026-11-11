@@ -20,8 +20,9 @@ export interface RcloneCommand {
  * `opts.gdriveFolderId`: Drive folder the files go directly into. The worker resolves it first (under a mutex) so
  * rclone never creates parent folders itself (two concurrent uploads would create duplicate same-named folders);
  * it becomes rclone's `root_folder_id` and the target is `DST:`.
+ * `opts.egress`: proxy environment (HTTPS_PROXY/HTTP_PROXY/NO_PROXY=) for user-owned destinations; see worker/egress-proxy.ts.
  */
-export function buildRcloneCommand(config: DestinationConfig, src: string, remotePath: string, opts: { gdriveFolderId?: string } = {}): RcloneCommand {
+export function buildRcloneCommand(config: DestinationConfig, src: string, remotePath: string, opts: { gdriveFolderId?: string; egress?: { env: NodeJS.ProcessEnv; secrets: string[] } } = {}): RcloneCommand {
   const env: NodeJS.ProcessEnv = {};
   const secrets: string[] = [];
   const set = (k: string, v: string, secret = false) => {
@@ -52,6 +53,7 @@ export function buildRcloneCommand(config: DestinationConfig, src: string, remot
   } else {
     throw new Error(`rclone is not used for ${config.type} destinations`);
   }
+  if (opts.egress) { Object.assign(env, opts.egress.env); secrets.push(...opts.egress.secrets); }
   return { args: rcloneArgs(src, target, extra), env, secrets: secrets.filter(Boolean) };
 }
 

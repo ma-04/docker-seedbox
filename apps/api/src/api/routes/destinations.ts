@@ -1,7 +1,8 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
+import { ListObjectsV2Command } from '@aws-sdk/client-s3';
+import { makeS3Client } from '../../lib/s3client.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { encryptConfig, getDestination } from '../../lib/destinations.js';
@@ -71,10 +72,7 @@ export async function testDestination(ctx: Ctx, type: DestinationType, config: D
       return { ok: true, message: `Connected. Root folder: ${f.name}` };
     }
     if (config.type === 's3') {
-      const client = new S3Client({
-        endpoint: config.endpoint, region: config.region, forcePathStyle: config.forcePathStyle ?? true, maxAttempts: 1,
-        credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
-      });
+      const client = makeS3Client(config, { shared: who.shared, maxAttempts: 1 });
       try {
         const prefix = config.prefix?.replace(/^\/+/, '');
         await client.send(new ListObjectsV2Command({ Bucket: config.bucket, MaxKeys: 1, ...(prefix ? { Prefix: prefix } : {}) }),

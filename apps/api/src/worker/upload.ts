@@ -12,6 +12,7 @@ import { getSetting } from '../lib/settings.js';
 import { now, type DestinationConfig, type GDriveConfig, type JobRow, type TorrentRow, type UserRow } from '../lib/types.js';
 import type { Downloader } from '../downloaders/types.js';
 import { assertPublicEndpoint } from '../lib/netguard.js';
+import type { EgressProxy } from './egress-proxy.js';
 import { buildRcloneCommand, redact, runRclone, RcloneAborted, RcloneError, S3_AUTH_ERROR, s3ProbeCommand, type RcloneCommand, type RcloneProc, type SpawnFn } from './rclone.js';
 
 
@@ -38,6 +39,11 @@ export interface UploadDeps {
   gdrive: GDriveOps;
   /** SSRF guard for S3 endpoints; user-owned destinations are checked with allowPrivate=false. */
   endpointGuard?: EndpointGuard;
+  /**
+   * Forward proxy vetting every connection rclone makes for USER-OWNED destinations (redirects, DNS rebinding).
+   * The Worker always provides one; shared (admin) destinations never use it.
+   */
+  egress?: Pick<EgressProxy, 'env'>;
   /** rclone abort/stall tuning (tests). */
   killGraceMs?: number;
   stallMs?: number;
@@ -170,7 +176,8 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
       } else if (dest.config.type === 'gdrive') {
         gdrive = await resolveGDriveFolders(deps, dest.config, dest.row.id, userOwned, remotePath, user);
       }
-      const cmd = buildRcloneCommand(dest.config, source, remotePath, { gdriveFolderId: gdrive?.jobFolder });
+      const egress = userOwned && deps.egress ? await deps.egress.env() : undefined;
+      const cmd = buildRcloneCommand(dest.config, source, remotePath, { gdriveFolderId: gdrive?.jobFolder, egress });
       secrets = cmd.secrets;
       cmdForProbe = cmd;
       if (dest.config.type === 's3') s3Config = dest.config;

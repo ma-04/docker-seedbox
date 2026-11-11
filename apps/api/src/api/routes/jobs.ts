@@ -1,4 +1,5 @@
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { makeS3Client } from '../../lib/s3client.js';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -182,10 +183,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
       }
     } else {
       const ttl = Math.min(cfg.linkTtlSeconds || 86400, WEEK);
-      const client = new S3Client({
-        endpoint: cfg.endpoint, region: cfg.region, forcePathStyle: cfg.forcePathStyle ?? true,
-        credentials: { accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey },
-      });
+      const client = makeS3Client(cfg, { shared: dest.row.owner_user_id === null }); // presigning does no network
       link = (f) => {
         const key = fullRemotePath(cfg, remote, f.path);
         if (cfg.publicBaseUrl) return `${cfg.publicBaseUrl.replace(/\/+$/, '')}/${key.split('/').map(encodeURIComponent).join('/')}`;
