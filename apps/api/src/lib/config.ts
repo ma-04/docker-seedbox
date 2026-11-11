@@ -20,14 +20,21 @@ export interface Config {
   vpnUrl: string;
   port: number;
   logLevel: string;
+  /** TEST ONLY (hermetic e2e): tracker-list URLs may be http and on private addresses. Refused without E2E_HERMETIC=1. */
+  trackerListAllowPrivate: boolean;
   google: { authUrl: string; tokenUrl: string; apiBaseUrl: string };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const appSecret = env.APP_SECRET ?? req('APP_SECRET');
   if (appSecret.length < 32) throw new Error('APP_SECRET must be at least 32 characters');
+  const trackerListAllowPrivate = env.TRACKER_LIST_ALLOW_PRIVATE === '1';
+  if (trackerListAllowPrivate && env.E2E_HERMETIC !== '1') {
+    throw new Error('TRACKER_LIST_ALLOW_PRIVATE is for the hermetic test stack only (it also needs E2E_HERMETIC=1); unset it');
+  }
   return {
     appSecret,
+    trackerListAllowPrivate,
     gatewaySecret: env.GATEWAY_SECRET ?? req('GATEWAY_SECRET'),
     vpnControlToken: env.VPN_CONTROL_TOKEN ?? req('VPN_CONTROL_TOKEN'),
     appHost: env.APP_HOST ?? 'localhost',

@@ -2,7 +2,7 @@ import { chromium, expect, type FullConfig } from '@playwright/test';
 import fs from 'node:fs';
 import { api, AUTH_DIR, loginUI, statePath } from './app';
 import { env, type UserName } from './env';
-import { getManifest, probe, wgConfig } from './infra';
+import { getManifest, probe, qbtPreferences, wgConfig } from './infra';
 import { raw } from './net';
 
 async function waitFor(what: string, fn: () => Promise<boolean>, ms = 120_000): Promise<void> {
@@ -45,7 +45,14 @@ async function resetState(admin: import('@playwright/test').Page): Promise<void>
   // The app strips trackers on private addresses from submitted magnets and .torrent files (SSRF policy), and the fixture
   // tracker is a private IP. The torrent engine adds it itself (admin-configured "add trackers to new downloads").
   const tracker = (await getManifest()).tracker;
+  // Tracker lists: none configured. The engine setting `addTrackers` is the MANUAL list; the worker writes manual + fetched
+  // trackers to qBittorrent, so wait until it has applied the fixture tracker before any download starts.
+  expect((await api(admin, 'PUT', '/api/admin/trackers', { urls: [] })).status).toBe(200);
   expect((await api(admin, 'PUT', '/api/admin/engine/settings', { addTrackersEnabled: true, addTrackers: tracker })).status).toBe(200);
+  await waitFor('the worker applied the fixture tracker to the engine', async () => {
+    const p = await qbtPreferences();
+    return p.add_trackers_enabled === true && String(p.add_trackers).trim() === tracker;
+  }, 60_000);
   for (const c of (await api(admin, 'GET', '/api/admin/vpn/configs')).json as { id: number }[]) await api(admin, 'DELETE', `/api/admin/vpn/configs/${c.id}`);
   await api(admin, 'PUT', '/api/admin/settings', {
     'vpn.mode': 'off', 'vpn.rotation': 'manual', 'limits.maxActiveJobsPerUser': 5, 'limits.maxTorrentBytes': 0, 'seeding.ratio': 0,

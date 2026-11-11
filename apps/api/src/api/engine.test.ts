@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EngineClient } from './engine.js';
+import { getSetting } from '../lib/settings.js';
 import { alice, root, setup } from './testutil.js';
 
 // A realistic-ish /app/preferences payload including fields that must never leak.
@@ -53,6 +54,13 @@ describe('engine settings', () => {
     expect((await env.call(root, 'GET', URL)).json()).toMatchObject({ downloadLimitKBps: 0, encryption: 'disable', randomPort: true, listenPort: 0 });
   });
 
+  it('addTrackers / addTrackersEnabled are served from our settings once set, the engine value before', async () => {
+    const env = setup(undefined, fakeEngine().engine);
+    expect((await env.call(root, 'GET', URL)).json()).toMatchObject({ addTrackersEnabled: true, addTrackers: 'udp://tracker.example.test:1337/announce' });
+    await env.call(root, 'PUT', URL, { addTrackersEnabled: false, addTrackers: 'udp://mine.example.test:1/a' });
+    expect((await env.call(root, 'GET', URL)).json()).toMatchObject({ addTrackersEnabled: false, addTrackers: 'udp://mine.example.test:1/a' });
+  });
+
   it('PUT sends only mapped whitelisted keys with converted units and returns fresh settings', async () => {
     const f = fakeEngine();
     const env = setup(undefined, f.engine);
@@ -63,9 +71,10 @@ describe('engine settings', () => {
     expect(r.statusCode).toBe(200);
     expect(f.sets).toEqual([{
       dl_limit: 2048 * 1024, up_limit: 0, encryption: 2, dht: false, listen_port: 6881, max_uploads: -1,
-      add_trackers: 'udp://a.example.test:80/announce\nhttps://b.example.test/announce',
-    }]);
+    }]); // addTrackers is a manual list kept in our settings; the worker writes it (plus fetched ones) to the engine
     expect(r.json().downloadLimitKBps).toBe(5120); // re-read from the engine
+    expect(r.json().addTrackers).toBe('udp://a.example.test:80/announce\nhttps://b.example.test/announce');
+    expect(getSetting(env.db, 'trackers.manual')).toBe('udp://a.example.test:80/announce\nhttps://b.example.test/announce');
   });
 
   it('GET reads random_port (older builds) or listen_port 0 (5.3) as random, and a real listen_port as fixed', async () => {
@@ -132,7 +141,8 @@ describe('engine settings', () => {
       const list = ['http://a.test/a', 'https://a.test/a', 'udp://a.test:1/a', 'ws://a.test/a', 'wss://a.test/a'].join('\n');
       const { r, f } = await put(list);
       expect(r.statusCode).toBe(200);
-      expect(f.sets[0]).toEqual({ add_trackers: list });
+      expect(f.sets).toEqual([]); // never written to the engine by the API
+      expect(r.json().addTrackers).toBe(list);
       expect((await put('')).r.statusCode).toBe(200);
     });
     it.each([['ftp://a.test/x'], ['javascript:alert(1)'], ['not a url'], ['http://'], ['udp://ok.test:1/a\nfile:///etc/passwd']])('rejects %s', async (v) => {
@@ -140,12 +150,12 @@ describe('engine settings', () => {
       expect(r.statusCode).toBe(400);
       expect(f.sets).toEqual([]);
     });
-    it('rejects more than 50 lines and more than 4 KB', async () => {
-      const many = Array.from({ length: 51 }, (_, i) => `udp://t${i}.test:1/a`).join('\n');
+    it('rejects more than 100 lines and more than 16 KB', async () => {
+      const many = Array.from({ length: 101 }, (_, i) => `udp://t${i}.test:1/a`).join('\n');
       expect((await put(many)).r.statusCode).toBe(400);
-      expect((await put(`https://a.test/${'x'.repeat(4100)}`)).r.statusCode).toBe(400);
-      const fifty = Array.from({ length: 50 }, (_, i) => `udp://t${i}.test:1/a`).join('\n');
-      expect((await put(fifty)).r.statusCode).toBe(200);
+      expect((await put(`https://a.test/${'x'.repeat(16_400)}`)).r.statusCode).toBe(400);
+      const hundred = Array.from({ length: 100 }, (_, i) => `udp://t${i}.test:1/a`).join('\n');
+      expect((await put(hundred)).r.statusCode).toBe(200);
     });
   });
 

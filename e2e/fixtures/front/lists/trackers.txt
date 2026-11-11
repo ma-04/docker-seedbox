@@ -1,0 +1,13 @@
+# e2e fixture tracker list (served over plain http by the front; only reachable on the test network)
+
+udp://fixture-1.example.org:6969/announce
+udp://fixture-2.example.org:6969/announce
+udp://fixture-3.example.org:6969/announce
+http://fixture-4.example.org:80/announce
+http://fixture-5.example.org:80/announce
+https://fixture-6.example.org/announce
+udp://fixture-7.example.org:6969/announce
+udp://fixture-8.example.org:6969/announce
+# the two entries below must be dropped by the tracker policy (private address, single-label host)
+udp://10.9.8.7:6969/announce
+http://tracker/announce

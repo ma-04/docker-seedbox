@@ -15,6 +15,17 @@ const engine: Record<string, unknown> = {
   listenPort: 51413, randomPort: false, addTrackersEnabled: false, addTrackers: '',
 };
 
+const trackers = {
+  enabled: true, urls: [] as string[], refreshHours: 24, maxTrackers: 200, lists: [] as Record<string, unknown>[],
+  manualCount: 0, effectiveCount: 0, refreshRequestedAt: null as number | null,
+};
+const refreshMock = () => {
+  trackers.lists = trackers.urls.map((url, i) => (i % 2 === 1
+    ? { url, lastFetchedAt: null, lastAttemptAt: t, ok: false, error: 'The server answered HTTP 503', trackerCount: 0 }
+    : { url, lastFetchedAt: t, lastAttemptAt: t, ok: true, error: null, trackerCount: 75 }));
+  trackers.effectiveCount = trackers.manualCount + trackers.lists.reduce((n, l) => n + (l.trackerCount as number), 0);
+};
+
 const db = {
   jobs: [
     job(1, { state: 'downloading', name: 'Big Buck Bunny', totalSize: 276134947, downloadProgress: 0.42, downloadSpeed: 3_400_000 }),
@@ -99,6 +110,17 @@ export function mockMiddleware() {
         Object.assign(engine, b);
       }
       return send(engine);
+    }
+    if (p === '/admin/trackers' || p === '/admin/trackers/refresh') {
+      if (m === 'PUT') {
+        const b = (await readBody(req)) as { urls?: string[]; refreshHours?: number; maxTrackers?: number };
+        const badUrl = (b.urls ?? []).find((u) => !/^https:\/\/[^/]+\./.test(u));
+        if (badUrl) return send({ error: { code: 'validation', message: `${badUrl}: List URL must use https` } }, 400);
+        Object.assign(trackers, b);
+        refreshMock();
+      }
+      if (m === 'POST') { refreshMock(); return send(trackers, 202); }
+      return send(trackers);
     }
     if (p === '/admin/users') return send(db.users);
     if (/^\/admin\/users\/\d+$/.test(p)) { const u = db.users.find((x) => x.id === idOf(/(\d+)$/)); Object.assign(u ?? {}, await readBody(req)); return send(u); }

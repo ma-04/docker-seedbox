@@ -145,3 +145,22 @@ describe('unreachable downloader is distinguishable from a rejected torrent', ()
     expect(e).not.toBeInstanceOf(DownloaderUnavailableError);
   });
 });
+
+describe('tracker helpers (private-torrent sweep)', () => {
+  it('lists private torrents, reads trackers without pseudo entries, removes with | separated percent-encoded URLs', async () => {
+    const calls: { url: string; body: string }[] = [];
+    const fetchImpl = (async (url: string, init: RequestInit = {}) => {
+      calls.push({ url, body: String(init.body ?? '') });
+      if (url.includes('/torrents/info')) return Response.json([{ hash: 'AAAA', private: true }, { hash: 'bbbb', private: false }, { hash: 'cccc' }]);
+      if (url.includes('/torrents/trackers')) return Response.json([{ url: '** [DHT] **' }, { url: 'udp://a.example.org:1/a' }]);
+      return new Response('');
+    }) as unknown as typeof fetch;
+    const q = new QbittorrentDownloader({ baseUrl: 'http://qbt', fetchImpl });
+    expect(await q.privateTorrents()).toEqual(['aaaa']);
+    expect(await q.torrentTrackers('AAAA')).toEqual(['udp://a.example.org:1/a']);
+    await q.removeTrackers('AAAA', ['udp://a.example.org:1/a', 'http://b.example.org/a?x=1|2']);
+    const rm = calls.find((c) => c.url.endsWith('/torrents/removeTrackers'))!;
+    expect(new URLSearchParams(rm.body).get('urls')).toBe('udp%3A%2F%2Fa.example.org%3A1%2Fa|http%3A%2F%2Fb.example.org%2Fa%3Fx%3D1%7C2');
+    expect(new URLSearchParams(rm.body).get('hash')).toBe('aaaa');
+  });
+});

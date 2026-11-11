@@ -11,6 +11,7 @@ A self-hosted, multi-user **torrent-to-cloud seedbox** in a handful of container
 - **Multi-user** with Authelia (file-based users, groups, optional 2FA) or bring your own SSO proxy.
 - **Destinations**: Google Drive (shared account, optional Cloudflare Worker proxy for signed links), any S3-compatible bucket (incl. Backblaze B2), or a local folder served with signed links.
 - **VPN**: WireGuard sidecar with a kill switch; upload several configs and rotate manually, on an interval, or on failure. qBittorrent shares the VPN's network namespace, so no tunnel means no traffic.
+- **Tracker lists**: admins can load extra BitTorrent trackers from public plain-text lists (for example [ngosang/trackerslist](https://github.com/ngosang/trackerslist)); the app downloads, filters and refreshes them and adds them to new downloads. See [Tracker lists](docs/configuration.md#tracker-lists).
 - **Limits**: active jobs per user, maximum torrent size, minimum free disk, seeding ratio.
 - **Live progress** in the browser (server-sent events).
 - **Magnet links**: optionally register the app as your browser's `magnet:` handler (Chrome, Edge, Firefox; installed PWA); links pre-fill the add form and are never started automatically. See [Browser integration](docs/configuration.md#browser-integration).

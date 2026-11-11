@@ -154,6 +154,25 @@ export class QbittorrentDownloader implements Downloader {
     await this.call('/torrents/delete', this.form({ hashes: ref.toLowerCase(), deleteFiles: deleteData ? 'true' : 'false' }));
   }
 
+  /** Hashes of the app's torrents that qBittorrent flags `private` (torrents/info). Torrents without metadata yet are never flagged. */
+  async privateTorrents(): Promise<string[]> {
+    const res = await this.call(`/torrents/info?category=${encodeURIComponent(this.category)}`);
+    const list = (await res.json()) as (QbtTorrent & { private?: boolean })[];
+    return list.filter((x) => x.private === true).map((x) => x.hash.toLowerCase());
+  }
+
+  /** Tracker URLs of one torrent, without the DHT/PeX/LSD pseudo entries. */
+  async torrentTrackers(hash: string): Promise<string[]> {
+    const res = await this.call(`/torrents/trackers?hash=${encodeURIComponent(hash.toLowerCase())}`);
+    const list = (await res.json()) as { url?: unknown }[];
+    return list.map((t) => t.url).filter((u): u is string => typeof u === 'string' && !u.startsWith('** '));
+  }
+
+  /** torrents/removeTrackers: `urls` is `|` separated and each URL percent-encoded. */
+  async removeTrackers(hash: string, urls: string[]): Promise<void> {
+    await this.call('/torrents/removeTrackers', this.form({ hash: hash.toLowerCase(), urls: urls.map(encodeURIComponent).join('|') }));
+  }
+
   /** GET /app/preferences. Callers must pick only the keys they need; the full object contains secrets. */
   async getPreferences(): Promise<Record<string, unknown>> {
     const res = await this.call('/app/preferences');

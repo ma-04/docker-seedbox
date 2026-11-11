@@ -62,6 +62,14 @@ export async function qbtPreferences(): Promise<Record<string, any>> {
   return JSON.parse(p.body);
 }
 
+/** Tracker URLs of one torrent as qBittorrent lists them (read from inside its namespace), without the DHT/PeX/LSD pseudo entries. */
+export async function qbtTrackers(hash: string): Promise<string[]> {
+  const p = await probe(`http://127.0.0.1:8080/api/v2/torrents/trackers?hash=${hash}`);
+  if (p.reachable && p.status === 404) return []; // the worker has not added the torrent yet
+  if (!p.reachable || p.status !== 200) throw new Error(`qbt unreachable: ${p.error || p.status}`);
+  return (JSON.parse(p.body) as { url: string }[]).map((t) => t.url).filter((u) => !u.startsWith('** '));
+}
+
 /** Pause / resume the worker container (to observe the sidecar before the worker reconciles it). */
 export const stopWorker = (): Promise<void> => ctl('/stop', { method: 'POST', body: { services: ['worker'] } });
 export const startWorker = (): Promise<void> => ctl('/start', { method: 'POST', body: { services: ['worker'] } });
