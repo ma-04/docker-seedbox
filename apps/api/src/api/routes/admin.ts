@@ -115,6 +115,7 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx): void {
   const settingsOut = (): SettingsDto => {
     const s = getAllSettings(db) as Record<string, unknown>;
     for (const k of HIDDEN_SETTINGS) delete s[k];
+    for (const k of Object.keys(s)) if (k.startsWith('trackers.')) delete s[k]; // own endpoints: /admin/trackers, /admin/engine/settings
     return s as unknown as SettingsDto;
   };
   app.get('/api/admin/settings', async () => settingsOut());

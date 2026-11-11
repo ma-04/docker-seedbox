@@ -17,6 +17,7 @@ import { registerAdmin } from './routes/admin.js';
 import { registerAdminDestinations, registerDestinations } from './routes/destinations.js';
 import { registerDl } from './routes/dl.js';
 import { registerEngine } from './routes/engine.js';
+import { registerTrackers } from './routes/trackers.js';
 import { registerEvents } from './routes/events.js';
 import { registerAdminJobs, registerJobs } from './routes/jobs.js';
 
@@ -102,6 +103,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       registerAdminDestinations(admin, ctx);
       registerAdminJobs(admin, ctx);
       registerEngine(admin, ctx);
+      registerTrackers(admin, ctx);
     });
   });
   return app;

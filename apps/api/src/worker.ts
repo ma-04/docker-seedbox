@@ -13,15 +13,13 @@ const log = pino({
   redact: ['config.appSecret', 'config.gatewaySecret', 'config.vpnControlToken'],
 });
 const db = openDb(join(config.dataDir, 'seedbox.db'));
-const worker = new Worker({
-  db, config, log,
-  downloader: new QbittorrentDownloader({
-    baseUrl: config.qbtUrl,
-    username: process.env.QBT_USERNAME,
-    password: process.env.QBT_PASSWORD,
-  }),
-  vpn: vpnClient(config),
+const qbt = new QbittorrentDownloader({
+  baseUrl: config.qbtUrl,
+  username: process.env.QBT_USERNAME,
+  password: process.env.QBT_PASSWORD,
 });
+if (config.trackerListAllowPrivate) log.warn('TRACKER_LIST_ALLOW_PRIVATE is set: tracker lists may use http and private addresses. Test stacks only.');
+const worker = new Worker({ db, config, log, downloader: qbt, engine: qbt, vpn: vpnClient(config) });
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {

@@ -18,9 +18,11 @@ const limit = z.number().int().min(-1).max(100_000); // -1 (or 0) = unlimited
 const slots = z.number().int().min(-1).max(100_000);
 const TRACKER_URL = /^(https?|udp|wss?):\/\/[^\s/?#]+[^\s]*$/i;
 
-export const addTrackersSchema = z.string().max(4096, 'At most 4 KB').superRefine((v, ctx) => {
+export const MAX_MANUAL_TRACKERS = 100;
+/** The admin's MANUAL extra trackers. Stored in our settings (`trackers.manual`); the worker writes manual + fetched ones to the engine. */
+export const addTrackersSchema = z.string().max(16_384, 'At most 16 KB').superRefine((v, ctx) => {
   const lines = v.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length > 50) ctx.addIssue({ code: 'custom', message: 'At most 50 trackers' });
+  if (lines.length > MAX_MANUAL_TRACKERS) ctx.addIssue({ code: 'custom', message: `At most ${MAX_MANUAL_TRACKERS} trackers` });
   for (const l of lines) if (!TRACKER_URL.test(l)) { ctx.addIssue({ code: 'custom', message: `Not a valid tracker URL (http, https, udp, ws, wss): ${l.slice(0, 60)}` }); break; }
 });
 
@@ -82,12 +84,13 @@ export function fromPreferences(prefs: Record<string, unknown>): EngineSettingsD
   return out as unknown as EngineSettingsDto;
 }
 
-/** Map a validated partial update to qBittorrent keys. Throws Error with a user-facing message on inconsistent input. */
+/** Map a validated partial update to qBittorrent keys (the two tracker fields are not engine writes, see above). Throws Error with a user-facing message on inconsistent input. */
 export function toPreferences(u: EngineSettingsUpdateDto): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [name, f] of Object.entries(FIELDS) as unknown as [keyof EngineSettingsDto, Field<unknown>][]) {
     const v = u[name];
     if (v === undefined) continue;
+    if (name === 'addTrackers' || name === 'addTrackersEnabled') continue; // kept in our settings; the worker applies them (lib/trackers.ts)
     if (name === 'listenPort' && u.randomPort === true) continue; // random port wins; fixed port ignored
     out[f.key] = f.toEngine(v);
   }

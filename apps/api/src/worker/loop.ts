@@ -16,6 +16,8 @@ import type { RcloneProc, SpawnFn } from './rclone.js';
 import { processDeletions } from './deletions.js';
 import { EgressProxy } from './egress-proxy.js';
 import { realGDrive, runUpload, type EndpointGuard, type GDriveOps } from './upload.js';
+import { TrackerSync, type TrackerEngine } from './trackers.js';
+import type { FetchOptions } from '../lib/trackerlist.js';
 import { reconcileVpn } from './vpn.js';
 
 export interface WorkerDeps {
@@ -34,6 +36,10 @@ export interface WorkerDeps {
   gdrive?: GDriveOps;
   /** SSRF guard for user-owned S3 endpoints; defaults to the shared lib/netguard.ts `assertPublicEndpoint`. */
   endpointGuard?: EndpointGuard;
+  /** Engine preferences access for the tracker-list step. Omitted = that step is off (most tests). */
+  engine?: TrackerEngine;
+  /** Fetch options of the tracker-list step (tests). */
+  trackerFetch?: FetchOptions;
   /** Egress proxy for user-owned destinations (default: a lazily started EgressProxy configured from EGRESS_ALLOWED_PORTS). */
   egress?: EgressProxy;
   /** How often the engine's category is swept for torrents that match no non-removed row. Default 30 s. */
@@ -85,6 +91,7 @@ export class Worker {
   /** Torrent id -> category hashes present just before its first add (until the engine lists it): anything new afterwards is blamed on it. */
   private addBefore = new Map<number, Set<string>>();
   private readonly egress: EgressProxy;
+  private readonly trackers: TrackerSync | null;
 
   private clock(): number { return (this.d.nowMs ?? Date.now)(); }
   private nowSec(): number { return Math.floor(this.clock() / 1000); }
@@ -94,6 +101,9 @@ export class Worker {
     this.db = deps.db;
     this.log = deps.log;
     this.egress = deps.egress ?? new EgressProxy();
+    this.trackers = deps.engine
+      ? new TrackerSync({ db: deps.db, config: deps.config, engine: deps.engine, log: deps.log, fetch: deps.trackerFetch }, () => this.clock())
+      : null;
   }
 
   start(): void {
@@ -129,6 +139,7 @@ export class Worker {
     while (this.uploads.size) await Promise.allSettled([...this.uploads.values()].map((u) => u.done));
     if (this.vpnInflight) await this.vpnInflight;
     if (this.deletionsInflight) await this.deletionsInflight;
+    if (this.trackers) await this.trackers.idle();
   }
 
   private warnOnce(key: string, msg: string, err?: unknown, everyMs = 60_000): void {
@@ -152,6 +163,7 @@ export class Worker {
     await this.step('uploads', () => this.startUploads());
     await this.step('cleanup', () => this.cleanup());
     await this.step('deletions', () => this.deletions());
+    if (this.trackers) await this.step('trackers', () => this.trackers!.tick());
     if (Date.now() - this.lastVpn >= this.d.vpnEveryMs && !this.vpnInflight) {
       this.lastVpn = Date.now();
       this.vpnInflight = this.reconcileVpn().finally(() => { this.vpnInflight = null; });
