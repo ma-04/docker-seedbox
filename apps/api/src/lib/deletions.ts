@@ -42,9 +42,40 @@ export function enqueueDeletion(db: Db, appSecret: string, job: Pick<JobRow, 'de
     dest.row.owner_user_id === null ? 0 : 1, now());
 }
 
+/**
+ * Identity of an S3 object location: normalised endpoint + bucket + the FULL key (destination prefix + remote path).
+ * Two destinations with the same bucket and an overlapping prefix (`x` + `u/J` vs `x/u` + `J`) resolve to the same key.
+ */
+export function s3Location(cfg: S3Config, remotePath: string): string {
+  let ep = cfg.endpoint.trim().toLowerCase();
+  if (!/^[a-z][a-z0-9+.-]*:\/\//.test(ep)) ep = `https://${ep}`; // rclone treats a scheme-less endpoint as https
+  try {
+    const u = new URL(ep);
+    const port = u.port && !((u.protocol === 'https:' && u.port === '443') || (u.protocol === 'http:' && u.port === '80')) ? `:${u.port}` : '';
+    ep = `${u.protocol}//${u.hostname}${port}${u.pathname.replace(/\/+$/, '')}`;
+  } catch { ep = ep.replace(/\/+$/, ''); }
+  return `${ep}|${cfg.bucket}|${fullRemotePath(cfg, remotePath)}`;
+}
+
 /** Does any remaining job deliver to the same place? (same destination + remote_path, or another local destination mapping to the same library path). */
-export function stillReferenced(db: Db, appSecret: string, row: Pick<PendingDeletionRow, 'destination_id' | 'remote_path' | 'kind' | 'full_path'>): boolean {
+export function stillReferenced(db: Db, appSecret: string, row: Pick<PendingDeletionRow, 'destination_id' | 'remote_path' | 'kind' | 'full_path' | 'config_enc'>): boolean {
   if (db.prepare('SELECT 1 FROM jobs WHERE destination_id = ? AND remote_path = ? LIMIT 1').get(row.destination_id, row.remote_path)) return true;
+  if (row.kind === 's3') {
+    // Another S3 destination (any owner) that points at the same endpoint + bucket + key prefix shares the objects:
+    // purging would delete its copy too. Compared on the resolved key, across ALL S3 destinations.
+    if (!row.config_enc) return true; // no snapshot to compare: never purge blindly
+    let mine: string;
+    try { mine = s3Location(s3ConfigOf(appSecret, row.config_enc), row.remote_path); } catch { return true; }
+    const cands = db.prepare(
+      "SELECT DISTINCT j.destination_id AS id, j.remote_path AS rp FROM jobs j JOIN destinations d ON d.id = j.destination_id WHERE d.type = 's3' AND j.remote_path IS NOT NULL",
+    ).all() as { id: number; rp: string }[];
+    const cfgs = new Map<number, S3Config | null>();
+    return cands.some((c) => {
+      if (!cfgs.has(c.id)) { const d = getDestination(db, appSecret, c.id); cfgs.set(c.id, d?.config.type === 's3' ? d.config : null); }
+      const cfg = cfgs.get(c.id);
+      return !!cfg && s3Location(cfg, c.rp) === mine;
+    });
+  }
   if (row.kind !== 'local') return false;
   const others = db.prepare(
     "SELECT DISTINCT j.destination_id AS id FROM jobs j JOIN destinations d ON d.id = j.destination_id WHERE j.remote_path = ? AND d.type = 'local'",

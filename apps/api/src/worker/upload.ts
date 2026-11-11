@@ -81,6 +81,26 @@ async function resolveSource(deps: UploadDeps, torrent: TorrentRow): Promise<str
   throw new Error('Downloaded files not found on disk');
 }
 
+/**
+ * The recorded library copy of a `downloaded` torrent is gone: forget it, drop the (data-less) engine entry and put the
+ * torrent back to `pending` with its jobs back to `queued`, in one transaction, so the normal pipeline downloads it again.
+ */
+async function redownload(deps: UploadDeps, torrent: TorrentRow): Promise<boolean> {
+  await deps.downloader.remove(torrent.infohash, true).catch(() => undefined);
+  deps.log.warn({ torrentId: torrent.id }, 'the library copy of a downloaded torrent is gone; downloading it again');
+  return deps.db.transaction(() => {
+    const r = deps.db.prepare(
+      `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, started_at = NULL,
+         library_path = NULL, cleanup_pending = 0 WHERE id = ? AND state = 'downloaded'`,
+    ).run(torrent.id);
+    if (r.changes === 0) return false;
+    deps.db.prepare(
+      "UPDATE jobs SET state = 'queued', upload_progress = 0, upload_speed = 0, updated_at = ? WHERE torrent_id = ? AND state IN ('downloading','uploading')",
+    ).run(now(), torrent.id);
+    return true;
+  }).immediate();
+}
+
 /** Torrent id -> a local move in progress. Later jobs for the same torrent wait for it, then copy from the library. */
 const moving = new Map<number, Promise<void>>();
 
@@ -145,7 +165,12 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
         ? resolve(deps.config.downloadsDir, 'library', fullRemotePath(dest.config, jobRemoteDir(dest.row, user, torrent.infohash, torrent.name)))
         : null;
       const priorReal = prior ? await realInsideLoose(prior, resolve(deps.config.downloadsDir, 'library')) : null;
-      if (!priorReal) throw e;
+      if (!priorReal) {
+        // The torrent's data lived only in a library copy that has since been removed (deleted by hand, or by a job delete that
+        // raced this job): download it again instead of failing the job.
+        if (torrent.library_path && torrent.state === 'downloaded' && (await redownload(deps, torrent))) return;
+        throw e;
+      }
       source = priorReal;
       delivered = true;
     }
