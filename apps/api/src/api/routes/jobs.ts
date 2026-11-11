@@ -174,7 +174,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
     let link: (f: JobFileRow) => Promise<string | null> | string | null = () => null;
 
     if (cfg.type === 'local') {
-      const base = cfg.publicBaseUrl || `${config.publicScheme}://${config.filesHost}`;
+      const base = cfg.publicBaseUrl || config.filesBaseUrl;
       const key = deriveKey(config.appSecret, 'local-links');
       link = (f) => {
         const p = '/' + fullRemotePath(cfg, remote, f.path);

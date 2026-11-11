@@ -140,7 +140,7 @@ export function DestinationForm({ initial, types, admin, pending, error, onSubmi
         {type === 'local' && (
           <>
             {text('Subdirectory', 'subdir', { hint: 'Optional folder below the library root.' })}
-            {text('Public base URL', 'publicBaseUrl', { hint: 'Defaults to the files host.' })}
+            {text('Public base URL', 'publicBaseUrl', { hint: 'Defaults to the download host: the app host (/dl/), or FILES_HOST when one is set.'})}
             {ttl}
           </>
         )}

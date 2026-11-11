@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { api, loginUI, userPage } from '../lib/app';
+import { PORTAL_URL, api, loginUI, userPage } from '../lib/app';
 import { env } from '../lib/env';
 import { raw } from '../lib/net';
 
@@ -8,7 +8,7 @@ test.describe('1. authentication', () => {
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true, baseURL: env.baseURL });
     const page = await ctx.newPage();
     await page.goto('/');
-    await expect(page).toHaveURL(/auth\.seedbox\.test/);
+    await expect(page).toHaveURL(PORTAL_URL);
     await expect(page.locator('#username-textfield')).toBeVisible();
     // API calls get a plain 401, not a redirect
     const r = await raw(`${env.baseURL}/api/me`);
@@ -76,10 +76,10 @@ test.describe('1. authentication', () => {
     await loginUI(page, 'carol');
     const loggedOut = page.waitForResponse((r) => r.url().includes('/api/logout'));
     await page.getByRole('link', { name: 'Log out' }).click();
-    await expect(page).toHaveURL(/auth\.seedbox\.test/);
+    await expect(page).toHaveURL(PORTAL_URL);
     expect((await loggedOut).status()).toBe(200);
     await page.goto('/');
-    await expect(page).toHaveURL(/auth\.seedbox\.test/);
+    await expect(page).toHaveURL(PORTAL_URL);
     await expect(page.locator('#username-textfield')).toBeVisible();
     await ctx.close();
   });

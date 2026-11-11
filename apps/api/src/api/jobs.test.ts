@@ -134,6 +134,27 @@ describe('jobs', () => {
     expect(dl.statusCode).toBe(200);
   });
 
+  for (const [layout, hosts, origin] of [
+    ['single domain', { AUTH_HOST: '', FILES_HOST: '' }, 'https://app.example.test'],
+    ['separate download host only', { AUTH_HOST: '', FILES_HOST: 'dl.example.test' }, 'https://dl.example.test'],
+    ['FILES_HOST equal to APP_HOST', { FILES_HOST: 'APP.example.test' }, 'https://app.example.test'],
+  ] as const) {
+    it(`local links in the ${layout} layout point at ${origin}/dl/ and a destination's publicBaseUrl still wins`, async () => {
+      const env = setup(undefined, undefined, {}, hosts);
+      const dest = await makeLocalDest(env);
+      const id = (await env.call(alice, 'POST', '/api/jobs', { magnet: magnet(HEX), destinationId: dest })).json().id;
+      env.db.prepare("UPDATE jobs SET state='completed', remote_path = 'alice/Pack' WHERE id = ?").run(id);
+      env.db.prepare('INSERT INTO job_files (job_id, path, size) VALUES (?, ?, 5)').run(id, 'a.txt');
+      const u = new URL((await env.call(alice, 'GET', `/api/jobs/${id}/files`)).json().files[0].url);
+      expect(u.origin).toBe(origin);
+      expect(u.pathname.startsWith('/dl/')).toBe(true);
+      expect((await env.call(null, 'GET', u.pathname + u.search)).statusCode).toBe(200);
+      expect((await env.call(root, 'PATCH', `/api/admin/destinations/${dest}`, { config: { publicBaseUrl: 'https://cdn.example.test/base' } })).statusCode).toBe(200);
+      const v = new URL((await env.call(alice, 'GET', `/api/jobs/${id}/files`)).json().files[0].url);
+      expect(v.origin).toBe('https://cdn.example.test');
+    });
+  }
+
   it('builds s3 links (presigned and public base) and gdrive proxy links', async () => {
     const env = setup();
     const s3 = (await env.call(root, 'POST', '/api/admin/destinations', {

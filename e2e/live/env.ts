@@ -17,13 +17,20 @@ const need = (k: string): string => {
 const opt = (k: string, d = ''): string => process.env[k] ?? d;
 const lines = (k: string): string[] => opt(k).split(',').map((s) => s.trim()).filter(Boolean);
 
-const domain = opt('LIVE_DOMAIN', 'seedbox.invalid');
+const domain = opt('LIVE_DOMAIN', 'seedbox.invalid').trim().toLowerCase();
+// Hosts layout of the deployment under test. Unset: the three-host layout (auth.<domain>, files.<domain>). Set to an
+// empty value (or to LIVE_DOMAIN): served on the app host, i.e. the portal at <domain>/auth/ and downloads at /dl/.
+const sep = (k: string, d: string): string | null => { const v = opt(k, d).trim().toLowerCase(); return v && v !== domain ? v : null; };
+const authHost = sep('LIVE_AUTH_HOST', `auth.${domain}`);
+const filesHost = sep('LIVE_FILES_HOST', `files.${domain}`);
 export const live = {
   domain,
   baseURL: `https://${domain}`,
-  authURL: `https://${opt('LIVE_AUTH_HOST', `auth.${domain}`)}`,
-  filesURL: `https://${opt('LIVE_FILES_HOST', `files.${domain}`)}`,
-  get hosts(): string[] { return [domain, new URL(this.authURL).host, new URL(this.filesURL).host]; },
+  /** Base URL of the Authelia portal, no trailing slash. */
+  authURL: authHost ? `https://${authHost}` : `https://${domain}/auth`,
+  filesURL: `https://${filesHost ?? domain}`,
+  /** The public hostnames of the deployment (TLS/DNS checks). */
+  get hosts(): string[] { return [...new Set([domain, authHost ?? domain, filesHost ?? domain])]; },
   admin: { user: opt('LIVE_ADMIN_USER', 'admin'), get password() { return need('LIVE_ADMIN_PASSWORD'); } },
   user: { user: opt('LIVE_USER', 'tester'), get password() { return need('LIVE_USER_PASSWORD'); } },
   /** a second normal user: lets the same torrent be added once more (one job per user and torrent) */

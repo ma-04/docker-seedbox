@@ -28,8 +28,11 @@ is reachable from outside the compose network.
 TLS is terminated by an outer proxy (nginx-proxy + acme-companion in `deploy/proxy/`,
 or any existing proxy). `gateway` exposes `VIRTUAL_HOST`/`LETSENCRYPT_HOST` env for that.
 
-Hosts: `APP_HOST` (SPA + `/api`), `AUTH_HOST` (Authelia portal), `FILES_HOST`
-(local-folder downloads, no login, signed URLs only).
+Hosts: by default ONE, `APP_HOST`: SPA + `/api`, the Authelia portal under `/auth/` and local-folder downloads under
+`/dl/` (no login, signed URLs only). Optional, independently: `FILES_HOST` moves `/dl/` to a host of its own (then
+`/dl/` on `APP_HOST` is a 404), `AUTH_HOST` moves the portal to a host of its own. Empty, or equal to `APP_HOST`,
+means "on `APP_HOST`"; the gateway (`25-gateway-auth-mode.sh`), Authelia (`configuration.yml` template) and the API
+(`lib/config.ts` `hostLayout`) apply that same rule. Details: [deployment.md](deployment.md#hosts-layout).
 
 ## Stack
 
@@ -42,8 +45,11 @@ Uploads: the `rclone` binary inside the api image, configured only through
 ## Auth
 
 `AUTH_MODE=authelia` (default): gateway does `auth_request` to Authelia
-(`/api/authz/auth-request`) for everything on `APP_HOST` and forwards
-`Remote-User`, `Remote-Email`, `Remote-Name`, `Remote-Groups`.
+(`http://authelia:9091/api/authz/auth-request`, the root path, which Authelia keeps serving when its
+`server.address` has the `/auth` subpath) for everything on `APP_HOST` except `/api/health`, the portal (`/auth/`)
+and `/dl/`, and forwards `Remote-User`, `Remote-Email`, `Remote-Name`, `Remote-Groups`. Unauthenticated page
+requests are redirected to the `Location` Authelia computes (`<portal>/?rd=<full original URL>&rm=<method>`);
+`/api/*` gets a bare 401.
 `AUTH_MODE=external`: gateway skips Authelia and forwards the same four headers as
 received from the operator's own SSO proxy.
 
@@ -53,8 +59,8 @@ any request without the correct secret (401) — this is what makes header auth 
 Users are auto-provisioned on first request, keyed by `Remote-User`. Admin =
 member of group `ADMIN_GROUP` (default `admins`).
 
-Routes that need no login: `GET /api/health` and `GET /dl/*` (on `FILES_HOST`, signed
-URL only; the gateway still adds `X-Gateway-Secret`). Every other route requires the user headers.
+Routes that need no login: `GET /api/health` and `GET /dl/*` (on `APP_HOST`, or on `FILES_HOST` when set; signed
+URL only; the gateway still adds `X-Gateway-Secret` and never forwards `Cookie`, `Authorization` or `Remote-*`). Every other route requires the user headers.
 
 **Authorisation follows the matched route, never the URL string.** `apps/api/src/api/app.ts`
 registers authenticated routes in an encapsulated plugin whose `onRequest` hook is `requireUser`,
@@ -170,7 +176,7 @@ type S3Config = { type: 's3'; endpoint: string; region: string; accessKeyId: str
   publicBaseUrl?: string;                   // if set links are `${publicBaseUrl}/${key}`, else presigned
   linkTtlSeconds?: number };
 type LocalConfig = { type: 'local'; subdir?: string;
-  publicBaseUrl?: string;                   // default `https://${FILES_HOST}`; admin-editable
+  publicBaseUrl?: string;                   // default `https://${FILES_HOST || APP_HOST}`; admin-editable
   linkTtlSeconds?: number };
 ```
 
@@ -347,10 +353,11 @@ check): its fetch runs inside the VPN namespace, validates nothing (no scheme/ho
 | `APP_SECRET` | api, worker | required, ≥32 chars; encryption + local link key |
 | `GATEWAY_SECRET` | gateway, api | required; shared header secret |
 | `VPN_CONTROL_TOKEN` | vpn, api, worker | required |
-| `APP_HOST`, `AUTH_HOST`, `FILES_HOST` | gateway, api, authelia | hostnames, no scheme |
-| `COOKIE_DOMAIN` | authelia | parent domain covering `APP_HOST` and `AUTH_HOST` |
+| `APP_HOST` | gateway, api, authelia | required; hostname, no scheme |
+| `AUTH_HOST`, `FILES_HOST` | gateway, api, authelia | optional separate hosts; empty or `= APP_HOST` = `/auth/`, `/dl/` on `APP_HOST`; all host values are trimmed and lowercased by every component |
+| `COOKIE_DOMAIN` | authelia | only with a separate `AUTH_HOST` (required: a parent of both); otherwise the cookie is scoped to `APP_HOST` |
 | `PUBLIC_SCHEME` | api | `https` |
-| `AUTH_MODE` | gateway | `authelia` \| `external` |
+| `AUTH_MODE` | gateway, api | `authelia` \| `external` (no portal: `AUTH_HOST` ignored, logout link from `LOGOUT_URL`) |
 | `ADMIN_GROUP` | api | `admins` |
 | `DATA_DIR` | api, worker | `/data` (SQLite at `$DATA_DIR/seedbox.db`) |
 | `DOWNLOADS_DIR` | api, worker | `/downloads` (`incomplete/`, `library/`) |

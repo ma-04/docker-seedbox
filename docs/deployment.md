@@ -6,15 +6,70 @@
 
 - Linux host with Docker Engine **26+** and Compose **2.26+** (`docker compose version`; needed for volume subpaths, see [Volumes](#volumes)). `./setup.sh` and `doctor` check.
 - For the VPN: a WireGuard-capable kernel (5.6+ has it built in; the sidecar needs `NET_ADMIN` but no `/dev/net/tun`). `./setup.sh doctor` checks for the kernel module.
-- Three DNS names. `seedbox.example.com` is used below:
+- One DNS name pointing at the server (`seedbox.example.com` below). Optionally a second one for downloads, see
+  [Hosts layout](#hosts-layout).
 
-| Record | Purpose |
+## Hosts layout
+
+By default everything lives on **one** hostname, `APP_HOST`:
+
+| URL | What | Login |
+|---|---|---|
+| `https://seedbox.example.com/` | web UI | yes (redirects to the portal) |
+| `https://seedbox.example.com/api/` | API | yes (a bare `401` without a session) |
+| `https://seedbox.example.com/auth/` | Authelia login portal | no (it *is* the login) |
+| `https://seedbox.example.com/dl/...?exp=&sig=` | local-folder downloads | no, the signed link is the credential |
+
+Two independent options, each one more DNS record pointing at the server:
+
+| `.env` | Effect |
 |---|---|
-| `seedbox.example.com` (`APP_HOST`) | web UI and `/api` |
-| `auth.seedbox.example.com` (`AUTH_HOST`) | Authelia login portal |
-| `files.seedbox.example.com` (`FILES_HOST`) | local-folder downloads (signed links, no login) |
+| `FILES_HOST=dl.example.net` | Local downloads move to `https://dl.example.net/dl/...`; `/dl/` on `APP_HOST` answers 404. **Recommended hardening**: downloaded files (user-supplied content) then never share the app's origin, see [SECURITY.md](../SECURITY.md) ("Hosts and origins"). Pick a host **outside** `COOKIE_DOMAIN` (ideally a different registrable domain) so the browser does not even send the login cookie there. `./setup.sh --files-host dl.example.net`. |
+| `AUTH_HOST=auth.seedbox.example.com` | The portal moves to its own host (served at `/`), with `COOKIE_DOMAIN` a parent of both hosts. This is the layout every install had before single-domain support; there is little reason to choose it for a new one. `./setup.sh --auth-host auth.seedbox.example.com`. |
 
-All three point at the server. `COOKIE_DOMAIN` must be a parent of both `APP_HOST` and `AUTH_HOST` (default: the app domain).
+Empty means "on `APP_HOST`" (a value equal to `APP_HOST` means the same, but leave it empty: it would be listed twice for the proxy; `setup.sh` empties it). Host values are trimmed and lowercased by every component. With the portal on `APP_HOST` the login cookie is always scoped to `APP_HOST`, whatever `COOKIE_DOMAIN` says; with a separate `AUTH_HOST`, `COOKIE_DOMAIN` is required (a parent of both) and Authelia refuses to start without it. With `AUTH_MODE=external` there is no portal and `AUTH_HOST` is ignored. The gateway, Authelia and
+the API all derive their layout from these variables, so `deploy/.env` is the only place to change it (then
+`cd deploy && docker compose up -d`, or re-run `./setup.sh`, which also updates the DNS list it prints).
+
+**Existing three-host installs** (`AUTH_HOST` and `FILES_HOST` set) keep working unchanged after `./setup.sh update`:
+the gateway renders the same three server blocks and Authelia gets byte-identical settings. Differences: `/dl/` on
+`APP_HOST` now answers 404 instead of falling through to the SPA, the portal host no longer forwards client-supplied
+`Remote-*` headers to Authelia, and `/dl/` no longer forwards the browser's `Cookie`/`Authorization` to the API. To move
+to one domain: `./setup.sh --single-domain` (or empty `AUTH_HOST`/`FILES_HOST` by hand: the cookie then follows `APP_HOST` on its own),
+`docker compose up -d`. Everyone has to log in once more (the cookie's domain changes), links already handed out on the
+old files host stop working (create them again from the Files panel), and the old DNS records can go once nothing uses
+them. Keep `FILES_HOST` if you want the origin isolation.
+
+### How the portal works under `/auth/` (Authelia 4.39)
+
+Sources: Authelia's [server](https://www.authelia.com/configuration/miscellaneous/server/) and
+[session](https://www.authelia.com/configuration/session/introduction/) configuration docs, the
+[NGINX integration guide](https://www.authelia.com/integration/proxies/nginx/), and the v4.39.28 source
+([`StripPath`](https://github.com/authelia/authelia/blob/v4.39.28/internal/middlewares/strip_path.go),
+[server address validation](https://github.com/authelia/authelia/blob/v4.39.28/internal/configuration/validator/server.go),
+[session validation](https://github.com/authelia/authelia/blob/v4.39.28/internal/configuration/validator/session.go),
+[authz redirect](https://github.com/authelia/authelia/blob/v4.39.28/internal/handlers/handler_authz.go),
+[`PathPrefix` integration suite](https://github.com/authelia/authelia/tree/v4.39.28/internal/suites/PathPrefix)).
+
+- **Subpath:** `server.address: 'tcp://:9091/auth'`. The path must be **one** alphanumeric segment without a trailing
+  slash (`/auth/` or `/my/auth` fail validation), so it is fixed to `/auth`. Authelia strips the prefix itself and keeps
+  answering on `/` as well, so the proxy passes `/auth/...` through **unchanged** (stripping it breaks the portal's base
+  URL) and the internal authz call keeps using `/api/authz/auth-request` at the root. The portal's assets, its API
+  (`/auth/api/...`) and its pages are all below `/auth/`; it uses no websockets.
+- **Same-host session cookie:** `session.cookies[].domain` may equal the host in `authelia_url`
+  (`authelia_url: 'https://APP_HOST/auth/'`, a path is allowed and gets a trailing slash). The domain must contain a
+  dot or be an IP address and must not be on the public suffix list, so a bare `localhost` or a single-label name cannot
+  work, and a name directly under a public suffix (`example.duckdns.org`) only works as its own cookie domain. TLS is
+  required. `default_redirection_url` must differ from `authelia_url` (`https://APP_HOST` vs `https://APP_HOST/auth/`).
+  The cookie is `Path=/`, `HttpOnly`, `Secure`, `SameSite=Lax`, and with the domain set to `APP_HOST` it is also sent
+  to subdomains of `APP_HOST`.
+- **Redirect flow:** for nginx `auth_request` Authelia's AuthRequest endpoint always answers `401` and puts the portal URL
+  in `Location`: `https://APP_HOST/auth/?rd=<full original URL, query included>&rm=<method>`. The gateway turns that into a
+  `302` for pages only; `/api/*` uses the same check without the `error_page`, so XHRs get a bare `401`. `rd` must lie
+  inside the cookie domain, which with `domain = APP_HOST` limits post-login redirects to the app itself. Logout is
+  `https://APP_HOST/auth/logout`. Links Authelia writes itself (2FA registration / password reset, here into
+  `notification.txt`) and, if OIDC is enabled one day, its issuer are built from `X-Forwarded-Proto`/`-Host` plus the
+  base path, i.e. `https://APP_HOST/auth/...`; the gateway sets those headers.
 
 ## The three proxy modes
 
@@ -22,7 +77,7 @@ All three point at the server. `COOKIE_DOMAIN` must be a parent of both `APP_HOS
 
 ### 1. `bundled` - fresh server
 
-Ships [nginx-proxy](https://github.com/nginx-proxy/nginx-proxy) + [acme-companion](https://github.com/nginx-proxy/acme-companion): ports 80/443, automatic Let's Encrypt certificates for all three hosts. Ports 80 and 443 must be free and reachable from the internet. nginx-proxy and acme-companion mount the Docker socket (that is effectively root on the host, and `:ro` does not limit the API); this is the only place the stack does. If you do not want that, use `external` or `none` mode.
+Ships [nginx-proxy](https://github.com/nginx-proxy/nginx-proxy) + [acme-companion](https://github.com/nginx-proxy/acme-companion): ports 80/443, automatic Let's Encrypt certificates for every host in use (`VIRTUAL_HOST`/`LETSENCRYPT_HOST` list exactly those). Ports 80 and 443 must be free and reachable from the internet. nginx-proxy and acme-companion mount the Docker socket (that is effectively root on the host, and `:ro` does not limit the API); this is the only place the stack does. If you do not want that, use `external` or `none` mode.
 
 ```sh
 ./setup.sh --domain seedbox.example.com --proxy bundled --acme-email me@example.com
@@ -45,7 +100,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=PROXY_NETWORK
-      - traefik.http.routers.seedbox.rule=Host(`seedbox.example.com`) || Host(`auth.seedbox.example.com`) || Host(`files.seedbox.example.com`)
+      - traefik.http.routers.seedbox.rule=Host(`seedbox.example.com`)   # || Host(`dl.example.net`) etc. for separate hosts
       - traefik.http.routers.seedbox.entrypoints=websecure
       - traefik.http.routers.seedbox.tls.certresolver=letsencrypt
       - traefik.http.services.seedbox.loadbalancer.server.port=8080
@@ -54,7 +109,7 @@ services:
 **Caddy**: put Caddy on the same network and use
 
 ```
-seedbox.example.com, auth.seedbox.example.com, files.seedbox.example.com {
+seedbox.example.com {                # add separate hosts, if any: seedbox.example.com, dl.example.net {
     reverse_proxy gateway:8080 {
         flush_interval -1
     }
@@ -67,7 +122,7 @@ Whatever the proxy, it must preserve the `Host` header, set `X-Forwarded-Proto: 
 
 Publishes the gateway on `${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8080}`. Use it behind a Cloudflare Tunnel or a proxy on another machine.
 
-**Authelia's session cookie is `Secure`: users must reach `APP_HOST` and `AUTH_HOST` over https**, and the outer proxy must send `X-Forwarded-Proto: https` (Cloudflare does). Without TLS, login redirects fail (Authelia refuses to act on `http://` URLs). With Cloudflare Tunnel, add the three hostnames as public hostnames pointing at `http://localhost:8080` and do **not** override the HTTP Host header; the gateway routes by it. Set `HTTP_BIND=0.0.0.0` only if the proxy is on another machine and a firewall protects the port.
+**Authelia's session cookie is `Secure`: users must reach `APP_HOST` (and `AUTH_HOST`, if separate) over https**, and the outer proxy must send `X-Forwarded-Proto: https` (Cloudflare does). Without TLS, login redirects fail (Authelia refuses to act on `http://` URLs). With Cloudflare Tunnel, add `APP_HOST` (and any separate host) as a public hostname pointing at `http://localhost:8080` and do **not** override the HTTP Host header; the gateway routes by it. Set `HTTP_BIND=0.0.0.0` only if the proxy is on another machine and a firewall protects the port.
 
 ## First start
 
@@ -87,9 +142,9 @@ Images come from `ghcr.io/ma-04/docker-seedbox-*` (`SEEDBOX_REGISTRY`, `SEEDBOX_
 If you already have an SSO proxy (oauth2-proxy, Authentik, Pomerium, a Cloudflare Access setup, ...):
 
 1. In `deploy/.env` set `AUTH_MODE=external` and clear `COMPOSE_PROFILES` (this stops Authelia).
-2. Your proxy must authenticate users and send `Remote-User`, `Remote-Groups` (comma-separated, containing `admins` for admins), `Remote-Email` and `Remote-Name` to the gateway for `APP_HOST`.
+2. Your proxy must authenticate users and send `Remote-User`, `Remote-Groups` (comma-separated, containing `admins` for admins), `Remote-Email` and `Remote-Name` to the gateway for `APP_HOST`. There is no `/auth/` portal in this mode (a set `AUTH_HOST` is ignored); set `LOGOUT_URL` to your SSO's sign-out page to get a "Log out" link in the web UI.
 3. **The gateway must be reachable only from that proxy.** Do not publish its port and do not put it on a shared network with untrusted containers: in this mode anyone who can reach the gateway can claim any identity. Prefer `external` proxy mode with a dedicated network.
-4. `FILES_HOST` must stay **public** (no SSO): links are protected by their signatures.
+4. Downloads must stay **public** (no SSO): links are protected by their signatures. With the default layout that means your proxy must let `https://APP_HOST/dl/...` through without a login (or set a separate `FILES_HOST` and leave that host public).
 5. The gateway always sets `X-Gateway-Secret` itself, but in this mode it does **not** remove client-supplied `Remote-*` headers: your SSO proxy has to overwrite them.
 6. `setup.sh` refuses `AUTH_MODE=external` together with the bundled proxy (it publishes the gateway on 80/443 with nothing authenticating): use `--proxy external` or `--proxy none`, or pass `--i-know-external-auth-is-unsafe` if something else really guarantees that only your SSO can reach the gateway. `./setup.sh doctor` flags the combination.
 
@@ -202,11 +257,11 @@ the whole volume, moving a finished download from `incomplete/` to `library/` st
 ## Gateway notes
 
 - Files served from the local destination live in the `downloads` volume under `library/` and are read by the gateway (read-only, `library/` subpath only) as uid 101: they must be world-readable (the default umask 022 is fine).
-- Gateway access logs (all three hosts) omit query strings, so magnet links, signatures and `rd=` redirect targets are not written to them. nginx's *error* log still prints the request line of failed requests: keep container log retention short (the compose files already rotate at 3 x 10 MB).
+- Gateway access logs (every host) omit query strings, so magnet links, signatures and `rd=` redirect targets are not written to them. nginx's *error* log still prints the request line of failed requests: keep container log retention short (the compose files already rotate at 3 x 10 MB).
 - The gateway needs Docker's embedded DNS (`127.0.0.11`), i.e. the default bridge network of Compose.
 
 ## Troubleshooting
 
-`./setup.sh doctor` first. Typical problems: DNS not propagated; ports 80/443 busy (use `external` mode); no WireGuard kernel support in an LXC/VPS container; cookie domain not a parent of both hosts; plain-http access in `none` mode.
+`./setup.sh doctor` first. Typical problems: DNS not propagated; ports 80/443 busy (use `external` mode); no WireGuard kernel support in an LXC/VPS container; with a separate `AUTH_HOST`, a cookie domain that is not a parent of both hosts; plain-http access in `none` mode; an outer proxy or tunnel that strips the `/auth/` prefix (it must pass paths unchanged).
 
 **Downloads stall or crawl only when the VPN is on** (small requests work, large transfers hang): a path-MTU problem. Set `VPN_MTU` in `deploy/.env` lower than the default 1280 (try 1200, then 1100), then `docker compose up -d vpn` (a config's own `MTU =` line overrides `VPN_MTU`). See [configuration.md](configuration.md#vpn).

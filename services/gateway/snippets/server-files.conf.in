@@ -1,0 +1,17 @@
+# --- FILES_HOST: local-folder downloads (separate download host; rendered by 25-gateway-auth-mode.sh) -------------
+server {
+  listen 8080;
+  server_name @HOST@;
+  server_tokens off;
+  access_log /dev/stdout noquery;
+
+  location = /healthz {
+    access_log off;
+    default_type text/plain;
+    return 200 "ok\n";
+  }
+
+  include /etc/nginx/snippets/files-locations.conf;
+
+  location / { return 404; }
+}
