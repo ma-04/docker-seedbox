@@ -56,7 +56,7 @@ export type Who = 'admin' | 'user' | 'user2';
 export async function login(page: Page, who: Who): Promise<void> {
   const c = who === 'admin' ? live.admin : who === 'user' ? live.user : live.user2;
   await page.goto('/');
-  await expect(page).toHaveURL(new RegExp(`^${live.authURL.replace(/[.]/g, '\\.')}`));
+  await expect(page).toHaveURL(new RegExp(`^${live.authURL.replace(/[.]/g, '\\.')}/`));
   await page.locator('#username-textfield').fill(c.user);
   await page.locator('#password-textfield').fill(c.password);
   await page.getByRole('button', { name: /sign in/i }).click();

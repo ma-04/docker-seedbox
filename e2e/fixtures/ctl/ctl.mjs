@@ -76,6 +76,11 @@ http.createServer(async (req, res) => {
       const r = await sh(['exec', await container('gateway'), 'sh', '-c', 'find /downloads/library -type f | head -100']);
       return send(200, { files: r.stdout.split('\n').filter(Boolean) });
     }
+    // GET /gateway-config : `nginx -T` of the running gateway (the configuration it actually loaded, every file).
+    if (req.method === 'GET' && url.pathname === '/gateway-config') {
+      const r = await sh(['exec', await container('gateway'), 'nginx', '-T']);
+      return send(200, { ok: r.ok, text: r.stdout, stderr: r.stderr.slice(0, 500) });
+    }
     return send(404, { error: 'not found' });
   } catch (e) {
     return send(500, { error: String(e?.message ?? e) });

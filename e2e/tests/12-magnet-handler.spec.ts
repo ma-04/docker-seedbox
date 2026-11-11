@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { DEST, api, ensureDestination, expectJobState, jobRow, purgeJobs, userPage } from '../lib/app';
+import { DEST, PORTAL_URL, api, ensureDestination, expectJobState, jobRow, purgeJobs, submitLogin, userPage } from '../lib/app';
 import { env } from '../lib/env';
 import { getManifest, hashOfMagnet } from '../lib/infra';
 
@@ -29,7 +29,7 @@ test.describe('12. magnet: protocol handler target (/add)', () => {
     const page = await ctx.newPage();
     try {
       await page.goto(`/add?magnet=${encodeURIComponent(magnet)}`);
-      await expect(page).toHaveURL(/auth\.seedbox\.test/);
+      await expect(page).toHaveURL(PORTAL_URL);
       // the original URL travels in `rd`, URL-encoded exactly once: one decode gives back /add?magnet=<single-encoded magnet>
       const rd = new URL(page.url()).searchParams.get('rd');
       expect(rd, 'rd parameter').toBeTruthy();
@@ -38,9 +38,7 @@ test.describe('12. magnet: protocol handler target (/add)', () => {
       expect(back.pathname).toBe('/add');
       expect(back.searchParams.get('magnet')).toBe(magnet);
 
-      await page.locator('#username-textfield').fill('alice');
-      await page.locator('#password-textfield').fill(env.passwords.alice);
-      await page.getByRole('button', { name: /sign in/i }).click();
+      await submitLogin(page, 'alice');
 
       await expect(page.getByTestId('current-user')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('magnet-input')).toHaveValue(magnet);

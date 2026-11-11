@@ -39,7 +39,7 @@ test.describe('1. TLS and access control', () => {
 
   test('an unauthenticated visitor is sent to Authelia', async ({ page }) => {
     await page.goto('/');
-    await expect(page).toHaveURL(new RegExp(`^${live.authURL.replace(/\./g, '\\.')}`));
+    await expect(page).toHaveURL(new RegExp(`^${live.authURL.replace(/\./g, '\\.')}/`));
     const r = await page.request.get('/api/me', { maxRedirects: 0 });
     expect([302, 401, 403]).toContain(r.status());
   });

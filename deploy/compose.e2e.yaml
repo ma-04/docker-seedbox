@@ -194,6 +194,7 @@ services:
       HOME: /tmp
       CI: ${CI:-}
       E2E_BASE_URL: https://app.seedbox.test
+      E2E_LAYOUT: ${E2E_LAYOUT:-single}      # single | split-files | multi (e2e/run.sh --layout); lib/env.ts derives the URLs
       E2E_ADMIN_PASSWORD: ${E2E_ADMIN_PASSWORD:?}
       E2E_ALICE_PASSWORD: ${E2E_ALICE_PASSWORD:?}
       E2E_BOB_PASSWORD: ${E2E_BOB_PASSWORD:?}

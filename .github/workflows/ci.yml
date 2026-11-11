@@ -48,20 +48,22 @@ jobs:
         with:
           persist-credentials: false
       - name: Shellcheck
-        run: shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh services/qbittorrent/seed-config.sh services/qbittorrent/conf-edit.sh
+        run: |
+          shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh services/qbittorrent/seed-config.sh services/qbittorrent/conf-edit.sh
+          # the gateway script runs under busybox ash: check it as plain sh too
+          shellcheck -s sh services/gateway/25-gateway-auth-mode.sh services/gateway/test/layouts.sh
       - name: qBittorrent entrypoint cannot be steered through planted symlinks (plain sh, no Docker)
         run: sh services/qbittorrent/test/symlink.sh
       - name: Gateway refuses to serve through symlinks
         run: |
           docker build -q -t gateway-under-test services/gateway
           GATEWAY_IMAGE=gateway-under-test services/gateway/test/symlinks.sh
-      - name: docker compose config (every proxy mode)
+      - name: Gateway renders a valid configuration for every hosts layout (nginx -T)
+        run: GATEWAY_IMAGE=gateway-under-test services/gateway/test/layouts.sh
+      - name: docker compose config (every hosts layout x proxy mode) and the published host lists
         working-directory: deploy
         env:
           APP_HOST: seedbox.example.com
-          AUTH_HOST: auth.seedbox.example.com
-          FILES_HOST: files.seedbox.example.com
-          COOKIE_DOMAIN: seedbox.example.com
           APP_SECRET: ci
           GATEWAY_SECRET: ci
           VPN_CONTROL_TOKEN: ci
@@ -71,16 +73,61 @@ jobs:
           PROXY_NETWORK: proxy
           COMPOSE_PROFILES: authelia
         run: |
-          for mode in bundled external none; do
-            COMPOSE_FILE="compose.yaml:compose.proxy-$mode.yaml" docker compose config -q
-          done
-      - name: setup.sh non-interactive smoke test
+          set -eu
+          check() { # check AUTH_HOST FILES_HOST COOKIE_DOMAIN EXPECTED_HOST_LIST
+            for mode in bundled external none; do
+              AUTH_HOST=$1 FILES_HOST=$2 COOKIE_DOMAIN=$3 COMPOSE_FILE="compose.yaml:compose.proxy-$mode.yaml" docker compose config -q
+            done
+            got=$(AUTH_HOST=$1 FILES_HOST=$2 COOKIE_DOMAIN=$3 COMPOSE_FILE=compose.yaml:compose.proxy-bundled.yaml \
+              docker compose config --format json | jq -r '.services.gateway.environment | .VIRTUAL_HOST + " " + .LETSENCRYPT_HOST')
+            echo "AUTH_HOST='$1' FILES_HOST='$2': $got"
+            test "$got" = "$4 $4"
+          }
+          check "" "" "" seedbox.example.com
+          check "" files.example.net "" seedbox.example.com,files.example.net
+          check auth.seedbox.example.com files.seedbox.example.com seedbox.example.com \
+            seedbox.example.com,auth.seedbox.example.com,files.seedbox.example.com
+      - name: Authelia accepts its configuration in every hosts layout (authelia config validate)
         run: |
+          set -eu
+          img=$(sed -n 's/^ *image: \(authelia\/authelia:[^ ]*\).*/\1/p' deploy/compose.yaml | head -n 1)
+          validate() { # validate AUTH_HOST COOKIE_DOMAIN EXPECTED_AUTHELIA_URL
+            out=$(docker run --rm -e X_AUTHELIA_CONFIG_FILTERS=template -e APP_HOST=seedbox.example.com -e AUTH_HOST="$1" \
+              -e COOKIE_DOMAIN="$2" -e AUTH_POLICY=one_factor -e AUTHELIA_SESSION_SECRET=ci-session-secret-0123456789abcdef \
+              -e AUTHELIA_STORAGE_ENCRYPTION_KEY=ci-storage-key-0123456789abcdef0123 \
+              -e AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET=ci-jwt-secret-0123456789abcdef \
+              -v "$PWD/deploy/authelia/configuration.yml:/config/configuration.yml:ro" \
+              -v "$PWD/deploy/authelia/users_database.yml.example:/users/users_database.yml:ro" \
+              --entrypoint sh "$img" -c 'authelia config validate --config /config/configuration.yml && authelia config template --config /config/configuration.yml' 2>&1) \
+              || { echo "$out"; exit 1; }
+            echo "$out" | grep -E "address:|domain:|authelia_url:|default_redirection_url:"
+            echo "$out" | grep -q "authelia_url: '$3'"
+          }
+          echo "== single domain";        validate "" "" "https://seedbox.example.com/auth/"
+          echo "== AUTH_HOST = APP_HOST"; validate seedbox.example.com "" "https://seedbox.example.com/auth/"
+          echo "== three hosts";          validate auth.seedbox.example.com seedbox.example.com "https://auth.seedbox.example.com"
+      - name: setup.sh non-interactive smoke test (single domain, separate download host, an existing three-host .env)
+        run: |
+          set -eu
+          hosts() { grep -E '^(APP_HOST|AUTH_HOST|FILES_HOST|COOKIE_DOMAIN)=' deploy/.env | tr '\n' ' '; echo; }
           ./setup.sh --domain seedbox.example.com --admin-email admin@example.com \
-            --proxy none --yes --no-start
+            --proxy none --yes --no-start | tee /tmp/setup.out
           test -s deploy/authelia/users/users_database.yml
           test "$(stat -c %a deploy/.env)" = 600
           test "$(stat -c %a deploy/authelia/users/users_database.yml)" = 600
+          hosts
+          test "$(hosts)" = "APP_HOST=seedbox.example.com AUTH_HOST= FILES_HOST= COOKIE_DOMAIN=seedbox.example.com "
+          grep -q "DNS record you need" /tmp/setup.out
+          ./setup.sh --files-host files.example.net --yes --no-start >/dev/null
+          hosts
+          test "$(hosts)" = "APP_HOST=seedbox.example.com AUTH_HOST= FILES_HOST=files.example.net COOKIE_DOMAIN=seedbox.example.com "
+          # a deploy/.env written before single-domain support (three hosts) is kept as it is by a plain re-run
+          sed -i -e 's/^AUTH_HOST=.*/AUTH_HOST=auth.seedbox.example.com/' -e 's/^FILES_HOST=.*/FILES_HOST=files.seedbox.example.com/' deploy/.env
+          ./setup.sh --yes --no-start >/dev/null
+          hosts
+          test "$(hosts)" = "APP_HOST=seedbox.example.com AUTH_HOST=auth.seedbox.example.com FILES_HOST=files.seedbox.example.com COOKIE_DOMAIN=seedbox.example.com "
+          ./setup.sh --single-domain --yes --no-start >/dev/null
+          test "$(hosts)" = "APP_HOST=seedbox.example.com AUTH_HOST= FILES_HOST= COOKIE_DOMAIN=seedbox.example.com "
 
   # Every image, natively for linux/amd64 AND linux/arm64 (arm64 on GitHub's arm runner, free for public repositories;
   # per image+arch build cache), each smoke-tested on the runner that built it. release.yml skips this (build-images:
@@ -109,22 +156,34 @@ jobs:
         run: services/vpn/test/run.sh
 
   e2e:
-    name: End-to-end (Playwright)
+    name: End-to-end (Playwright, ${{ matrix.layout }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # the default layout runs the whole suite
+          - { layout: single, specs: "" }
+          # the optional layouts run what depends on hosts: login, downloads, the magnet round trip, the layout checks
+          - { layout: split-files, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/14-layout.spec.ts" }
+          - { layout: multi, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/14-layout.spec.ts" }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Hermetic stack + Playwright suite
-        run: e2e/run.sh
+        env:
+          SPECS: ${{ matrix.specs }}
+        # SPECS is a fixed list from the matrix above; word splitting into separate arguments is intended
+        run: e2e/run.sh --layout "${{ matrix.layout }}" -- $SPECS
       - name: Upload report, traces and container logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: e2e-output
+          name: e2e-output-${{ matrix.layout }}
           path: e2e/.out
           retention-days: 7
           if-no-files-found: ignore

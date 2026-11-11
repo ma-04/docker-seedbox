@@ -10,11 +10,26 @@ if (file && fs.existsSync(file)) {
 }
 const need = (k: string): string => process.env[k] ?? '';
 
+/**
+ * Hosts layout of the stack under test (e2e/run.sh --layout):
+ *   single       app, Authelia (/auth/) and downloads (/dl/) on app.seedbox.test (the default)
+ *   split-files  app + Authelia on app.seedbox.test, downloads on files.seedbox.test
+ *   multi        app., auth. and files.seedbox.test
+ */
+export type Layout = 'single' | 'split-files' | 'multi';
+const layout = (process.env.E2E_LAYOUT ?? 'single') as Layout;
+if (!['single', 'split-files', 'multi'].includes(layout)) throw new Error(`E2E_LAYOUT must be single, split-files or multi (got ${layout})`);
+const baseURL = process.env.E2E_BASE_URL ?? 'https://app.seedbox.test';
+
 export const env = {
-  baseURL: process.env.E2E_BASE_URL ?? 'https://app.seedbox.test',
+  baseURL,
+  layout,
+  /** Base URL of the Authelia portal, no trailing slash. */
+  authURL: process.env.E2E_AUTH_URL ?? (layout === 'multi' ? 'https://auth.seedbox.test' : `${baseURL}/auth`),
+  /** Origin that serves the signed /dl/ links. */
+  filesURL: process.env.E2E_FILES_URL ?? (layout === 'single' ? baseURL : 'https://files.seedbox.test'),
   /** host:port that every *.seedbox.test name is mapped to (tunnel mode); empty = use DNS. */
   connect: process.env.E2E_CONNECT ?? '',
-  filesURL: process.env.E2E_FILES_URL ?? 'https://files.seedbox.test',
   s3URL: process.env.E2E_S3_URL ?? 'https://s3.seedbox.test',
   fixturesURL: process.env.E2E_FIXTURES_URL ?? 'https://fixtures.seedbox.test',
   ctlURL: process.env.E2E_CTL_URL ?? 'https://ctl.seedbox.test',

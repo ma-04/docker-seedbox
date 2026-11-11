@@ -45,6 +45,20 @@ async function ctl(path: string, init: { method?: string; body?: unknown } = {})
 }
 export const restartServices = (...services: string[]): Promise<void> => ctl('/restart', { method: 'POST', body: { services } });
 
+/** The running gateway's configuration as `nginx -T` prints it: file path -> contents (each loaded file separately). */
+export async function gatewayConfig(): Promise<Map<string, string>> {
+  const r = await ctl('/gateway-config') as { ok: boolean; text: string; stderr: string };
+  if (!r.ok) throw new Error(`nginx -T failed: ${r.stderr}`);
+  const files = new Map<string, string>();
+  let cur = '';
+  for (const line of r.text.split('\n')) {
+    const m = /^# configuration file (.+):$/.exec(line);
+    if (m) { cur = m[1]!; files.set(cur, ''); continue; }
+    if (cur) files.set(cur, files.get(cur)! + line + '\n');
+  }
+  return files;
+}
+
 export interface Probe { reachable: boolean; status: number; body: string; error: string }
 /** curl executed inside the qbittorrent container (the VPN network namespace, uid 1000). */
 export const probe = (url: string): Promise<Probe> => ctl(`/probe?url=${encodeURIComponent(url)}`);

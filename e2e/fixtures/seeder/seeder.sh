@@ -21,6 +21,8 @@ rnd "$M/ünï cødé.bin" 400000
 rnd "$M/hash #1.bin" 300000
 rnd "$M/100% real.bin" 300000
 printf "it's a trap?\nline two\n" > "$M/it's a file.txt"
+# Untrusted markup: must only ever be delivered as an inert attachment (tests/03), never rendered or run.
+printf '<!doctype html><title>PWNED</title><script>window.__pwned=1;document.title="PWNED";alert(document.domain)</script><h1>PWNED</h1>\n' > "$M/page.html"
 rnd "$M/sub dir/nested file.bin" 500000
 rnd "$M/sub dir/deeper/日本語.bin" 250000
 

@@ -5,14 +5,28 @@ import { env, type UserName } from './env';
 export const AUTH_DIR = path.resolve('.out/auth');
 export const statePath = (u: UserName): string => path.join(AUTH_DIR, `${u}.json`);
 
-/** Real login through the Authelia portal. Leaves the page on the app. */
-export async function loginUI(page: Page, user: UserName): Promise<void> {
-  await page.goto('/');
-  await expect(page).toHaveURL(/auth\.seedbox\.test/);
+const reEscape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** Matches any URL of the Authelia portal: https://app.seedbox.test/auth/... or https://auth.seedbox.test/... */
+export const PORTAL_URL = new RegExp(`^${reEscape(env.authURL)}/`);
+
+/** Fill in and submit the Authelia login form (the page must be on the portal). */
+export async function submitLogin(page: Page, user: UserName): Promise<void> {
   await page.locator('#username-textfield').fill(user);
   await page.locator('#password-textfield').fill(env.passwords[user]);
   await page.getByRole('button', { name: /sign in/i }).click();
+}
+
+/** Real login through the Authelia portal. Leaves the page on the app. */
+export async function loginUI(page: Page, user: UserName): Promise<void> {
+  await page.goto('/');
+  await expect(page).toHaveURL(PORTAL_URL);
+  await submitLogin(page, user);
   await expect(page.getByTestId('current-user')).toBeVisible({ timeout: 30_000 });
+}
+
+/** The session cookie header of a logged-in browser context, for raw requests. */
+export async function cookieHeader(context: BrowserContext): Promise<string> {
+  return (await context.cookies()).filter((c) => c.domain.endsWith('seedbox.test')).map((c) => `${c.name}=${c.value}`).join('; ');
 }
 
 export interface Api { status: number; json: any; text: string }
