@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import https from 'node:https';
 import path from 'node:path';
 import { live } from './env';
+import { runFolderFor } from './guards';
 
 // ---- run state (shared between the numbered specs; lives in e2e/.out, which is git-ignored) -----------------------
 const STATE = path.resolve('.out/live/state.json');
@@ -28,6 +29,25 @@ export function save(patch: Partial<State>): State {
   const s = { ...state(), ...patch };
   fs.writeFileSync(STATE, JSON.stringify(s, null, 2));
   return s;
+}
+/** The run-state file as it is, or null when this machine has no run state. Destructive steps use this and refuse on null. */
+export function stateIfExists(): State | null {
+  return fs.existsSync(STATE) ? (JSON.parse(fs.readFileSync(STATE, 'utf8')) as State) : null;
+}
+/** Folders (`<userDir>/<name> [<hash8>]`, relative to a shared destination's root) that THIS run's jobs create. Cleanup deletes only these. */
+export function recordedFolders(): string[] {
+  const f = (stateIfExists() as { runFolders?: unknown } | null)?.runFolders;
+  return Array.isArray(f) ? f.filter((x): x is string => typeof x === 'string') : [];
+}
+/** Records the folder a job of the signed-in user creates on a SHARED destination (called right after the job is added). */
+export async function recordRunFolder(page: Page, jobId: number): Promise<string> {
+  const me = (await api(page, 'GET', '/api/me')).json.user as { id: number; username: string };
+  const j = (await api(page, 'GET', `/api/jobs/${jobId}`)).json as { infohash: string; name: string | null };
+  if (!j.name) throw new Error(`job ${jobId} has no name yet; cannot record its folder`);
+  const rel = runFolderFor(me, j.infohash, j.name);
+  const known = recordedFolders();
+  if (!known.includes(rel)) save({ runFolders: [...known, rel] } as Partial<State>);
+  return rel;
 }
 export const s3Prefix = (): string => `${live.s3.prefixBase()}/${state().runId}`;
 
@@ -296,5 +316,6 @@ export async function ensureFreshJob(page: Page, key: string, kind: 'debian-dvd'
   const r = await addTorrent(page, { name, torrent, sha256: '' }, 'live-local');
   expect(r.status).toBe(201);
   save({ jobs: { ...state().jobs, [key]: { id: r.id, user: 'admin' } } });
+  await recordRunFolder(page, r.id);   // live-local is a shared destination: cleanup removes exactly this folder
   return r.id;
 }

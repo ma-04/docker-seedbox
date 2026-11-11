@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { SMALL, SMALL_LIMIT_KBPS, addTorrent, api, debianNetinst, jobRow, login, qbtJson, save, state, ubuntuLts, type Official } from './lib';
+import { SMALL, SMALL_LIMIT_KBPS, addTorrent, api, debianNetinst, jobRow, login, qbtJson, recordRunFolder, save, state, ubuntuLts, type Official } from './lib';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -25,14 +25,16 @@ test.describe('4a. add the torrents (the VPN is required and connected)', () => 
     const p = await uctx.newPage();
     await login(p, 'user');
     // idempotent: a job recorded in the state file that still exists is kept (a re-run does not add a second one)
-    const add = async (page: Page, key: string, who: string, o: Official, dest: string) => {
+    // `shared`: the destination is a shared one (its job folder is `<userDir>/<name> [<hash8>]`), recorded so that cleanup removes exactly it
+    const add = async (page: Page, key: string, who: string, o: Official, dest: string, shared = true) => {
       const known = state().jobs[key];
       const jobs = (await api(page, 'GET', '/api/jobs')).json as { id: number; infohash: string }[];
       const live = known && jobs.find((j) => j.id === known.id);
-      if (live) return { id: live.id, infohash: live.infohash };
+      if (live) { if (shared) await recordRunFolder(page, live.id); return { id: live.id, infohash: live.infohash }; }
       const r = await addTorrent(page, o, dest);
       expect(r.status).toBe(201);
       save({ jobs: { ...state().jobs, [key]: { id: r.id, user: who } }, hashes: { ...((state().hashes as object) ?? {}), [key.startsWith('ubuntu') ? 'ubuntu' : 'debian']: r.infohash } });
+      if (shared) await recordRunFolder(page, r.id);
       return r;
     };
     if (SMALL) {   // keep the small ISO mid-download for the limit and restart specs (spec 07 lifts this)
@@ -41,7 +43,7 @@ test.describe('4a. add the torrents (the VPN is required and connected)', () => 
       await add(a, 'ubuntu', 'admin', ubuntu!, 'live-local');
     }
     const d1 = await add(a, 'debianDrive', 'admin', debian, 'live-gdrive');
-    const d2 = await add(p, 'debianB2', 'user', debian, 'live-b2');
+    const d2 = await add(p, 'debianB2', 'user', debian, 'live-b2', false);
     // a third destination for the same torrent, from a second normal user (one job per user and torrent)
     const u2ctx = await browser.newContext();
     const p2 = await u2ctx.newPage();

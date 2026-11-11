@@ -94,11 +94,12 @@ npx playwright test -c playwright.live.config.ts 02 03          # selected specs
 | `07-complete-and-verify` | jobs complete in the UI; local link: sha256 equals the published one, Range gives 206, a tampered signature is refused; Drive: shared folder opens unauthenticated, Worker link sha256; B2: presigned link sha256, object below the run prefix; the torrent was downloaded once |
 | `08-stack-restart` | `docker compose down && up -d`: healthy again, jobs and links intact, the VPN reconnects by itself and stays `required` |
 | `09-final-review` | footer (source link, version), a newline-injected magnet is rejected (400) and nothing is added, `/add?magnet=` pre-fills without submitting, the VPN page shows the MTU, from inside the qbittorrent container the Docker bridge gateway and a sibling container are unreachable while the tunnel works, deleting the Local job removes its library files and its signed link answers 404 |
-| `99-cleanup` | deletes the test jobs, the Drive folders this run created, the B2 objects under the run prefix and the big ISO from the server (the deployment, its destinations and the VPN stay) |
+| `00-guards` | credential-free unit tests of the delete guards (`npx playwright test -c playwright.live.config.ts 00-guards`) |
+| `99-cleanup` | refuses to run without the run-state file; deletes the test jobs through the app, the Drive and library folders recorded for this run (`<userDir>/<name> [<hash8>]`, each asserted against the record right before deleting) and the B2 objects under the run prefix (the deployment, its destinations, other users' data and the VPN stay) |
 
 Safety rules baked in: a run id is generated once (`e2e/.out/live/state.json`); every S3/B2 delete asserts the
 `<base>/<run-id>/` prefix first and only ever calls `rclone delete` on exactly that path (no `sync`, no `purge`, no
-bucket-root listing/deletion); Drive removals address only the job folders recorded for this run. Credentials are passed
+bucket-root listing/deletion); Drive and library removals address only the job folders recorded for this run in the state file (never a name pattern, never another run's or user's copy); cleanup refuses to run when the state file is missing. Credentials are passed
 through the app's own UI/API over HTTPS; the env file and the rclone/WireGuard files are read on the machine running the
 tests and never copied to the server (the ssh probes only run `docker`, `curl` and `compose` commands).
 

@@ -22,7 +22,7 @@ This file is the contract between components. Change it before changing an inter
 Volumes: `data` (SQLite, api+worker), `downloads` (worker: whole volume rw; qbittorrent: only the `incomplete/` subpath rw; gateway: only the `library/` subpath, read-only; api: only the `library/` subpath, for the local-destination test probe),
 `authelia`, `qbt-config`. The `downloads` subpaths are Compose `volume.subpath` mounts (Docker Engine 26+, Compose 2.26+), so qBittorrent, which parses untrusted
 input in the VPN namespace, never sees the delivered files of other users; the worker sees both and `incomplete/<infohash>` -> `library/...` stays a rename on one filesystem.
-The one-shot `init` service creates the subfolders (a subpath must exist before its container starts) and fixes ownership. Capabilities: every service drops `ALL`; `vpn` keeps `NET_ADMIN`, `qbittorrent` the five its root-to-1000 entrypoint needs plus `KILL`, `authelia` and `nginx-proxy` only what their entrypoints need (see the compose files). No container mounts the Docker socket. Nothing but `gateway`
+The one-shot `init` service creates the subfolders (a subpath must exist before its container starts) and fixes ownership. Capabilities: every service drops `ALL`; `vpn` keeps `NET_ADMIN`, `qbittorrent` `CHOWN`, `SETUID`, `SETGID` and `KILL` with a read-only root filesystem (tmpfs `/tmp`), `authelia` and `nginx-proxy` only what their entrypoints need (see the compose files). No container mounts the Docker socket. Nothing but `gateway`
 is reachable from outside the compose network.
 
 TLS is terminated by an outer proxy (nginx-proxy + acme-companion in `deploy/proxy/`,
@@ -201,7 +201,7 @@ Remote layout for every destination: `<prefix>/<userDir>/<jobDir>/...` for share
 - s3: `publicBaseUrl` join, else a presigned GET.
 - local: `${publicBaseUrl}/dl/<urlencoded path>?exp=&sig=` → api verifies → requires a completed
   job (owner not disabled) whose `remote_path` + `job_files.path` covers the path, else 404 →
-  `X-Accel-Redirect: /_protected/<path>` → gateway serves from the `downloads` volume. Responses
+  `X-Accel-Redirect: /_protected/<path>` → gateway serves from the `downloads` volume (`disable_symlinks on`: a link anywhere in the path is refused). Responses
   always carry `Content-Disposition: attachment`, `nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`.
 
 **Signature (shared by api, worker and drive-proxy):**
@@ -261,10 +261,9 @@ config exists), `vpn.rotation` (`"manual"` | `"interval"` | `"on-failure"`),
 `pending_deletions` (finished jobs that chose a `remote_path`; the worker's reference check makes a failed/cancelled sibling harmless). Local destinations: always; the worker removes
 `library/<fullRemotePath(remote_path)>` (must stay under the library root; any `..`, empty segment, symlinked parent or the
 `.staging` dir is refused) only if no other job row references the same destination + remote_path (nor another local
-destination mapping to the same library path), no active job still needs it as its library copy and no active job exists for the deleted job's torrent and destination (delete + immediate re-add): those cases are deferred, not dropped. It then clears
-`torrents.library_path` pointers into it, then prunes empty parent directories (never the library root); failures retry
+destination mapping to the same library path), no active job still needs it as its library copy and no active job exists for the deleted job's torrent and destination (delete + immediate re-add): those cases are deferred, not dropped. It marks the torrents that point into it `removed` with `library_path` cleared in the same immediate transaction as the check (before the files are removed), then prunes empty parent directories (never the library root); failures retry
 with backoff (12 attempts). S3: remote data is kept unless `cleanup.deleteRemoteOnJobDelete` is on, then the worker runs
-`rclone purge DST:<bucket>/<prefix>/<exact job dir>` (asserted: one segment for user-owned, two for shared, ending in
+`rclone purge DST:<bucket>/<prefix>/<exact job dir>` unless any job of any S3 destination resolves to the same (endpoint, bucket, full key) (asserted: one segment for user-owned, two for shared, ending in
 ` [<8 hex>]`, strictly below the prefix; user-owned goes through the egress proxy). Deleting a *destination* only ever removes
 local files, never remote data. Google Drive data is never deleted automatically. The deletion pass runs off the tick (an S3
 purge can be slow) and is aborted on shutdown. The web UI's Remove confirmation for completed jobs states which of these applies (`GET /me` -> `cleanup`).
@@ -365,7 +364,10 @@ statement or one immediate transaction evaluated *after* slow work; a final self
    - Failing a torrent marks it `error` + `cleanup_pending`, fails its active jobs; a sweep (every tick) removes
      it and its data from qBittorrent and retries until that works. A torrent that a retry has given an active
      job again is never swept.
-3. For each job of a downloaded torrent in `downloading` → `uploading`: run
+3. For each job of a downloaded torrent in `downloading` → `uploading` (the content root is first resolved with `realpath` and must lie inside the real
+   `incomplete/<infohash>`; only regular files and directories are delivered: symlinks, FIFOs, sockets, devices and hardlinked files planted by a
+   compromised qBittorrent are skipped, files are opened with `O_NOFOLLOW` and verified on the descriptor, a local move goes through the worker-only
+   `library/.staging` and is re-vetted there, rclone receives the vetted list via `--files-from-raw`; if a `downloaded` torrent's recorded library copy is gone the torrent goes back to `pending` and the job to `queued`): run
    `rclone copy` (local: copy/move to `/downloads/library/...`), parse
    `--use-json-log --stats 1s` for progress, record `job_files`, then `completed`. S3 endpoints go through an
    SSRF pre-flight first (the shared `lib/netguard.ts` `assertPublicEndpoint`; user-owned destinations: private ranges
@@ -427,16 +429,19 @@ conservative default is used instead.
 
 Kill switch (always on in `required` mode, including before the first `/connect` and during
 rotation): one nftables table, replaced atomically and installed before the API listens. OUTPUT
-policy `drop`; allowed only to loopback, `wg*` interfaces, the UDP endpoint of the tunnel being brought up /
-currently up (fwmarked packets only) and, towards `LAN_CIDRS` (the compose subnet), **only** replies
-(`ct state established,related`: api/worker talking to the WebUI `:8080` and control `:8000`) and traffic of uid 0
-(the sidecar itself: Docker DNS to resolve a WireGuard endpoint host). Nothing started by qBittorrent's uid can open
-a connection to the LAN: not the Docker bridge gateway (the host), not a sibling container, not any URL a user makes
-qBittorrent fetch. The established accept is scoped to LAN destinations (an unscoped one would let connections opened
-in `off` mode survive a switch to `required`). IPv6 is dropped entirely. In `off` mode the output policy is accept
-(internet-direct; a tunnel, if any, is torn down) **but the same LAN rules apply**, so `off` is not a way around them.
-INPUT from the LAN reaches only the WebUI port (any LAN address; qBittorrent's own auth whitelist decides) and the
-control port, which only `CONTROL_TRUSTED_IPS` (compose: `API_IP`, `WORKER_IP`) may reach; input from the tunnel to
+policy `drop`; allowed only to the `lo` device, `wg*` interfaces, the UDP endpoint of the tunnel being brought up /
+currently up (fwmarked packets only) and, towards `LAN_CIDRS`, **only** replies (`ct state established,related`:
+api/worker talking to the WebUI `:8080` and control `:8000`). **There is no uid exemption**: root (the sidecar, or root in the
+qbittorrent container, which shares the namespace) gets no LAN access; Docker's embedded resolver `127.0.0.11` is on `lo`, so
+the sidecar's endpoint-hostname lookups need nothing else. In **both** modes (`off` is not a way around it) every uid is dropped
+towards `LAN_CIDRS` and towards every private/reserved IPv4 range (`blockedV4` in `killswitch.go`: `10/8`, `172.16/12`, `192.168/16`,
+`100.64/10`, `169.254/16`, `127/8` off `lo`, `224/4`, `240/4`, `0/8`, `192.0.0.0/24`, `198.18/15`), on every interface; through `wg*` the
+only private destinations accepted are the tunnel's DNS servers on port 53 (the rule list is rebuilt with old and new servers
+during a rotation). IPv6 off `lo` is dropped in both modes. The fwmarked endpoint accept and the LAN established accept come
+before those drops, so a private endpoint address still works. In `off` mode the output policy is accept (internet-direct; a tunnel,
+if any, is torn down) with the same drops. RFC 5737 documentation ranges are not in the list: the test stacks use `198.51.100.0/24`
+("the internet") and `203.0.113.0/24` (behind the WireGuard servers). INPUT from the LAN reaches only the WebUI port (any LAN address;
+qBittorrent's own auth whitelist decides) and the control port, which only `CONTROL_TRUSTED_IPS` (compose: `API_IP`, `WORKER_IP`) may reach; input from the tunnel to
 `:8000`/`:8080` is dropped in both modes. `VPN_LAN_ALLOW_OUT` (`ip[:port],...`, empty by default) is a **test-only**
 exception list for the hermetic fixtures that sit on the LAN by IP (the e2e tracker `172.31.250.30:6969` and seeder
 `172.31.250.31:51413`, set in `deploy/compose.e2e.yaml`; `services/vpn/test`): qBittorrent may connect to exactly
@@ -451,19 +456,25 @@ resolve a WireGuard endpoint *hostname*, the one lookup that leaves the namespac
 tunnel (IP endpoints avoid it). Consequently nothing in the shared namespace may rely on compose
 service names: the e2e tracker/seeder use fixed IPs inside `LAN_CIDRS`.
 
-qBittorrent WebUI auth: `services/qbittorrent` wraps the official image with an
-entrypoint that (re)asserts, in `qBittorrent.conf` (`[WebUI]` section in qBittorrent 5), WebUI
-port 8080, password-less access only for `QBT_TRUSTED_IPS` (compose: the static `api` and `worker` /32 addresses)
-via `AuthSubnetWhitelist`, `LocalHostAuth=false` (loopback is shared only with the vpn sidecar), host-header
-validation and CSRF protection off, no UPnP, anonymous mode off, no interface binding, and on first
+qBittorrent WebUI auth: `services/qbittorrent` wraps the official image with an entrypoint (`seed-config.sh`, run by tini)
+that does as root only: validate `PUID`/`PGID` (refuses 0), a non-recursive `chown -h` of the `/config` volume directory and the drop to
+uid/gid 1000 (`doas -u qbtUser`; another `PUID`/`PGID` needs a writable `/etc/passwd`, i.e. it fails with the read-only rootfs). The
+official `/entrypoint.sh` is not used (it runs `chown -R` and writes config as root, both of which follow symlinks that a
+compromised qBittorrent can plant in `/config`). `conf-edit.sh` then runs as uid 1000 and (re)asserts, in `qBittorrent.conf` (`[WebUI]` section
+in qBittorrent 5): WebUI port 8080, password-less access only for `QBT_TRUSTED_IPS` (compose: the static `api` and `worker` /32
+addresses) via `AuthSubnetWhitelist`, `LocalHostAuth=false` (loopback is shared only with the vpn sidecar), host-header
+validation and CSRF protection off, no UPnP, anonymous mode off, no interface binding, libtorrent's SSRF mitigation
+(`Session\SSRFMitigation=true`) and, on first
 start only: DHT/PeX on, LSD off, anonymous mode off, no pre-allocation, default save path `/downloads/incomplete`
 (everything in the app's engine-settings whitelist, `apps/api/src/api/engine.ts`, is seeded once and then belongs to the admin; only the
-security-critical keys are re-asserted on every start: WebUI whitelist/port/host-header/CSRF design, no UPnP, no autorun, no interface binding);
-it runs as uid/gid 1000 and refuses to start with `PUID`/`PGID` 0. Every other address in the compose network must
+security-critical keys are re-asserted on every start: WebUI whitelist/port/host-header/CSRF design, no UPnP, no autorun, no interface binding, SSRF mitigation).
+`conf-edit.sh` never follows a link: it checks the directory chain with `[ -L ]`, edits via `mktemp` in the same directory and `mv` (rename replaces a
+planted link) and has no fixed temp name (`services/qbittorrent/test/symlink.sh` plants links and checks nothing is written through them).
+Every other address in the compose network must
 authenticate, and nobody knows the password (none is stored, so qBittorrent generates a random temporary one per
 start and only logs it): a compromised sibling container can no longer call `setPreferences`/autorun (= code
-execution in the qBittorrent container). The container runs with `cap_drop: [ALL]` plus the five capabilities the
-root-to-1000 entrypoint needs. The WebUI is never routed by the gateway.
+execution in the qBittorrent container). The container runs with `cap_drop: [ALL]` plus `CHOWN`, `SETUID`, `SETGID`, `KILL`, a
+read-only root filesystem (the entrypoint cannot be replaced) and a `/tmp` tmpfs. The WebUI is never routed by the gateway.
 
 ## drive-proxy (Cloudflare Worker)
 

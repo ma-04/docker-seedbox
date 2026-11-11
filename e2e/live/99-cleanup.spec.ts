@@ -1,30 +1,34 @@
 import { expect, test } from '@playwright/test';
 import { live } from './env';
-import { api, login, rclone, s3Prefix, sh, state } from './lib';
+import { assertRecordedFolder, assertRunPrefix, shellQuote } from './guards';
+import { api, login, rclone, recordedFolders, s3Prefix, sh, state, stateIfExists } from './lib';
 
 test.describe.configure({ mode: 'serial' });
 
-// Removes only what this run created. Run explicitly (`... 99`); it is the last numbered spec on purpose.
+// Removes only what THIS run created, proven against the run-state file (e2e/.out/live/state.json) before every delete.
+// Without that file nothing is deleted at all. Run explicitly (`... 99`); it is the last numbered spec on purpose.
 test.describe('99. cleanup (this run only)', () => {
-  test('delete the test jobs (the engine copy goes with them)', async ({ browser }) => {
+  test('precondition: this run has a state file (otherwise cleanup refuses to run)', () => {
+    const s = stateIfExists();
+    expect(s, 'run-state file missing: refusing to clean up anything (nothing is known to belong to this run)').not.toBeNull();
+    expect(s!.runId).toMatch(/^r\d{10}[0-9a-f]{4}$/);
+  });
+
+  test('delete the test jobs through the app (local library files go with them)', async ({ browser }) => {
     const j = state().jobs;
     for (const who of ['admin', 'user', 'user2'] as const) {
       const ctx = await browser.newContext(); const page = await ctx.newPage(); await login(page, who);
       for (const job of Object.values(j).filter((x) => x.user === who)) {
         const r = await api(page, 'DELETE', `/api/jobs/${job.id}`);
-        expect([204, 404]).toContain(r.status);
+        expect([200, 204, 404]).toContain(r.status);
       }
       await ctx.close();
     }
   });
 
   test('B2: delete exactly <base>/<run-id>/ (prefix asserted first)', async () => {
-    const runId = state().runId;
-    const prefix = s3Prefix();
-    expect(runId).toMatch(/^r\d{10}[0-9a-f]{4}$/);
-    expect(prefix).toBe(`${live.s3.prefixBase()}/${runId}`);
+    const prefix = assertRunPrefix(s3Prefix(), state().runId, live.s3.prefixBase());
     expect(prefix.split('/')).toHaveLength(2);           // base/run-id, nothing broader
-    expect(prefix).not.toMatch(/\.\.|^\/|\/$|\*/);
     const target = `${live.b2Remote()}:${live.s3.bucket()}/${prefix}`;
     const del = await rclone(['delete', '--b2-hard-delete', '--rmdirs', target]);   // objects below that path only
     expect(del.code, del.err).toBe(0);
@@ -32,34 +36,40 @@ test.describe('99. cleanup (this run only)', () => {
     expect(left.out.trim()).toBe('');
   });
 
-  test('Drive: remove only the job folders this run created under the root folder', async () => {
-    const debianHash8 = (state().hashes as { debian: string }).debian.slice(0, 8);
+  test('Drive: remove only the job folders recorded for this run (never a pattern, never another run\'s)', async () => {
+    const recorded = recordedFolders();
     const root = live.driveRootFolderId();
-    const base = [live.gdriveRemote() + ':', '--drive-root-folder-id', root];
-    const ls = await rclone(['lsjson', '--dirs-only', '-R', '--max-depth', '2', ...base]);
+    const ls = await rclone(['lsjson', '--dirs-only', '-R', '--max-depth', '2', live.gdriveRemote() + ':', '--drive-root-folder-id', root]);
     expect(ls.code, ls.err).toBe(0);
-    const dirs = (JSON.parse(ls.out || '[]') as { Path: string }[]).map((d) => d.Path);
-    const mine = dirs.filter((p) => p.split('/').length === 2 && p.endsWith(`[${debianHash8}]`));
-    for (const p of mine) {
-      expect(p).toMatch(/^[^/]+\/[^/]+ \[[0-9a-f]{8}\]$/);
-      const r = await rclone(['purge', '--drive-use-trash=false', `${live.gdriveRemote()}:${p}`, '--drive-root-folder-id', root]);
+    const existing = new Set((JSON.parse(ls.out || '[]') as { Path: string }[]).map((d) => d.Path));
+    const users = new Set<string>();
+    for (const rel of recorded) {
+      if (!existing.has(rel)) continue;   // never created (or already gone)
+      assertRecordedFolder(rel, recorded);
+      const r = await rclone(['purge', '--drive-use-trash=false', `${live.gdriveRemote()}:${rel}`, '--drive-root-folder-id', root]);
       expect(r.code, r.err).toBe(0);
+      users.add(rel.split('/')[0]!);
     }
-    // user folders left empty by that
-    for (const u of new Set(mine.map((p) => p.split('/')[0]!))) await rclone(['rmdir', `${live.gdriveRemote()}:${u}`, '--drive-root-folder-id', root]);
+    // a per-user folder left empty by that: `rmdir` only ever removes an EMPTY directory
+    for (const u of users) await rclone(['rmdir', `${live.gdriveRemote()}:${u}`, '--drive-root-folder-id', root]);
   });
 
-  test('server: the big ISO is gone from the library; show what is left', async () => {
-    // Deleting a job does not delete the data a local destination already holds (see the issue "deleting a job leaves
-    // local library data behind"), so remove this run's own copies by exact name: the ISO folders `<name> [<hash8>]`.
-    const names = [(state().ubuntu as { name: string } | undefined)?.name, (state().debian as { name: string }).name].filter((n): n is string => !!n);
-    for (const n of names) {
-      const r = await sh(`sudo docker exec seedbox-api-1 find /downloads/library -mindepth 2 -maxdepth 2 -type d -name '${n} \\[*\\]' -exec rm -rf {} +`);
-      expect(r.code, r.err).toBe(0);
+  test('server: the local library holds none of this run\'s folders (the app removed them; anything left is removed by exact path)', async () => {
+    const recorded = recordedFolders();
+    const present = async (rel: string): Promise<boolean> =>
+      (await sh(`sudo docker exec seedbox-api-1 test -d ${shellQuote(`/downloads/library/${rel}`)}`)).code === 0;
+    // deleting a job queues the removal in the worker; give it time
+    for (const rel of recorded) {
+      assertRecordedFolder(rel, recorded);
+      await expect.poll(() => present(rel), { timeout: 120_000, intervals: [3000] }).toBe(false).catch(async () => {
+        // still there: remove exactly that recorded folder (no glob, no find over the library, no other user's copy)
+        assertRecordedFolder(rel, recorded);
+        const r = await sh(`sudo docker exec seedbox-api-1 rm -rf -- ${shellQuote(`/downloads/library/${rel}`)}`);
+        expect(r.code, r.err).toBe(0);
+      });
+      expect(await present(rel), rel).toBe(false);
     }
-    await sh(`sudo docker exec seedbox-api-1 find /downloads/library -mindepth 1 -maxdepth 1 -type d -empty -not -name .staging -delete`);
-    const r = await sh(`sudo docker exec seedbox-api-1 sh -c 'ls -la /downloads/library 2>&1; du -sh /downloads 2>&1' ; df -h / | tail -1`);
-    const find = await sh(`sudo docker run --rm -v seedbox_downloads:/d:ro alpine sh -c 'find /d -name "${names[names.length - 1]}*" | head'`);
-    expect(find.out.trim(), r.out).toBe('');
+    const r = await sh(`sudo docker exec seedbox-api-1 sh -c 'ls -la /downloads/library 2>&1; du -sh /downloads 2>&1'; df -h / | tail -1`);
+    console.log(r.out);
   });
 });
