@@ -82,7 +82,9 @@ sidecar: Alpine + `wireguard-tools` + `iproute2` + `nftables` + a ~500-line stat
 | Var | Default | Meaning |
 |---|---|---|
 | `VPN_CONTROL_TOKEN` | required | Bearer token for `:8000` |
-| `LAN_CIDRS` | `172.31.250.0/24` | comma-separated; reachable in every mode and state (must contain the compose subnet) |
+| `LAN_CIDRS` | `172.31.250.0/24` | comma-separated; the compose subnet. Towards it only replies and the sidecar's own (uid 0) traffic may leave, in every mode; nothing qBittorrent starts. Input from it reaches only the WebUI/control ports |
+| `CONTROL_TRUSTED_IPS` | empty | comma-separated IPv4 addresses that may reach the control port; empty = any address in `LAN_CIDRS` (the token is still required). Compose: `API_IP,WORKER_IP` |
+| `VPN_LAN_ALLOW_OUT` | empty | **test fixtures only, never set it for real:** comma-separated `IPv4[:port]` LAN addresses that qBittorrent may open connections to (and that may connect in). Used by `deploy/compose.e2e.yaml` and `test/compose.yaml` |
 | `VPN_MTU` | `1280` | wg interface MTU (576-1500); a config `MTU =` line overrides it. 1280 survives uplinks whose real MTU the Docker bridge hides (cloud 1460, PPPoE 1492); lower it if bulk transfers stall only with the VPN on. `GET /status` reports the effective `mtu` |
 | `VPN_DEFAULT_MODE` | `required` | `required` (fail closed) or `off` right after (re)start |
 | `PUBLIC_IP_URL` | `https://api.ipify.org` | plain-text IP service, fetched through the tunnel; empty disables |
@@ -95,8 +97,8 @@ sidecar: Alpine + `wireguard-tools` + `iproute2` + `nftables` + a ~500-line stat
 
 The kernel must have WireGuard (Linux 5.6+ or the module); no `/dev/net/tun`, no host sysctls, no
 host configuration beyond this. **The compose network must have the fixed subnet `LAN_CIDRS`
-and `vpn` should keep a static address in it** (here `.2`), since the kill switch allows exactly
-that subnet, and `api`/`worker` reach the control API and WebUI at `vpn:8000` / `vpn:8080`.
+and `vpn` should keep a static address in it** (here `.2`), since the kill switch's LAN rules are written for exactly
+that subnet, and `api`/`worker` (static addresses, passed as `CONTROL_TRUSTED_IPS`) reach the control API and WebUI at `vpn:8000` / `vpn:8080`.
 
 ```yaml
 networks:
@@ -113,12 +115,14 @@ services:
   vpn:
     build: ../services/vpn            # or image: ghcr.io/<owner>/docker-seedbox-vpn
     restart: unless-stopped
-    cap_add: [NET_ADMIN]              # the only privilege needed
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]              # the only capability the sidecar keeps (kernel WireGuard + nftables)
     sysctls:
       net.ipv6.conf.all.disable_ipv6: "1"
     environment:
       VPN_CONTROL_TOKEN: ${VPN_CONTROL_TOKEN:?set VPN_CONTROL_TOKEN}
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
+      CONTROL_TRUSTED_IPS: ${API_IP:-172.31.250.3},${WORKER_IP:-172.31.250.4}   # only api and worker may reach :8000
       VPN_MTU: ${VPN_MTU:-}
       VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-required}   # fail closed after restarts until the worker applies vpn.mode
       # PUBLIC_IP_URL: https://api.ipify.org
@@ -140,7 +144,10 @@ services:
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
     volumes:
       - qbt-config:/config
-      - downloads:/downloads
+      - type: volume                  # only incomplete/ of the downloads volume (never library/)
+        source: downloads
+        target: /downloads/incomplete
+        volume: { subpath: incomplete }   # Docker Engine 26+ / Compose 2.26+; the subfolder must exist (init service)
     depends_on:
       vpn:
         condition: service_healthy
@@ -169,21 +176,26 @@ Notes for the compose file as a whole:
 
 ```
 GET  /status      -> { mode, connected, name, publicIp, lastHandshakeSec, since, mtu }
-POST /connect     { name, config }     raw wg-quick text; 400 invalid/forbidden, 502 no handshake
+POST /connect     { name, config }     raw wg-quick text; 400 invalid/forbidden, 409 mode is off, 502 no handshake
 POST /disconnect
 POST /mode        { mode: "off" | "required" }
 ```
 
-`/connect`, `/disconnect` and `/mode` return the new status. `/mode off` also tears the tunnel down;
+`/connect`, `/disconnect` and `/mode` return the new status. `/connect` is refused with 409 while the mode is `off` (no tunnel is wanted then, and a connect racing
+an admin's switch to off must not win). Error bodies carry fixed messages only: output of `wg`/`ip`/`nft`, which can echo configuration, stays out of them and out of the logs.
+`/mode off` also tears the tunnel down;
 `/mode` with the current mode changes nothing. If swapping the routes to a new tunnel fails midway, the
 routes already moved are restored so the old tunnel keeps working.
 
 ## Tests
 
 `test/run.sh` builds both images and a hermetic stack (two WireGuard servers on a stand-in
-"internet" network, echo services, a LAN client; keys generated per run) and asserts the
-kill switch, rotation without a single direct packet, auth and hostile configs, log hygiene and
-restart behaviour. Requires Docker with Compose 2.33+ (for `gw_priority`) and NET_ADMIN.
+"internet" network, echo services, a LAN client and an untrusted "intruder" sibling, both with listeners; keys generated per run) and asserts the
+kill switch, the LAN policy in `off` and `required` mode (uid 1000 cannot reach the bridge gateway or a sibling, root can, the
+allow-listed `ip:port` works and its neighbour port does not, the intruder cannot reach the control API or a listener in the namespace),
+409 on `/connect` in off mode, CR-in-key rejection, that a whitelisted qBittorrent setting changed over the WebUI survives a restart
+while autorun is forced off again, that qBittorrent sees only `incomplete/`, rotation without a single direct packet, auth and hostile configs, log hygiene and
+restart behaviour. `go test ./...` in `src/` covers the generated ruleset, the 409, key validation and error hygiene. Requires Docker with Compose 2.33+ (for `gw_priority`) and NET_ADMIN.
 It removes everything it created on exit (`--keep` to inspect).
 
 ```

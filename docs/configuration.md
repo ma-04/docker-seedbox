@@ -28,6 +28,8 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `VPN_MTU` | vpn | MTU of the WireGuard interface, 576-1500. Unset = `1280`. An `MTU =` line in an uploaded WireGuard config takes precedence over this. See [VPN](#vpn). |
 | `VPN_DEFAULT_MODE` | vpn | `required` (default, fail closed) or `off`. Mode of the VPN sidecar after every (re)start, until the worker applies the admin's `vpn.mode` (within seconds). |
 | `LOG_LEVEL` | all | `info`. |
+| `CONTROL_TRUSTED_IPS` | vpn | Comma-separated IPv4 addresses allowed to reach the sidecar's control API (`:8000`). Compose sets `API_IP,WORKER_IP`; empty = any address in `LAN_CIDRS` (the bearer token is still required). |
+| `VPN_LAN_ALLOW_OUT` | vpn | **Test fixtures only. Never set on a real deployment.** Comma-separated `IPv4[:port]` LAN addresses that qBittorrent may connect to (and the addresses may connect in). Used by `deploy/compose.e2e.yaml` and `services/vpn/test`, whose tracker/seeder live on the LAN by IP. Empty (default) = the kill switch lets nothing started by qBittorrent reach the LAN at all. |
 
 ### Deployment variables (compose / setup.sh)
 
@@ -37,14 +39,14 @@ Edit `deploy/.env` and run `cd deploy && docker compose up -d` to apply. Secrets
 | `COMPOSE_PROFILES` | `authelia` | Starts Authelia; empty for `AUTH_MODE=external`. |
 | `COMPOSE_PROJECT_NAME` | `seedbox` | Prefix of containers, network and volumes. |
 | `SEEDBOX_REGISTRY` | `ghcr.io/ma-04` | Registry/owner of the prebuilt images. |
-| `SEEDBOX_VERSION` | `latest` | Image tag. |
+| `SEEDBOX_VERSION` | newest release (pinned by `setup.sh`) | Image tag: `X.Y.Z`, `X.Y`, `latest`, `edge`, or `local` (built from the clone). See [deployment.md](deployment.md#versions-upgrades-and-verification). |
 | `AUTH_POLICY` | `one_factor` | Authelia policy for the app host; `two_factor` requires TOTP. |
 | `AUTHELIA_SESSION_SECRET`, `AUTHELIA_STORAGE_ENCRYPTION_KEY`, `AUTHELIA_JWT_SECRET` | generated | Authelia secrets (session, SQLite encryption, password-reset tokens). |
 | `ACME_EMAIL` | empty | Let's Encrypt contact (bundled/external nginx-proxy). |
 | `PROXY_NETWORK` | empty | External mode: Docker network of your proxy. |
 | `HTTP_BIND`, `HTTP_PORT` | `127.0.0.1`, `8080` | None mode: where the gateway is published. |
 
-`setup.sh` also reads `SEEDBOX_DOMAIN`, `SEEDBOX_ADMIN_USER`, `SEEDBOX_ADMIN_PASSWORD`, `SEEDBOX_ADMIN_EMAIL`, `SEEDBOX_PROXY`, `SEEDBOX_PROXY_NETWORK`, `SEEDBOX_ACME_EMAIL`, `SEEDBOX_BUILD`, `SEEDBOX_YES` as alternatives to its flags (`./setup.sh --help`).
+`setup.sh` also reads `SEEDBOX_DOMAIN`, `SEEDBOX_ADMIN_USER`, `SEEDBOX_ADMIN_PASSWORD`, `SEEDBOX_ADMIN_EMAIL`, `SEEDBOX_PROXY`, `SEEDBOX_PROXY_NETWORK`, `SEEDBOX_ACME_EMAIL`, `SEEDBOX_AUTH_MODE`, `SEEDBOX_VERSION_OVERRIDE`, `SEEDBOX_BUILD`, `SEEDBOX_YES` as alternatives to its flags (`./setup.sh --help`). Values containing newlines or control characters are rejected.
 
 ## Admin UI settings
 

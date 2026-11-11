@@ -1,0 +1,30 @@
+docker-seedbox
+Copyright (C) the docker-seedbox contributors
+
+docker-seedbox itself is free software licensed under the GNU Affero General Public License,
+version 3 only (AGPL-3.0-only). The full text is in the file LICENSE.
+
+Source code
+-----------
+The complete corresponding source of every image published as
+ghcr.io/<owner>/docker-seedbox-{api,web,gateway,vpn,qbittorrent} is the Git repository
+https://github.com/ma-04/docker-seedbox at the tag that names the image version (for example
+v1.2.3 for :1.2.3; :edge is the head of the main branch at build time). Each image carries the label
+org.opencontainers.image.source pointing at that repository and org.opencontainers.image.revision with the commit.
+Build instructions: README.md and docs/deployment.md ("./setup.sh --build").
+
+If you run a modified version of docker-seedbox as a network service, AGPL-3.0 section 13 requires that you offer
+its users the corresponding source of your modified version.
+
+Third-party software
+--------------------
+The container images redistribute or are built on third-party software that keeps its own licenses. They are listed,
+with where to get their source, in THIRD_PARTY_LICENSES.md. Nothing in this repository changes those licenses.
+The qbittorrent image is the unmodified official qBittorrent-nox image (GPL-2.0-or-later) plus one shell script
+(services/qbittorrent/seed-config.sh, AGPL-3.0-only); the vpn image bundles the GPL-2.0 wireguard-tools and nftables
+as separate programs that are executed, not linked.
+
+Trademarks
+----------
+qBittorrent, WireGuard, Authelia, nginx, rclone, Google Drive and other names belong to their owners and are used only
+to say what this software works with.

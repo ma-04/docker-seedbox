@@ -32,7 +32,7 @@ cd docker-seedbox
 
 `setup.sh` asks for your domain and an admin e-mail, generates every secret, creates the admin login, starts the stack and prints the URLs. Re-running it is safe. Already have a reverse proxy? It detects a running `nginx-proxy` and joins it instead (see [docs/deployment.md](docs/deployment.md)). Non-interactive: `./setup.sh --domain seedbox.example.com --admin-email me@example.com --yes`.
 
-Then: log in, open **Admin**, add a destination, optionally upload WireGuard configs. Useful later: `./setup.sh add-user`, `./setup.sh update`, `./setup.sh doctor`.
+`setup.sh` installs the newest release of the published images; while none exists yet it offers to build them from your clone instead. Then: log in, open **Admin**, add a destination, optionally upload WireGuard configs. Useful later: `./setup.sh add-user`, `./setup.sh update` (shows `1.2.3 -> 1.3.0`, `--version` pins), `./setup.sh backup` / `restore`, `./setup.sh doctor`. Requires Docker Engine 26+ and Compose 2.26+.
 
 ## Architecture
 
@@ -75,7 +75,7 @@ The gateway is the only entry point. See [docs/architecture.md](docs/architectur
 
 ## Documentation
 
-[Deployment](docs/deployment.md) - [Configuration](docs/configuration.md) - [Architecture](docs/architecture.md) - [Security](SECURITY.md) - [Contributing](CONTRIBUTING.md)
+[Deployment](docs/deployment.md) - [Configuration](docs/configuration.md) - [Architecture](docs/architecture.md) - [Releasing](docs/releasing.md) - [Security](SECURITY.md) - [Contributing](CONTRIBUTING.md) - [Third-party licenses](THIRD_PARTY_LICENSES.md) - [NOTICE](NOTICE)
 
 ## Legal
 
@@ -84,3 +84,5 @@ docker-seedbox is a tool. You are responsible for what you download and share wi
 ## License
 
 [GNU AGPL-3.0](LICENSE). If you run a modified version as a network service you must offer its source to its users.
+
+**Where the source is.** The complete corresponding source of every published image is this repository at the tag that names the image version (`:1.2.3` is `v1.2.3`; `:edge` is `main`); each image carries `org.opencontainers.image.source` and `org.opencontainers.image.revision` labels pointing at the repository and commit, and `./setup.sh --build` rebuilds all of it from a clone. For people who use a running instance over the network, the web UI footer is meant to link to the repository and the running commit (AGPL section 13; maintained with the web app); if you run a modified build, point that link at your own source. The images also contain third-party software under its own licenses (qBittorrent GPL-2.0+, libtorrent BSD, rclone MIT, nginx BSD-2, wireguard-tools and nftables GPL-2.0, Authelia Apache-2.0, ...): see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) and [NOTICE](NOTICE).
