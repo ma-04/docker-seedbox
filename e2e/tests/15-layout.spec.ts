@@ -8,7 +8,7 @@ import { raw } from '../lib/net';
 // sharing the app's host opens no way around the login. Runs in every layout; the single-domain-only checks say so.
 const portalOnApp = env.layout !== 'multi';
 
-test.describe(`14. hosts layout (${env.layout})`, () => {
+test.describe(`15. hosts layout (${env.layout})`, () => {
   test('logged out: a deep link with a query goes to the portal with rd=<full URL> and comes back to it after login', async ({ browser }) => {
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true, baseURL: env.baseURL });
     const page = await ctx.newPage();

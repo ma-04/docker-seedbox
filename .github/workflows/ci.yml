@@ -168,8 +168,8 @@ jobs:
           # the default layout runs the whole suite
           - { layout: single, specs: "" }
           # the optional layouts run what depends on hosts: login, downloads, the magnet round trip, the layout checks
-          - { layout: split-files, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/14-layout.spec.ts" }
-          - { layout: multi, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/14-layout.spec.ts" }
+          - { layout: split-files, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/15-layout.spec.ts" }
+          - { layout: multi, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/15-layout.spec.ts" }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

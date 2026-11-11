@@ -22,13 +22,13 @@ Secrets are generated per run into `e2e/.state/e2e.env` (git-ignored, mode 600) 
 e2e/run.sh                          # build, start, run, collect, tear down; exit code = test result
 e2e/run.sh -- tests/03-local-download.spec.ts     # a single spec
 e2e/run.sh --keep --no-build        # leave the stack running; --rmi removes the built images on teardown
-e2e/run.sh --layout multi -- tests/14-layout.spec.ts    # another hosts layout (see below)
+e2e/run.sh --layout multi -- tests/15-layout.spec.ts    # another hosts layout (see below)
 ```
 
 **Hosts layouts** (`--layout`, or `E2E_LAYOUT`; the playwright container gets the same value): `single` (default:
 app, Authelia under `/auth/` and downloads under `/dl/` on `app.seedbox.test`), `split-files` (app + Authelia on
 `app.`, downloads on `files.seedbox.test`), `multi` (`app.`, `auth.`, `files.seedbox.test`, the layout before
-single-domain support). CI runs the whole suite in `single` and the host-dependent specs (`01`, `03`, `12`, `14`) in
+single-domain support). CI runs the whole suite in `single` and the host-dependent specs (`01`, `03`, `12`, `15`) in
 the other two. A kept stack's `e2e/.state/e2e.env` records its layout; tear it down before switching.
 
 Needs Docker with Compose >= 2.33 (`gw_priority`) and a kernel with WireGuard (5.6+). Images are tagged
@@ -73,7 +73,7 @@ header (`X-Requested-With: seedbox`), local `/dl` links revoked when the job is 
 ordinary containers (`ctl /webui`), and the kill switch holding after a sidecar restart while the worker is stopped
 (`ctl /stop`, `/start`).
 
-`14-layout` (every layout) the logged-out deep link -> portal `?rd=<full URL>` -> back after login, the session cookie's
+`15-layout` (every layout) the logged-out deep link -> portal `?rd=<full URL>` -> back after login, the session cookie's
 scope, bare 401s on `/api/*`, the portal with its assets and API under its base path, spoofed `Remote-*` headers on the
 portal and `/dl/` (behaviour, and the running gateway's `nginx -T` via `ctl /gateway-config`), Authelia's own API and
 `/auth/../api` path tricks as bypass attempts, no SPA/API route shadowed. `03` also checks that an uploaded HTML file is
