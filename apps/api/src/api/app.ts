@@ -88,7 +88,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
         limits: { maxActiveJobs: u.max_active_jobs ?? getSetting(db, 'limits.maxActiveJobsPerUser'), maxTorrentBytes: getSetting(db, 'limits.maxTorrentBytes') },
         cleanup: { deleteRemoteOnJobDelete: getSetting(db, 'cleanup.deleteRemoteOnJobDelete') },
         googleConnectAvailable: false,
-        logoutUrl: `${config.publicScheme}://${config.authHost}/logout`,
+        logoutUrl: `${config.authPortalUrl}/logout`,
       };
     });
 

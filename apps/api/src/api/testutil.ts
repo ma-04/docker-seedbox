@@ -30,11 +30,14 @@ export function fakeVpn(overrides: Partial<VpnClient> = {}): VpnClient & { calls
 
 export const publicLookup = async () => [{ address: '93.184.216.34', family: 4 }];
 
-export function setup(vpn = fakeVpn(), engine?: EngineClient, extra: Partial<BuildAppOptions> = {}) {
+/** Hosts of the three-host layout; pass `{ AUTH_HOST: '', FILES_HOST: '' }` as `hosts` for the single-domain one. */
+export const THREE_HOSTS = { APP_HOST: 'app.example.test', AUTH_HOST: 'auth.example.test', FILES_HOST: 'files.example.test' };
+
+export function setup(vpn = fakeVpn(), engine?: EngineClient, extra: Partial<BuildAppOptions> = {}, hosts: Partial<typeof THREE_HOSTS> = {}) {
   const downloads = mkdtempSync(join(tmpdir(), 'seedbox-test-'));
   const config = loadConfig({
     APP_SECRET: 's'.repeat(40), GATEWAY_SECRET: GW, VPN_CONTROL_TOKEN: 'vt', DOWNLOADS_DIR: downloads,
-    APP_HOST: 'app.example.test', AUTH_HOST: 'auth.example.test', FILES_HOST: 'files.example.test', PUBLIC_SCHEME: 'https',
+    ...THREE_HOSTS, ...hosts, PUBLIC_SCHEME: 'https',
   });
   const db = openDb(':memory:');
   const app = buildApp({ db, config, vpn, engine, ssePollMs: 50, ssePingMs: 80, lookup: publicLookup, ...extra });

@@ -27,6 +27,11 @@ describe('auth', () => {
       user: { username: 'carol', email: 'c@example.test', displayName: 'Carol' }, isAdmin: true,
       googleConnectAvailable: false, logoutUrl: 'https://auth.example.test/logout',
     });
+    // single-domain layout: the portal (and its logout page) lives under /auth on the app host
+    for (const hosts of [{ AUTH_HOST: '', FILES_HOST: '' }, { AUTH_HOST: 'App.Example.test', FILES_HOST: 'dl.example.test' }]) {
+      const single = setup(undefined, undefined, {}, hosts);
+      expect((await single.call(alice, 'GET', '/api/me')).json().logoutUrl).toBe('https://app.example.test/auth/logout');
+    }
     const again = await env.call({ name: 'carol' }, 'GET', '/api/me');
     expect(again.json().isAdmin).toBe(false);
     expect((env.db.prepare('SELECT COUNT(*) n FROM users').get() as { n: number }).n).toBe(1);
