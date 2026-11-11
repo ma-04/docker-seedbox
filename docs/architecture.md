@@ -253,6 +253,9 @@ config exists), `vpn.rotation` (`"manual"` | `"interval"` | `"on-failure"`),
 `limits.maxTorrentBytes` (0 = unlimited), `limits.minFreeDiskBytes` (2 GiB),
 `limits.metadataTimeoutMinutes` (30; 0 = never), `cleanup.failedGraceMinutes` (60), `cleanup.deleteRemoteOnJobDelete` (false; S3 only),
 `seeding.ratio` (0 = stop when complete), `seeding.maxMinutes` (0 = no cap; with `seeding.ratio` > 0, stop seeding after this long).
+Tracker-list keys (not part of `/admin/settings`; see "Tracker lists" below): `trackers.enabled` (true), `trackers.manual` (the admin's own extra trackers, newline
+separated), `trackers.listUrls` (0-5 https URLs), `trackers.refreshHours` (24, 1-720), `trackers.maxTrackers` (200, 1-1000),
+`trackers.refreshRequestedAt` / `trackers.refreshDoneAt` (unix s; the API requests, the worker acknowledges).
 `google.oauthClientId` / `google.oauthClientSecret` exist as reserved keys only: per-user
 "Connect Google Drive" is not implemented, and the admin API neither returns nor accepts them.
 
@@ -296,8 +299,46 @@ keys are rejected with 400; nothing outside the whitelist is ever read back or w
 Save paths, WebUI/auth, proxy, "run external program", RSS, scan dirs, mail, DNS, UPnP and
 the bound interface are never exposed. The qBittorrent WebUI itself is deliberately not
 exposed or proxied: it can run arbitrary commands and rewrite paths and credentials, so
-a whitelist is the only safe surface. If the engine is unreachable the API answers 502
+a whitelist is the only safe surface. `addTrackersEnabled` and `addTrackers` are the exception to "written to qBittorrent":
+they are stored in our settings (`trackers.enabled`, `trackers.manual`; the manual list only, at most 100 lines / 16 KB) and the
+worker writes manual + fetched trackers to the engine (see "Tracker lists"). If the engine is unreachable the API answers 502
 `engine_unavailable` without relaying the upstream response.
+
+### Tracker lists
+
+Admins can load extra trackers from up to five public `https` plain-text lists and have them added to new downloads.
+The **app** fetches and validates the lists; qBittorrent's own "add trackers from URL" preference
+(`add_trackers_from_url_enabled`, `add_trackers_url`, qBittorrent >= 5.0) is deliberately left off (the worker re-asserts it on every
+check): its fetch runs inside the VPN namespace, validates nothing (no scheme/host check, no size cap) and gives the UI no status.
+
+- `GET /admin/trackers` -> `TrackersDto`: `enabled`, `urls`, `refreshHours`, `maxTrackers`, per-list status (`url`, `lastFetchedAt`,
+  `lastAttemptAt`, `ok`, `error`, `trackerCount`), `manualCount`, `effectiveCount`, `refreshRequestedAt` (non-null while a refresh is pending).
+  `PUT /admin/trackers` (`urls`, `refreshHours`, `maxTrackers`, all optional, strict) validates each URL (https, <= 2048 chars,
+  no credentials, `assertPublicEndpoint` incl. DNS at save time) and requests a refresh when the URLs or the cap changed.
+  `POST /admin/trackers/refresh` -> 202, sets `trackers.refreshRequestedAt` (rate limit 6/min per admin; 409 when switched off or no URLs).
+  The API itself never fetches a list.
+- Worker (`worker/trackers.ts`, one step per tick, `lib/trackerlist.ts` + `lib/trackers.ts`):
+  1. first run: copies the engine's current `add_trackers` / `add_trackers_enabled` into `trackers.manual` / `trackers.enabled`
+     (each only if our setting does not exist yet), so existing deployments and the e2e fixture tracker keep theirs;
+  2. when due (never fetched, older than `refreshHours`, failed lists retried hourly, or an admin request is pending) and enabled, fetches
+     each URL: `assertPublicEndpoint(url, { allowPrivate: false })` right before every request, TCP connection pinned to a vetted
+     address (`vettedLookup`, no rebinding window), redirects followed by hand (max 3, each hop re-vetted), 10 s deadline,
+     1 MiB cap, `User-Agent: docker-seedbox`, no cookies/auth, `Accept-Encoding: identity`;
+  3. parses (one tracker per line or comma/space separated, `#` comments, <= 512 chars, the SAME `sanitiseTracker` policy as user-submitted
+     trackers, IDN punycoded, deduped on scheme+host (case-insensitive) + exact rest, capped at `trackers.maxTrackers`); a body that looks
+     like HTML/binary (NUL, invalid UTF-8, `<html`), is empty, or has > 20 % invalid entries is rejected and the previous list kept;
+  4. stores one row per URL in `tracker_lists` (migration `005_tracker_lists.sql`: last successful trackers, `fetched_at`, last
+     attempt, `ok`, short `error`, `tracker_count`, `body_sha256`); a failed refresh keeps the last good list (stale-while-error);
+  5. effective list = manual trackers first, then the fetched ones in list order, deduplicated, fetched part capped at
+     `trackers.maxTrackers`. It is written to `add_trackers` (+ `add_trackers_enabled`, `add_trackers_from_url_enabled=false`) only when it
+     differs from what was last applied, and re-verified against the engine every 60 s (qBittorrent restart, edit in the WebUI);
+  6. `trackers.enabled = false` disables everything: nothing is fetched and the engine is told `add_trackers_enabled=false`;
+  7. private torrents: qBittorrent skips `add_trackers` for torrents added with metadata that are private (`.torrent` files) but, for a magnet,
+     the privacy flag is unknown at add time, so the extra trackers are added and never removed. Every 30 s the worker asks the engine for
+     torrents it flags `private` and removes the manual/fetched trackers (those not present in the magnet's own `tr`) with `torrents/removeTrackers`.
+- Applies to torrents added after the list was applied (the engine's "add to new downloads" semantics); running downloads are not changed.
+- Test-only: `TRACKER_LIST_ALLOW_PRIVATE=1` (api + worker) lets list URLs be plain `http` on private addresses. The config loader refuses it
+  unless `E2E_HERMETIC=1` is set too; only `deploy/compose.e2e.yaml` sets either.
 
 ## Environment
 
@@ -325,6 +366,8 @@ a whitelist is the only safe surface. If the engine is unreachable the API answe
 | `VPN_DEFAULT_MODE` | vpn | `required` (default) \| `off`; mode right after a container start |
 | `EGRESS_ALLOWED_PORTS` | worker | `443,80`: destination ports the egress proxy allows for user-owned S3 destinations |
 | `EGRESS_ALLOW_PLAIN_HTTP` | worker | `1` lets the egress proxy forward plain `http://` requests (default off: user destinations must be https) |
+| `TRACKER_LIST_ALLOW_PRIVATE` | api, worker | **test-only** `1` lets tracker-list URLs be http / private (needs `E2E_HERMETIC=1`, otherwise startup fails); unset by default |
+| `E2E_HERMETIC` | api, worker | **test-only** marker of the hermetic e2e stack; only enables the flag above |
 | `LOG_LEVEL` | all | `info` |
 
 Ports inside the compose network: `gateway:8080`, `web:8080`, `api:3000`,
@@ -383,6 +426,7 @@ statement or one immediate transaction evaluated *after* slow work; a final self
    `cleanup.failedGraceMinutes` so "Retry" does not re-download. Seeding stops at `seeding.ratio` or, if set,
    after `seeding.maxMinutes`.
 5b. Deleted jobs/destinations: consume `pending_deletions` (see "Deleting jobs").
+5a. Tracker lists: migrate, refresh when due, apply to the engine on change, strip extra trackers from private magnets (see "Tracker lists").
 5. VPN: apply `vpn.mode` (only when the sidecar's reported mode differs), health-check, rotate per `vpn.rotation`.
 Crash-safe: all state lives in SQLite; on boot, `uploading` jobs restart their upload.
 

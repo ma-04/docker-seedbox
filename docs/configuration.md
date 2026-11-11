@@ -67,7 +67,37 @@ Open **Admin** after logging in as a member of `admins`.
 | `limits.metadataTimeoutMinutes` | 30 | A magnet that gets no metadata (no peers) within this time fails and frees the user's job slot; 0 = never. |
 | `cleanup.failedGraceMinutes` | 60 | After an upload failed, keep the downloaded data this long so "Retry" re-uploads without downloading again. |
 | `cleanup.deleteRemoteOnJobDelete` | off | Removing a completed job already deletes its files from a **local** destination. With this on it also deletes the job folder in an **S3** destination (`rclone purge` of that one folder). Google Drive files are never deleted automatically. |
+| Tracker lists | none | Own card in Admin > Settings; see [Tracker lists](#tracker-lists). |
 | `google.oauthClientId` / `google.oauthClientSecret` | unset | Reserved for the planned per-user Google Drive connect (not a supported feature yet). |
+
+### Tracker lists
+
+Admin > Settings > **Tracker lists** loads extra trackers from plain-text lists (one tracker per line, `#` comments allowed, comma/space separated also
+works), for example `https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt` (use the quick-fill button). They are added
+to every torrent you start afterwards.
+
+| Field | Default | Meaning |
+|---|---|---|
+| List URLs | none | Up to 5 `https` URLs on public hosts, no credentials. |
+| Refresh every | 24 h (1-720) | Lists are re-downloaded this often; **Refresh now** asks the worker to do it immediately. A failing list is retried hourly and the last good copy stays in use. |
+| Max trackers from lists | 200 (1-1000) | Kept in list order (lists are usually sorted by quality). Your manual trackers do not count. |
+
+Your **manual** extra trackers are still the "Extra trackers" box under *Advanced: torrent engine* (now max 100 lines / 16 KB, and it shows only your
+manual entries, never the downloaded ones). The torrent engine receives the manual trackers first, then the downloaded ones, deduplicated. Turning off
+"Add extra trackers to new torrents" there switches the whole feature off: nothing is fetched and nothing is added.
+
+- **New downloads only.** qBittorrent applies the setting when a torrent is added; running downloads keep their trackers (there is no "add to active downloads" button).
+- **Private torrents.** qBittorrent does not add these trackers to a torrent that is already known to be private (a `.torrent` file with the private flag).
+  For a magnet link the engine cannot know before it has the metadata, so it adds them anyway; the worker removes the extra trackers again (all except those
+  in the magnet itself) shortly after the engine flags the torrent as private. Verified against the qBittorrent source (`SessionImpl::addTorrent_impl`:
+  `isAddTrackersEnabled() && !(hasMetadata && p.ti->priv())`). Between metadata arrival and the next sweep (at most ~30 s) the extra trackers may be contacted once.
+  Do not add private-tracker torrents on a shared instance anyway (see SECURITY.md).
+- **Why not qBittorrent's own "download trackers from URL"?** It fetches from inside the VPN network namespace with no scheme/host validation and no size cap, and gives
+  the UI nothing to show. The app fetches and filters instead; the engine's own option is kept off.
+- **Privacy.** Trackers see the VPN exit IP and the infohash of every download; a third-party list widens who learns that.
+- **Limits.** Only `http`, `https`, `udp`, `ws`, `wss` trackers on public hosts are kept; entries pointing at private,
+  loopback or single-label hosts are dropped like in user-submitted magnets. A list that looks like an HTML page or has more than 20 % invalid entries is ignored entirely.
+- **Test-only override.** `TRACKER_LIST_ALLOW_PRIVATE=1` (with `E2E_HERMETIC=1`) allows plain-http, private list URLs for the hermetic e2e stack. The app refuses to start with only the first one. Never set either on a real deployment.
 
 ### VPN
 
