@@ -139,7 +139,7 @@ services:
 
   minio:
     <<: *fixture
-    image: bitnamilegacy/minio:2025.4.22   # real MinIO; creates the bucket at start (the official images are no longer published)
+    image: bitnamilegacy/minio:2025.5.24   # real MinIO; creates the bucket at start (the official images are no longer published)
     environment:
       MINIO_ROOT_USER: ${E2E_MINIO_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${E2E_MINIO_PASSWORD:?}
