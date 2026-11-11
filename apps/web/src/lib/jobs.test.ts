@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { JobDto } from './api';
-import { filterJobs, mergeJob } from './jobs';
+import { filterJobs, mergeJob, removeNotice } from './jobs';
 
 const mk = (id: number, over: Partial<JobDto> = {}): JobDto => ({
   id, state: 'queued', name: null, infohash: 'a'.repeat(40), totalSize: 0, downloadProgress: 0, downloadSpeed: 0,
@@ -31,5 +31,20 @@ describe('filterJobs', () => {
     expect(filterJobs(list, 'active').map((j) => j.id)).toEqual([1]);
     expect(filterJobs(list, 'completed').map((j) => j.id)).toEqual([2]);
     expect(filterJobs(list, 'failed').map((j) => j.id)).toEqual([3, 4]);
+  });
+});
+
+describe('removeNotice', () => {
+  const dest = (type: JobDto['destination']['type']) => ({ id: 1, name: 'My dest', type });
+  it('needs no confirmation when nothing was delivered', () => {
+    for (const state of ['queued', 'downloading', 'uploading', 'failed', 'cancelled'] as const) expect(removeNotice({ state, destination: dest('local') }, true)).toBeNull();
+  });
+  it('local: files are deleted', () => {
+    expect(removeNotice({ state: 'completed', destination: dest('local') }, false)).toMatch(/deleted from the server/);
+  });
+  it('remote: kept unless the S3 setting is on; Drive is always kept', () => {
+    expect(removeNotice({ state: 'completed', destination: dest('s3') }, false)).toMatch(/are kept/);
+    expect(removeNotice({ state: 'completed', destination: dest('s3') }, true)).toMatch(/will be deleted from "My dest"/);
+    expect(removeNotice({ state: 'completed', destination: dest('gdrive') }, true)).toMatch(/are kept/);
   });
 });

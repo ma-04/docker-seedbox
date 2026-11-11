@@ -82,11 +82,12 @@ export function Check({ label, checked, onChange, disabled }: { label: string; c
 }
 
 /** Two-step inline confirmation (no window.confirm). */
-export function ConfirmButton({ label, confirmLabel = 'Confirm', onConfirm, disabled, size = 'sm' }: { label: string; confirmLabel?: string; onConfirm: () => void; disabled?: boolean; size?: 'sm' }) {
+export function ConfirmButton({ label, confirmLabel = 'Confirm', onConfirm, disabled, size = 'sm', description }: { label: string; confirmLabel?: string; onConfirm: () => void; disabled?: boolean; size?: 'sm'; description?: string }) {
   const [asking, setAsking] = useState(false);
   if (!asking) return <Button size={size} variant="ghost" disabled={disabled} onClick={() => setAsking(true)}>{label}</Button>;
   return (
-    <span className="inline-flex items-center gap-1" role="group" aria-label={`Confirm ${label}`}>
+    <span className="inline-flex flex-wrap items-center gap-1" role="group" aria-label={`Confirm ${label}`}>
+      {description && <span data-testid="confirm-description" className="basis-full text-xs text-slate-600 dark:text-slate-300">{description}</span>}
       <Button size={size} variant="danger" onClick={() => { setAsking(false); onConfirm(); }}>{confirmLabel}</Button>
       <Button size={size} variant="ghost" onClick={() => setAsking(false)}>Keep</Button>
     </span>

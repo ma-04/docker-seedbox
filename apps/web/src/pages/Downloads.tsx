@@ -1,14 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
 import { StateBadge } from '../components/JobParts';
-import { Button, Empty, ErrorNote, Field, PageHeader, Progress, Spinner, cx, errMsg, useToast } from '../components/ui';
+import { Button, ConfirmButton, Empty, ErrorNote, Field, PageHeader, Progress, Spinner, cx, errMsg, useToast } from '../components/ui';
 import { endpoints, type JobDto } from '../lib/api';
 import { formatAge, formatBytes, formatSpeed } from '../lib/format';
-import { useDestinations } from '../lib/hooks';
+import { useDestinations, useMe } from '../lib/hooks';
 import { safeHttpUrl } from '../lib/url';
 import { BrowserIntegration } from '../components/BrowserIntegration';
 import { clearPendingIncoming, peekPendingIncoming } from '../lib/magnet';
-import { displayName, filterJobs, isActive, mergeJob, type JobFilter } from '../lib/jobs';
+import { displayName, filterJobs, isActive, mergeJob, removeNotice, type JobFilter } from '../lib/jobs';
 
 const FILTERS: { id: JobFilter; label: string }[] = [
   { id: 'all', label: 'All' }, { id: 'active', label: 'Active' }, { id: 'completed', label: 'Completed' }, { id: 'failed', label: 'Failed' },
@@ -167,6 +167,8 @@ function JobRow({ job }: { job: JobDto }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [open, setOpen] = useState(false);
+  const me = useMe();
+  const notice = removeNotice(job, me.data?.cleanup.deleteRemoteOnJobDelete ?? false);
   const remove = useMutation({
     mutationFn: () => endpoints.deleteJob(job.id),
     onSuccess: () => { qc.setQueryData<JobDto[]>(['jobs'], (o) => o?.filter((j) => j.id !== job.id)); qc.invalidateQueries({ queryKey: ['jobs'] }); },
@@ -204,7 +206,9 @@ function JobRow({ job }: { job: JobDto }) {
       <div className="mt-3 flex flex-wrap gap-2">
         {job.state === 'completed' && <Button size="sm" data-testid="job-files" aria-expanded={open} onClick={() => setOpen((o) => !o)}>Files</Button>}
         {(job.state === 'failed' || job.state === 'cancelled') && <Button size="sm" disabled={retry.isPending} onClick={() => retry.mutate()}>Retry</Button>}
-        <Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => remove.mutate()}>{isActive(job) ? 'Cancel' : 'Remove'}</Button>
+        {notice
+          ? <ConfirmButton label="Remove" confirmLabel="Yes, remove" description={notice} disabled={remove.isPending} onConfirm={() => remove.mutate()} />
+          : <Button size="sm" variant="ghost" disabled={remove.isPending} onClick={() => remove.mutate()}>{isActive(job) ? 'Cancel' : 'Remove'}</Button>}
       </div>
       {open && job.state === 'completed' && <JobFiles job={job} />}
     </li>

@@ -28,3 +28,16 @@ export function filterJobs(list: JobDto[], f: JobFilter): JobDto[] {
 }
 
 export const displayName = (j: JobDto): string => j.name ?? j.infohash;
+
+/**
+ * What removing a job does to its files, shown in the Remove confirmation. null = nothing was delivered (failed/cancelled
+ * jobs), so no confirmation is needed. Must match the API: local library files are always deleted, S3 files only when the
+ * admin enabled `cleanup.deleteRemoteOnJobDelete`, Google Drive files are always kept.
+ */
+export function removeNotice(job: Pick<JobDto, 'state' | 'destination'>, deleteRemoteOnJobDelete: boolean): string | null {
+  if (job.state !== 'completed') return null;
+  const t = job.destination.type;
+  if (t === 'local') return 'The downloaded files will be deleted from the server and their download links stop working.';
+  if (t === 's3' && deleteRemoteOnJobDelete) return `The uploaded files will be deleted from "${job.destination.name}" and cannot be recovered.`;
+  return `The files already uploaded to "${job.destination.name}" are kept; only this entry is removed.`;
+}

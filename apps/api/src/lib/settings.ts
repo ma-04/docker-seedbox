@@ -13,6 +13,7 @@ export const SETTING_DEFAULTS = {
   'google.oauthClientId': '',
   'google.oauthClientSecret': '', // encrypted blob when set
   'cleanup.failedGraceMinutes': 60, // keep downloaded data this long after an upload failed, so "Retry" skips the re-download
+  'cleanup.deleteRemoteOnJobDelete': false, // S3 only: deleting a completed job also `rclone purge`s its job folder in the bucket (local files are always deleted)
   'limits.metadataTimeoutMinutes': 30, // a magnet without metadata after this long fails (0 = never)
   'seeding.maxMinutes': 0, // 0 = no cap; with seeding.ratio > 0, stop seeding after this many minutes
 };

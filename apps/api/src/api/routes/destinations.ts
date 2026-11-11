@@ -5,11 +5,12 @@ import { ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { makeS3Client } from '../../lib/s3client.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { enqueueDeletion } from '../../lib/deletions.js';
 import { encryptConfig, getDestination } from '../../lib/destinations.js';
 import type { TestResultDto } from '../../lib/dto.js';
 import { getAccessToken, getFile } from '../../lib/gdrive.js';
 import { assertPublicEndpoint, NetGuardError } from '../../lib/netguard.js';
-import { now, type DestinationConfig, type DestinationRow, type DestinationType, type UserRow } from '../../lib/types.js';
+import { now, type DestinationConfig, type DestinationRow, type DestinationType, type JobRow, type UserRow } from '../../lib/types.js';
 import type { Ctx } from '../context.js';
 import { applyConfigPatch, validateConfig } from '../destconfig.js';
 import { conflict, forbidden, idParam, notFound, parse, validation } from '../errors.js';
@@ -122,10 +123,13 @@ function makeHelpers(ctx: Ctx) {
     const active = db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE destination_id = ? AND state IN ${ACTIVE_SQL}`).get(row.id) as { n: number };
     if (active.n > 0) throw conflict('Destination has active jobs; cancel them first');
     db.transaction(() => {
+      // The delivered files go too (local always, S3 only with cleanup.deleteRemoteOnJobDelete): queue them while the
+      // destination row still exists; the worker works from the snapshot stored in pending_deletions.
+      for (const j of db.prepare("SELECT * FROM jobs WHERE destination_id = ? AND state = 'completed'").all(row.id) as JobRow[]) enqueueDeletion(db, secret, j);
       // Finished jobs reference the destination (no cascade): drop them with it.
       db.prepare('DELETE FROM jobs WHERE destination_id = ?').run(row.id);
       db.prepare('DELETE FROM destinations WHERE id = ?').run(row.id);
-    })();
+    }).immediate();
   }
 
   async function insert(ownerId: number | null, body: z.infer<typeof createSchema>, admin: boolean): Promise<DestinationRow> {

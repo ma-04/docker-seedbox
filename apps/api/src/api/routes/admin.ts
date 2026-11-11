@@ -21,6 +21,7 @@ const settingsSchema = z.object({
   'seeding.ratio': z.number().min(0).max(1000),
   'seeding.maxMinutes': z.number().int().min(0).max(525_600),
   'cleanup.failedGraceMinutes': z.number().int().min(0).max(525_600),
+  'cleanup.deleteRemoteOnJobDelete': z.boolean(),
   'limits.metadataTimeoutMinutes': z.number().int().min(0).max(525_600),
 }).partial().strip();
 

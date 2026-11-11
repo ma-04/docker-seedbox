@@ -12,6 +12,7 @@ import { now, type JobRow, type TorrentRow, type TorrentSource } from '../lib/ty
 import type { VpnClient } from '../lib/vpn.js';
 import { DownloaderUnavailableError, type Downloader } from '../downloaders/types.js';
 import type { RcloneProc, SpawnFn } from './rclone.js';
+import { processDeletions } from './deletions.js';
 import { EgressProxy } from './egress-proxy.js';
 import { realGDrive, runUpload, type EndpointGuard, type GDriveOps } from './upload.js';
 import { reconcileVpn } from './vpn.js';
@@ -138,6 +139,7 @@ export class Worker {
     await this.step('sweep', () => this.sweepFailed());
     await this.step('uploads', () => this.startUploads());
     await this.step('cleanup', () => this.cleanup());
+    await this.step('deletions', () => this.deletions());
     if (Date.now() - this.lastVpn >= this.d.vpnEveryMs && !this.vpnInflight) {
       this.lastVpn = Date.now();
       this.vpnInflight = this.reconcileVpn().finally(() => { this.vpnInflight = null; });
@@ -167,14 +169,23 @@ export class Worker {
    * worker was tearing the torrent down) goes back to `pending`: its data is re-downloaded rather than the job
    * sitting in `queued` forever.
    */
-  private healStranded(): void {
-    const r = this.db.prepare(
-      `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL,
-         started_at = NULL, library_path = NULL, cleanup_pending = 0
-       WHERE state IN ('removed','error')
+  private async healStranded(): Promise<void> {
+    const rows = this.db.prepare(
+      `SELECT id, library_path FROM torrents WHERE state IN ('removed','error')
          AND EXISTS (SELECT 1 FROM jobs WHERE jobs.torrent_id = torrents.id AND jobs.state IN ${ACTIVE})`,
-    ).run();
-    if (r.changes > 0) this.log.warn({ torrents: r.changes }, 'torrents with active jobs were removed/failed; resetting them to pending');
+    ).all() as { id: number; library_path: string | null }[];
+    let healed = 0;
+    for (const r of rows) {
+      // Keep the library copy when it is still there: addPending then serves the job from it instead of re-downloading.
+      const keep = r.library_path && (await exists(r.library_path)) ? r.library_path : null;
+      healed += this.db.prepare(
+        `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL,
+           started_at = NULL, library_path = ?, cleanup_pending = 0
+         WHERE id = ? AND state IN ('removed','error')
+           AND EXISTS (SELECT 1 FROM jobs WHERE jobs.torrent_id = torrents.id AND jobs.state IN ${ACTIVE})`,
+      ).run(keep, r.id).changes;
+    }
+    if (healed > 0) this.log.warn({ torrents: healed }, 'torrents with active jobs were removed/failed; resetting them to pending');
   }
 
   // --- step 1: pending torrents -> downloader -------------------------------------------------
@@ -427,6 +438,16 @@ export class Worker {
         .finally(() => { this.uploads.delete(c.id); });
       this.uploads.set(c.id, entry);
     }
+  }
+
+  // --- step 6: delete files of removed jobs ---------------------------------------------------------
+
+  private async deletions(): Promise<void> {
+    if (this.stopped) return;
+    await processDeletions({
+      db: this.db, config: this.d.config, log: this.log, rcloneBin: this.d.rcloneBin, egress: this.egress, endpointGuard: this.d.endpointGuard,
+      spawn: this.d.spawn ?? ((cmd, args, opts) => nodeSpawn(cmd, args, { env: opts.env, stdio: ['ignore', 'ignore', 'pipe'] })),
+    });
   }
 
   // --- step 5: release torrents nobody needs ------------------------------------------------------

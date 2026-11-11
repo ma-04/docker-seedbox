@@ -110,6 +110,51 @@ describe('races that used to strand jobs', () => {
     }
   });
 
+  it('self-heal keeps library_path while the library copy exists (no needless re-download), and clears it when the copy is gone', async () => {
+    const s = setup();
+    const u = addUser(s.db, 'alice');
+    const d = addDest(s.db, { type: 'local' });
+    const lib = join(s.config.downloadsDir, 'library', 'alice-1', 'Pack [aaaaaaaa]');
+    writeFiles(lib, { 'a.txt': 'A' });
+    const t = addTorrent(s.db, H1);
+    s.db.prepare("UPDATE torrents SET state = 'removed', library_path = ?, name = 'Pack' WHERE id = ?").run(lib, t);
+    const j = addJob(s.db, u, t, d);
+    await s.worker.tick();
+    expect(s.dl.added).toHaveLength(0); // served from the library copy
+    expect(torrent(s.db, t)).toMatchObject({ state: 'downloaded', library_path: lib });
+    expect(['downloading', 'uploading']).toContain(job(s.db, j).state);
+
+    const t2 = addTorrent(s.db, H2);
+    s.db.prepare("UPDATE torrents SET state = 'error', library_path = ? WHERE id = ?").run(join(s.config.downloadsDir, 'library', 'gone'), t2);
+    addJob(s.db, u, t2, d);
+    await s.worker.tick();
+    expect(s.dl.added.map((a) => a.id)).toEqual([H2]); // the copy no longer exists: downloaded again
+    expect(torrent(s.db, t2).library_path).toBeNull();
+  });
+
+  it('deleting a completed local job removes its library files (and empty parent) via pending_deletions; the download link then 404s', async () => {
+    const s = setup();
+    const u = addUser(s.db, 'alice');
+    const d = addDest(s.db, { type: 'local' });
+    const t = addTorrent(s.db, H1);
+    const j = addJob(s.db, u, t, d);
+    writeFiles(join(s.content(H1), 'Pack'), { 'a.txt': 'A', 'sub/b.txt': 'B' });
+    await s.worker.tick();
+    s.complete(H1, 'Pack', 2, join(s.content(H1), 'Pack'));
+    await s.worker.tick(); await s.worker.idle();
+    const row = job(s.db, j);
+    expect(row.state).toBe('completed');
+    const dir = join(s.config.downloadsDir, 'library', row.remote_path!);
+    expect(existsSync(join(dir, 'sub/b.txt'))).toBe(true);
+    const { enqueueDeletion } = await import('../lib/deletions.js');
+    s.db.transaction(() => { enqueueDeletion(s.db, s.config.appSecret, row); s.db.prepare('DELETE FROM jobs WHERE id = ?').run(j); })();
+    await s.worker.tick();
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(join(s.config.downloadsDir, 'library', 'alice-1'))).toBe(false);
+    expect(s.db.prepare('SELECT COUNT(*) n FROM pending_deletions').get()).toEqual({ n: 0 });
+    expect(existsSync(join(s.config.downloadsDir, 'library'))).toBe(true);
+  });
+
   it('a pending torrent whose only job was cancelled is retired with one conditional statement (a new job keeps it)', async () => {
     const s = setup();
     const u = addUser(s.db, 'alice');

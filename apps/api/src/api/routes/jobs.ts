@@ -4,6 +4,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { decryptJson, deriveKey, encryptJson } from '../../lib/crypto.js';
+import { enqueueDeletion } from '../../lib/deletions.js';
 import { buildMagnet, canonicalizeMagnet, mergeTrackers } from '../../lib/source.js';
 import { fullRemotePath, getDestination } from '../../lib/destinations.js';
 import type { JobFilesDto } from '../../lib/dto.js';
@@ -23,10 +24,16 @@ const stateQuery = z.object({ state: z.enum(['queued', 'downloading', 'uploading
 const TORRENT_FILE_MAX = 5 * 1024 * 1024;
 const WEEK = 7 * 86400;
 
-/** Cancel a live job, or delete a finished one. Used by user and admin DELETE. */
-function cancelOrDeleteJob(db: Ctx['db'], job: JobRow): void {
+/**
+ * Cancel a live job, or delete a finished one. Used by user and admin DELETE. Deleting a completed job queues the removal of
+ * its delivered files (local library always; S3 only with cleanup.deleteRemoteOnJobDelete) in the same transaction.
+ */
+function cancelOrDeleteJob(db: Ctx['db'], appSecret: string, job: JobRow): void {
   if (job.state === 'completed' || job.state === 'failed' || job.state === 'cancelled') {
-    db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id);
+    db.transaction(() => {
+      enqueueDeletion(db, appSecret, job);
+      db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id);
+    }).immediate();
   } else {
     db.prepare("UPDATE jobs SET state = 'cancelled', updated_at = ?, upload_speed = 0 WHERE id = ?").run(now(), job.id);
   }
@@ -57,7 +64,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
     db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL WHERE id = ? AND state IN ('error','removed')").run(torrentId);
   }
 
-  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, job);
+  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, ctx.config.appSecret, job);
   function retry(job: JobRow, user: UserRow): void {
     if (job.state !== 'failed' && job.state !== 'cancelled') throw new ApiError(409, 'conflict', 'Only failed or cancelled jobs can be retried');
     db.transaction(() => {
@@ -203,7 +210,7 @@ export function registerAdminJobs(app: FastifyInstance, ctx: Ctx): void {
     if (!j) throw notFound('Job');
     return j;
   };
-  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, job);
+  const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, ctx.config.appSecret, job);
   app.get('/api/admin/jobs', async (req) => {
     const { state } = parse(stateQuery, req.query);
     const rows = db.prepare(`${JOB_SELECT} ${state ? 'WHERE j.state = ?' : ''} ORDER BY j.created_at DESC, j.id DESC LIMIT 1000`).all(...(state ? [state] : [])) as JobJoin[];

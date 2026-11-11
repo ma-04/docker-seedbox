@@ -8,7 +8,7 @@ export default function AdminSettings() {
   const qc = useQueryClient();
   const toast = useToast();
   const q = useQuery({ queryKey: ['admin-settings'], queryFn: endpoints.admin.settings });
-  const [f, setF] = useState<LimitsForm>({ maxJobs: '', maxGb: '', minFreeGb: '', ratio: '', seedMaxMinutes: '', failedGraceMinutes: '', metadataTimeoutMinutes: '' });
+  const [f, setF] = useState<LimitsForm>({ maxJobs: '', maxGb: '', minFreeGb: '', ratio: '', seedMaxMinutes: '', failedGraceMinutes: '', metadataTimeoutMinutes: '', deleteRemote: false });
   useEffect(() => { if (q.data) setF(limitsToForm(q.data)); }, [q.data]);
   const save = useMutation({
     mutationFn: () => {
@@ -47,6 +47,10 @@ export default function AdminSettings() {
           <Field label="Magnet metadata timeout (minutes)" hint="A magnet that finds no metadata within this time fails. 0 = wait forever.">
             {(id) => <input id={id} type="number" min={0} step={1} className="input" value={f.metadataTimeoutMinutes} onChange={set('metadataTimeoutMinutes')} />}
           </Field>
+          <div>
+            <Check label="Delete uploaded S3 files when a completed job is removed" checked={f.deleteRemote} onChange={(v) => setF((s) => ({ ...s, deleteRemote: v }))} />
+            <p className="hint">Off by default: removing a job only deletes local-folder files. S3 only; Google Drive files are never deleted automatically.</p>
+          </div>
           <ErrorNote error={save.error} />
           <Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? 'Saving...' : 'Save settings'}</Button>
         </form>
