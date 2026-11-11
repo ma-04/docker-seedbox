@@ -6,7 +6,10 @@
 set -u
 cd "$(dirname "$0")"
 export COMPOSE_PROJECT_NAME=sbvpn
-DC="docker compose -f compose.yaml"
+# Every `exec` is bounded: `docker compose exec -T` has been seen to hang after its command finished (CI sat 20 min in
+# one `status` call until the job timeout). A hung exec now fails that one check instead of the whole job.
+dc() { if [ "${1:-}" = exec ]; then timeout -k 10 120 docker compose -f compose.yaml "$@"; else docker compose -f compose.yaml "$@"; fi; }
+DC=dc
 KEEP=0; [ "${1:-}" = "--keep" ] && KEEP=1
 PASS=0; FAILN=0
 TOKEN=test-token-0123456789
@@ -29,7 +32,7 @@ jqok()   { printf '%s\n' "$OUT" | head -1 | jq -e "$1"; }
 intruder_code() { $DC exec -T lan-intruder curl -s -m 5 -o /dev/null -w '%{http_code}' "$@"; }
 mode_noop() { echo '{"mode":"required"}' | $DC exec -T lan-client /t/ctl.sh POST /mode | head -1 | jq -e '.connected and .mode=="required"'; }
 qbt_refuses_root() { docker run --rm -e PUID=0 sbvpn-qbittorrent 2>&1 | grep -q 'refusing to run'; }
-status() { ctl GET /status | head -1; }
+status() { ctl GET /status </dev/null | head -1; }
 probe_rc() { probe curl -sS -m 4 -o /dev/null "$@" >/dev/null 2>&1; echo $?; }   # curl exit code: 0 ok, 28 = timed out (dropped)
 # LAN policy: nothing running in the namespace, as uid 1000 (qBittorrent, or any URL it is made to fetch) OR as root
 # (there is no uid exemption: root in the qbittorrent container shares this namespace), may open a connection to the LAN
@@ -73,7 +76,7 @@ trap cleanup EXIT
 # Positive probes right after /connect or a restart: the tunnel needs a moment on a loaded host. Retries only for
 # "does work" checks (never for the "must not work" ones) and reports when more than one attempt was needed.
 retry() { local n=$1 i; shift; for i in $(seq 1 "$n"); do if "$@"; then [ "$i" -gt 1 ] && echo "needed $i attempts: ${*:1:4}" >> "$WORK/retries"; return 0; fi; sleep 1; done; return 1; }
-export -f retry ctl probe probe_rc probe_rc0 probe_ip jqs status connect sh_ has jqok intruder_code mode_noop qbt_refuses_root
+export -f dc retry ctl probe probe_rc probe_rc0 probe_ip jqs status connect sh_ has jqok intruder_code mode_noop qbt_refuses_root
 export DC WORK
 
 section "build + keys"
@@ -272,7 +275,7 @@ checkno "zero direct successes after failed switch" probe test -s /tmp/leaks
 
 # ---------------------------------------------------------------- 5
 section "5. disconnect / server death"
-OUT=$(ctl POST /disconnect); echo "$OUT" | head -1
+OUT=$(ctl POST /disconnect </dev/null); echo "$OUT" | head -1
 check "disconnected, mode still required" jqok '(.connected|not) and .mode=="required"'
 checkno "tunnel target blocked after /disconnect" probe curl -sS -m 3 http://203.0.113.20/
 checkno "direct echo blocked after /disconnect" probe curl -sS -m 3 http://198.51.100.20/
