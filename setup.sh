@@ -558,6 +558,9 @@ or continue with --accept-new-secret if you want a new secret and will re-enter 
   if [ -n "$auth_host" ]; then
     case "$auth_host" in *".$cookie_domain"|"$cookie_domain") ;; *) die "AUTH_HOST ($auth_host) must be inside the cookie domain ($cookie_domain). Use --cookie-domain." ;; esac
   fi
+  if [ -n "$files_host" ] && in_cookie_domain "$files_host" "$cookie_domain"; then
+    warn "The download host $files_host is inside the login cookie's domain ($cookie_domain): browsers send the session cookie there and treat it as same-site. A host outside it (e.g. another registrable domain) isolates downloads fully; see SECURITY.md."
+  fi
 
   # ---- proxy mode ---------------------------------------------------------------------------------
   local cur_files_compose detected det_name det_net
@@ -715,6 +718,9 @@ ensure_images() { # pull the pinned version, or build from this clone
   fi
 }
 
+in_cookie_domain() { # in_cookie_domain HOST COOKIE_DOMAIN -> 0 if a cookie for COOKIE_DOMAIN is sent to HOST
+  case "$1" in *".$2"|"$2") return 0 ;; *) return 1 ;; esac
+}
 sep_host() { # sep_host KEY : AUTH_HOST / FILES_HOST from .env if it is a separate host (empty or = APP_HOST -> nothing)
   local v app
   v=$(lower "$(env_get "$1")"); app=$(lower "$(env_get APP_HOST)")
@@ -1013,6 +1019,10 @@ cmd_doctor() {
   for h in AUTH_HOST FILES_HOST; do
     if [ -n "$(env_get "$h")" ] && [ -z "$(sep_host "$h")" ]; then meh "$h equals APP_HOST: leave it empty instead (same layout; avoids duplicate names in VIRTUAL_HOST/LETSENCRYPT_HOST)"; fi
   done
+  local ck; ck=$(lower "$(env_get COOKIE_DOMAIN)"); ck=${ck:-$app_l}
+  if [ -n "$sep_f" ] && in_cookie_domain "$sep_f" "$ck"; then
+    meh "download host $sep_f is inside the login cookie's domain ($ck): it receives the session cookie and is same-site; a host outside it isolates downloads fully (SECURITY.md)"
+  fi
 
   say ""; say "DNS"
   while IFS= read -r h; do

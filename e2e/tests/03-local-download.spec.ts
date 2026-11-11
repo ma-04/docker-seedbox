@@ -105,15 +105,19 @@ test.describe('3. .torrent upload -> local destination -> signed downloads', () 
           s.src = u; s.onload = () => res('loaded'); s.onerror = () => res('blocked');
           document.head.appendChild(s);
         });
-        let sw = 'registered';
-        try { const reg = await navigator.serviceWorker.register(u, { scope: new URL(u).pathname.replace(/[^/]*$/, '') }); await reg.unregister(); } catch { sw = 'refused'; }
+        let sw = 'registered'; let swReason = '';
+        try { const reg = await navigator.serviceWorker.register(u, { scope: new URL(u).pathname.replace(/[^/]*$/, '') }); await reg.unregister(); } catch (e) { sw = 'refused'; swReason = String((e as Error)?.message ?? e); }
         const frame = await new Promise<string>((res) => {
           const f = document.createElement('iframe');
           f.src = u; document.body.appendChild(f);
           setTimeout(() => { let t = 'opaque'; try { t = f.contentDocument?.body?.innerText ?? 'opaque'; } catch { t = 'opaque'; } f.remove(); res(t); }, 2000);
         });
-        return { script, sw, frame, pwned: (window as unknown as { __pwned?: number }).__pwned ?? null };
+        return { script, sw, swReason, frame, pwned: (window as unknown as { __pwned?: number }).__pwned ?? null };
       }, url);
+      // the reason is recorded in the report: over the e2e's self-signed TLS Chromium may refuse for the certificate
+      // before it gets to the MIME type check, so `refused` alone does not prove which rule stopped it
+      testInfo.annotations.push({ type: 'service-worker refusal', description: probe.swReason });
+      console.log(`service-worker registration refused: ${probe.swReason}`);
       expect(probe.script).toBe('blocked');
       expect(probe.sw).toBe('refused');
       expect(probe.frame).not.toContain('PWNED');
