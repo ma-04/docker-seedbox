@@ -43,11 +43,14 @@ services:
   vpn:
     build: ..
     image: sbvpn-vpn
+    cap_drop: [ALL]   # same as deploy/compose.yaml: NET_ADMIN is the only capability the sidecar needs
     cap_add: [NET_ADMIN]
     sysctls: { net.ipv6.conf.all.disable_ipv6: "1" }
     environment:
       VPN_CONTROL_TOKEN: test-token-0123456789
       LAN_CIDRS: 172.31.250.0/24
+      CONTROL_TRUSTED_IPS: 172.31.250.50        # only lan-client may reach the control API (the intruder may not)
+      VPN_LAN_ALLOW_OUT: 172.31.250.50:9000     # TEST ONLY: one LAN ip:port qBittorrent may dial (positive control for the LAN rules)
       VPN_MTU: ${VPN_MTU:-}                     # unset = 1280; run.sh asserts precedence
       VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-}   # unset/empty must mean "required" (fail closed); run.sh asserts it
       PUBLIC_IP_URL: http://172.31.252.20/
@@ -63,8 +66,19 @@ services:
     cap_drop: [ALL]   # same as deploy/compose.yaml: proves the entrypoint works with exactly these capabilities
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]
     environment: { LAN_CIDRS: 172.31.250.0/24, QBT_TRUSTED_IPS: 172.31.250.50 }   # only lan-client may use the WebUI
-    volumes: ["qbt-config:/config", "downloads:/downloads"]
-    depends_on: { vpn: { condition: service_healthy, restart: true } }
+    volumes:
+      - qbt-config:/config
+      - { type: volume, source: downloads, target: /downloads/incomplete, volume: { subpath: incomplete } }   # as deploy/compose.yaml
+    depends_on:
+      init: { condition: service_completed_successfully }
+      vpn: { condition: service_healthy, restart: true }
+  init:   # as deploy/compose.yaml: the subpath must exist before qbittorrent is created
+    image: sbvpn-tools
+    user: "0:0"
+    restart: "no"
+    command: ["sh", "-c", "mkdir -p /downloads/incomplete /downloads/library && chown 1000:1000 /downloads/incomplete"]
+    volumes: ["downloads:/downloads"]
+    depends_on: { tools-build: { condition: service_completed_successfully } }
   # test helpers
   probe:   # shares the vpn netns, like qbittorrent does
     <<: *tools
@@ -73,10 +87,11 @@ services:
     depends_on: { vpn: { condition: service_healthy } }
   lan-client:
     <<: *tools
-    command: ["sleep", "infinity"]
-    environment: { VPN_CONTROL_TOKEN: test-token-0123456789 }
+    command: ["/t/listen.sh"]
+    environment: { VPN_CONTROL_TOKEN: test-token-0123456789, LISTEN_NAME: client, LISTEN_PORTS: "9000 9001" }
     networks: { lan: { ipv4_address: 172.31.250.50 } }
   lan-intruder:   # a "compromised sibling container": same network, not in QBT_TRUSTED_IPS
     <<: *tools
-    command: ["sleep", "infinity"]
+    command: ["/t/listen.sh"]
+    environment: { LISTEN_NAME: intruder, LISTEN_PORTS: "9999" }
     networks: { lan: { ipv4_address: 172.31.250.51 } }

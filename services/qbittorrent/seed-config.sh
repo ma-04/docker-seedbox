@@ -56,7 +56,10 @@ fi
 # is the only one. A stored Password_PBKDF2 takes precedence over the temporary one (src/webui/webui.cpp).
 awk '!/^Password_PBKDF2=/' "$CONF" > "$CONF.tmp" && cat "$CONF.tmp" > "$CONF" && rm -f "$CONF.tmp"
 
-# Always enforced (the WebUI is only reachable inside the compose network and is never routed by the gateway).
+# Security-critical keys, re-applied on EVERY start (the WebUI is only reachable inside the compose network and is never
+# routed by the gateway). Nothing an admin can tune from the app's engine settings (apps/api/src/api/engine.ts:
+# limits, queueing, DHT/PeX/LSD, encryption, anonymous mode, listen port, extra trackers) may be in this block: those are
+# seeded on first start only, below, so a change made in the UI survives a restart.
 set_key WebUI 'Address' '*'
 set_key WebUI 'Port' "${QBT_WEBUI_PORT:-8080}"
 set_key WebUI 'AuthSubnetWhitelist' "$TRUSTED"
@@ -69,18 +72,23 @@ set_key WebUI 'CSRFProtection' false
 set_key WebUI 'ClickjackingProtection' false
 set_key LegalNotice Accepted true
 set_key Network 'PortForwardingEnabled' false   # UPnP / NAT-PMP
-set_key BitTorrent 'Session\AnonymousModeEnabled' false
+# No autorun: a program run on torrent events would be code execution for anyone who can reach setPreferences.
+set_key AutoRun 'enabled' false
+set_key AutoRun 'OnTorrentAdded\Enabled' false
+set_key AutoRun 'OnTorrentFinished\Enabled' false
 set_key BitTorrent 'Session\Interface' ''
 set_key BitTorrent 'Session\InterfaceName' ''
 set_key BitTorrent 'Session\InterfaceAddress' ''
 
-# Defaults on first start only (an admin may change these later in the WebUI).
+# Defaults on first start only (an admin may change these later in the WebUI; every key of the engine-settings whitelist
+# that this image seeds belongs here, never in the block above).
 if ! grep -q 'Session.DefaultSavePath=' "$CONF"; then
   set_key BitTorrent 'Session\DefaultSavePath' /downloads/incomplete
   set_key BitTorrent 'Session\TempPathEnabled' false
   set_key BitTorrent 'Session\Preallocation' false
   set_key BitTorrent 'Session\DHTEnabled' true
   set_key BitTorrent 'Session\PeXEnabled' true
+  set_key BitTorrent 'Session\AnonymousModeEnabled' false
   set_key BitTorrent 'Session\LSDEnabled' false
   set_key BitTorrent 'Session\Port' 6881
   set_key Meta 'MigrationVersion' 9999

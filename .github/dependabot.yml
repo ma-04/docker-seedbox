@@ -1,0 +1,37 @@
+# Keeps the pinned things pinned *and* current: npm packages, base images (Dockerfiles and compose files carry
+# `image:tag@sha256:...` digests), GitHub Actions (pinned to full commit SHAs with a version comment) and Go modules.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directories:
+      - /apps/api
+      - /apps/web
+      - /services/gateway
+      - /services/vpn
+      - /services/qbittorrent
+      - /services/vpn/test
+      - /e2e
+    schedule: { interval: weekly }
+
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule: { interval: weekly }
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /services/vpn/src
+    schedule: { interval: weekly }

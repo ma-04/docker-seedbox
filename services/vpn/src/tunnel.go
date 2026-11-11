@@ -113,6 +113,9 @@ func handshakeAge(iface string) (int64, bool) {
 	return age, true
 }
 
+// wgRun is run(); a variable so tests can inject a failing `wg` that echoes its input.
+var wgRun runFn = run
+
 func wgSetConf(iface string, c *WGConfig, ep netip.AddrPort) error {
 	var b strings.Builder
 	b.WriteString("[Interface]\nPrivateKey = " + c.PrivateKey + "\nFwMark = " + wgFwmark + "\n[Peer]\nPublicKey = " + c.PublicKey + "\n")
@@ -125,8 +128,13 @@ func wgSetConf(iface string, c *WGConfig, ep netip.AddrPort) error {
 	}
 	fmt.Fprintf(&b, "AllowedIPs = %s\nEndpoint = %s\nPersistentKeepalive = %d\n", strings.Join(al, ", "), ep, c.Keepalive)
 	// The key travels over stdin only; it is never written to disk or put in argv.
-	_, err := run(b.String(), "wg", "setconf", iface, "/dev/stdin")
-	return err
+	if _, err := wgRun(b.String(), "wg", "setconf", iface, "/dev/stdin"); err != nil {
+		// wg prints the offending config line on a parse error, which would put key material into logs and HTTP
+		// bodies: keep only a generic category.
+		logf("wg setconf %s failed (output withheld: it can echo the configuration)", iface)
+		return errWireGuard
+	}
+	return nil
 }
 
 func writeResolv(content string) {

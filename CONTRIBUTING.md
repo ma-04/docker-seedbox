@@ -37,11 +37,17 @@ shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh
 ./setup.sh --domain seedbox.example.com --admin-email me@example.com --proxy none --yes --no-start
 ```
 
-`docker compose build` builds every image from a clone. CI runs typecheck, unit tests, the compose/shellcheck checks and a build of every image.
+`docker compose build` builds every image from a clone. CI runs typecheck, unit tests, the compose/shellcheck checks, a build of every image, the VPN sidecar test (`services/vpn/test/run.sh`, needs Docker with Compose 2.33+ and a kernel with WireGuard) and the end-to-end suite. All of it must pass before anything is published: see [docs/releasing.md](docs/releasing.md).
+
+```sh
+services/vpn/test/run.sh        # kill switch, LAN policy, rotation, qBittorrent seeding; project name sbvpn, cleans up after itself
+cd services/vpn/src && go vet ./... && go test ./...
+```
 
 ## Pull requests
 
 - Keep changes focused; add or update tests; update the docs and `docs/architecture.md` when behaviour or interfaces change.
 - Never commit secrets, real hostnames or personal data. Use `example.com` in examples.
+- GitHub Actions are pinned to full commit SHAs (`uses: owner/repo@<sha> # vX.Y.Z`) and base images to digests; Dependabot proposes the updates. Look SHAs up with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (dereference annotated tags), never guess them.
 - Only legal, public-domain/CC torrents in tests.
 - By contributing you agree that your contribution is licensed under AGPL-3.0-only.

@@ -31,7 +31,14 @@ var forbiddenKey = regexp.MustCompile(`(?i)^(preup|postup|predown|postdown|savec
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9_.@:+ -]{1,64}$`)
 var hostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 
+// keyRe is the exact form of a WireGuard key: 32 bytes as 44 base64 characters. base64.StdEncoding.DecodeString alone
+// also skips \r and \n inside the string, so a decoder check is not enough.
+var keyRe = regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`)
+
 func validKey(k string) bool {
+	if !keyRe.MatchString(k) {
+		return false
+	}
 	b, err := base64.StdEncoding.DecodeString(k)
 	return err == nil && len(b) == 32
 }

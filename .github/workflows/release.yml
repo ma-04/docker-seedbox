@@ -1,12 +1,19 @@
 name: Release images
 
-# Publishes the five images to GHCR as ghcr.io/<owner>/docker-seedbox-<name>:
-#   push to main  -> :latest, :edge, :sha-<short>
-#   tag vX.Y.Z    -> :X.Y.Z, :X.Y, :X
+# Publishes the five images to GHCR as ghcr.io/<owner>/docker-seedbox-<name>. See docs/releasing.md.
+#
+#   tag vX.Y.Z        -> :X.Y.Z, :X.Y and :latest
+#   tag vX.Y.Z-rc.N   -> :X.Y.Z-rc.N only (a pre-release never moves :X.Y or :latest)
+#   push to main      -> :edge only
+#   workflow_dispatch -> same rules, for the ref it is run on (a tag or main; anything else is refused)
+#
+# Nothing is tagged until (1) the whole CI suite (ci.yml, including the e2e job) is green for this exact commit and
+# (2) all five images were built and pushed (untagged, by digest). Only then one job applies the tags to all five at
+# once, so a red or partial build cannot leave a mixed set of images under :latest / :X.Y.Z.
 on:
   push:
     branches: [main]
-    tags: ["v*.*.*"]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -16,17 +23,61 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  REGISTRY: ghcr.io
+
 jobs:
-  publish:
-    name: Publish ${{ matrix.image }}
+  guard:
+    name: Check the ref
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      kind: ${{ steps.ref.outputs.kind }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: ref
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" = refs/heads/main ]; then
+            echo "kind=edge" >> "$GITHUB_OUTPUT"
+          elif [ "${REF#refs/tags/}" != "$REF" ]; then
+            if ! printf '%s' "$REF_NAME" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::tag '$REF_NAME' is not vMAJOR.MINOR.PATCH[-prerelease]"; exit 1
+            fi
+            # A release must be a commit that is on main (it has gone through review and CI there).
+            # fetch-depth: 0 above already fetched every branch, so origin/main exists (no credentials needed here).
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::tag '$REF_NAME' points at a commit that is not on main"; exit 1
+            fi
+            case "$REF_NAME" in *-*) echo "kind=prerelease" >> "$GITHUB_OUTPUT" ;; *) echo "kind=release" >> "$GITHUB_OUTPUT" ;; esac
+          else
+            echo "::error::only tags (vX.Y.Z) and main can be published, not $REF"; exit 1
+          fi
+
+  ci:
+    name: CI
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  push-digests:
+    name: Build and push ${{ matrix.image }} (untagged)
+    needs: [guard, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
       packages: write
-      id-token: write       # provenance / attestation
-      attestations: write
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - { image: api, context: ., file: apps/api/Dockerfile }
@@ -35,50 +86,127 @@ jobs:
           - { image: vpn, context: services/vpn, file: services/vpn/Dockerfile }
           - { image: qbittorrent, context: services/qbittorrent, file: services/qbittorrent/Dockerfile }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Lower-case image name
         id: name
-        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/docker-seedbox-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+        run: echo "ref=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/docker-seedbox-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ steps.name.outputs.ref }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=edge,enable={{is_default_branch}}
-            type=sha,prefix=sha-,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
           labels: |
             org.opencontainers.image.licenses=AGPL-3.0-only
 
+      # Pushed by digest only: the image exists in the registry but carries no tag until the `tag` job below.
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.name.outputs.ref }},push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
 
-      - uses: actions/attest-build-provenance@v2
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p digests
+          printf '%s' "$DIGEST" > "digests/${{ matrix.image }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          subject-name: ${{ steps.name.outputs.ref }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          name: digest-${{ matrix.image }}
+          path: digests/${{ matrix.image }}
+          if-no-files-found: error
+          retention-days: 1
+
+  tag:
+    name: Tag all five images
+    needs: [guard, push-digests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply the tags
+        env:
+          KIND: ${{ needs.guard.outputs.kind }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$KIND" in
+            edge) tags=(edge) ;;
+            prerelease) v=${REF_NAME#v}; tags=("$v") ;;
+            release) v=${REF_NAME#v}; tags=("$v" "${v%.*}" latest) ;;
+            *) echo "::error::unexpected kind '$KIND'"; exit 1 ;;
+          esac
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          for image in api web gateway vpn qbittorrent; do
+            test -s "digests/$image" || { echo "::error::no digest for $image"; exit 1; }
+          done
+          for image in api web gateway vpn qbittorrent; do
+            ref="${REGISTRY}/${owner}/docker-seedbox-${image}"
+            args=()
+            for t in "${tags[@]}"; do args+=(-t "$ref:$t"); done
+            docker buildx imagetools create "${args[@]}" "$ref@$(cat "digests/$image")"
+          done
+
+  attest:
+    name: Attest ${{ matrix.image }}
+    needs: [guard, tag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write       # sigstore signing identity
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [api, web, gateway, vpn, qbittorrent]
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: digest-${{ matrix.image }}
+          path: digests
+      - id: d
+        run: |
+          echo "name=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/docker-seedbox-${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+          echo "digest=$(cat "digests/${{ matrix.image }}")" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ steps.d.outputs.name }}
+          subject-digest: ${{ steps.d.outputs.digest }}
           push-to-registry: true

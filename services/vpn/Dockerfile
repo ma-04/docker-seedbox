@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.23-alpine AS build
+FROM golang:1.23-alpine@sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f AS build
 WORKDIR /src
 COPY src/ ./
 RUN go vet ./... && go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /vpn-control .
 
-FROM alpine:3.22
+FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
 # wireguard-tools: `wg`; iproute2: `ip`; nftables: the kill switch. Needs kernel WireGuard (Linux >= 5.6).
 RUN apk add --no-cache wireguard-tools iproute2 nftables ca-certificates
 COPY --from=build /vpn-control /usr/local/bin/vpn-control

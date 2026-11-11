@@ -6,17 +6,22 @@
 #   ./setup.sh                       interactive install
 #   ./setup.sh --domain seedbox.example.com --admin-email me@example.com --yes
 #   ./setup.sh add-user              add a login (Authelia mode)
-#   ./setup.sh update                pull newer images and restart
+#   ./setup.sh update                move to the newest release (or --version X.Y.Z) and restart
+#   ./setup.sh backup                archive .env, the Authelia users and the data volume
+#   ./setup.sh restore FILE          put such an archive back
 #   ./setup.sh doctor                check DNS, containers, VPN prerequisites, disk space
 #
 # Run `./setup.sh --help` for all options. Docs: docs/deployment.md
 set -euo pipefail
+umask 077            # .env, the users file and every temp file are never world-readable, not even for an instant
+export LC_ALL=C      # byte-wise regexes/classes below; no locale surprises
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY="$ROOT/deploy"
 ENV_FILE="$DEPLOY/.env"
 USERS_DIR="$DEPLOY/authelia/users"
 USERS_FILE="$USERS_DIR/users_database.yml"
+FPR_FILE=.app-secret-fingerprint   # inside the data volume
 
 # --- output helpers -----------------------------------------------------------------------
 if [ -t 1 ]; then B=$'\033[1m'; R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; N=$'\033[0m'; else B=""; R=""; G=""; Y=""; N=""; fi
@@ -32,23 +37,37 @@ Usage: ./setup.sh [command] [options]
 Commands:
   install (default)   configure, pull/build images and start the stack
   add-user            add an Authelia user (--admin-user NAME --admin-password PW --admin-email MAIL [--group admins])
-  update              pull newer images and restart (add --build to rebuild from this clone)
-  doctor              diagnose DNS, containers, the WireGuard kernel module and disk space
+  update              move to the newest release (or --version X.Y.Z), pull and restart; add --build to rebuild from this clone
+  backup              archive deploy/.env, the Authelia users and the data volume (--out FILE_OR_DIR)
+  restore FILE        put a backup archive back (replaces .env, users and the data volume; asks first unless --yes)
+  doctor              diagnose DNS, containers, the WireGuard kernel module, disk space, APP_SECRET and version
 
 Install options (each also readable from the environment as SEEDBOX_<NAME>, e.g. SEEDBOX_DOMAIN):
   --domain DOMAIN        app host, e.g. seedbox.example.com (auth./files. subdomains are derived)
   --auth-host HOST       override the login host      (default auth.<domain>)
   --files-host HOST      override the downloads host  (default files.<domain>)
   --cookie-domain DOMAIN parent domain for the login cookie (default: the app domain)
-  --admin-user NAME      first admin login            (default admin)
+  --admin-user NAME      first admin login            (default admin; letters, digits . _ -)
   --admin-password PW    its password                 (default: generated and printed once)
   --admin-email MAIL     its e-mail address
+  --auth-mode MODE       authelia (default) | external (your own SSO in front of the gateway)
   --proxy MODE           bundled | external | none
   --proxy-network NAME   Docker network of your existing reverse proxy (external mode)
   --acme-email MAIL      e-mail for Let's Encrypt (bundled / nginx-proxy + acme-companion)
+  --version VERSION      image version to run: X.Y.Z, edge, or local (default: newest release; with none published
+                         yet, or none for this registry, the images are built from this clone)
   --build                build images from this clone instead of pulling from GHCR
   --no-start             write configuration only; do not pull or start anything
   --yes, -y              never prompt; use flags/env/defaults
+
+Other options:
+  --allow-downgrade      update: allow moving to an older version (database migrations are not reversible: restore a backup)
+  --accept-new-secret    install/update: continue although APP_SECRET differs from the one the database was created with
+                         (stored destination credentials and VPN configs become unreadable)
+  --i-know-external-auth-is-unsafe
+                         allow AUTH_MODE=external together with the bundled proxy, which publishes the gateway on 80/443
+                         WITHOUT anything in front of it that authenticates: anyone can then claim any identity
+  --out PATH             backup: archive file, or directory to put it in (default: ./seedbox-backup-<time>.tar.gz)
   --help, -h             this text
 EOF
 }
@@ -59,10 +78,13 @@ DOMAIN=${SEEDBOX_DOMAIN:-}; AUTH_HOST_IN=${SEEDBOX_AUTH_HOST:-}; FILES_HOST_IN=$
 COOKIE_IN=${SEEDBOX_COOKIE_DOMAIN:-}
 ADMIN_USER=${SEEDBOX_ADMIN_USER:-}; ADMIN_PASSWORD=${SEEDBOX_ADMIN_PASSWORD:-}; ADMIN_EMAIL=${SEEDBOX_ADMIN_EMAIL:-}
 PROXY=${SEEDBOX_PROXY:-}; PROXY_NETWORK_IN=${SEEDBOX_PROXY_NETWORK:-}; ACME_EMAIL_IN=${SEEDBOX_ACME_EMAIL:-}
+AUTH_MODE_IN=${SEEDBOX_AUTH_MODE:-}; VERSION_IN=${SEEDBOX_VERSION_OVERRIDE:-}
 BUILD=${SEEDBOX_BUILD:-0}; YES=${SEEDBOX_YES:-0}; NO_START=0; USER_GROUP=users
+ALLOW_DOWNGRADE=0; ACCEPT_NEW_SECRET=0; I_KNOW=${SEEDBOX_I_KNOW_EXTERNAL_AUTH_IS_UNSAFE:-0}
+BACKUP_OUT=""; RESTORE_FILE=""
 
 if [ $# -gt 0 ]; then
-  case "$1" in install|add-user|update|doctor) CMD=$1; shift ;; esac
+  case "$1" in install|add-user|update|doctor|backup|restore) CMD=$1; shift ;; esac
 fi
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -74,25 +96,67 @@ while [ $# -gt 0 ]; do
     --admin-password) ADMIN_PASSWORD=${2:?}; shift 2 ;;
     --admin-email) ADMIN_EMAIL=${2:?}; shift 2 ;;
     --group) USER_GROUP=${2:?}; shift 2 ;;
+    --auth-mode) AUTH_MODE_IN=${2:?}; shift 2 ;;
     --proxy) PROXY=${2:?}; shift 2 ;;
     --proxy-network) PROXY_NETWORK_IN=${2:?}; shift 2 ;;
     --acme-email) ACME_EMAIL_IN=${2:?}; shift 2 ;;
+    --version) VERSION_IN=${2:?}; shift 2 ;;
+    --out) BACKUP_OUT=${2:?}; shift 2 ;;
     --build) BUILD=1; shift ;;
     --no-start) NO_START=1; shift ;;
+    --allow-downgrade) ALLOW_DOWNGRADE=1; shift ;;
+    --accept-new-secret) ACCEPT_NEW_SECRET=1; shift ;;
+    --i-know-external-auth-is-unsafe) I_KNOW=1; shift ;;
     --yes|-y) YES=1; shift ;;
     --help|-h) usage; exit 0 ;;
-    *) usage >&2; die "Unknown option: $1" ;;
+    -*) usage >&2; die "Unknown option: $1" ;;
+    *)
+      if [ "$CMD" = restore ] && [ -z "$RESTORE_FILE" ]; then RESTORE_FILE=$1; shift
+      else usage >&2; die "Unexpected argument: $1"; fi ;;
   esac
 done
 
 INTERACTIVE=1
 if [ "$YES" = 1 ] || [ ! -t 0 ]; then INTERACTIVE=0; fi
 
+# --- input validation ----------------------------------------------------------------------------
+# Every value that ends up in deploy/.env, the Authelia users file or a docker command line is checked as a WHOLE
+# string: a check that works line by line (grep) lets "bob\n  evil: ..." through its first line.
+has_ctl() { [[ $1 == *[[:cntrl:]]* ]]; }   # newline, CR, tab, ESC, DEL, ...
+reject_ctl() { # reject_ctl NAME VALUE
+  if has_ctl "$2"; then die "$1 must not contain newlines or control characters."; fi
+  return 0
+}
+HOST_RE='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+USER_RE='^[a-zA-Z0-9._-]{1,64}$'
+EMAIL_RE='^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+$'
+NETWORK_RE='^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'
+GROUP_RE='^[a-z0-9][a-z0-9_-]{0,31}$'
+VERSION_RE='^(latest|edge|local|[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+valid_host() { [ "${#1}" -le 253 ] && [[ $1 =~ $HOST_RE ]]; }
+valid_user() { [[ $1 =~ $USER_RE ]]; }
+valid_email() { [ "${#1}" -le 254 ] && [[ $1 =~ $EMAIL_RE ]] && valid_host "$(lower "${1#*@}")"; }
+valid_network() { [[ $1 =~ $NETWORK_RE ]]; }
+valid_group() { [[ $1 =~ $GROUP_RE ]]; }
+valid_version() { [[ $1 =~ $VERSION_RE ]]; }
+
+reject_ctl "--domain" "$DOMAIN"; reject_ctl "--auth-host" "$AUTH_HOST_IN"; reject_ctl "--files-host" "$FILES_HOST_IN"
+reject_ctl "--cookie-domain" "$COOKIE_IN"; reject_ctl "--admin-user" "$ADMIN_USER"; reject_ctl "--admin-password" "$ADMIN_PASSWORD"
+reject_ctl "--admin-email" "$ADMIN_EMAIL"; reject_ctl "--proxy" "$PROXY"; reject_ctl "--proxy-network" "$PROXY_NETWORK_IN"
+reject_ctl "--acme-email" "$ACME_EMAIL_IN"; reject_ctl "--group" "$USER_GROUP"; reject_ctl "--auth-mode" "$AUTH_MODE_IN"
+reject_ctl "--version" "$VERSION_IN"; reject_ctl "--out" "$BACKUP_OUT"; reject_ctl "restore file" "$RESTORE_FILE"
+[ -z "$ADMIN_USER" ] || valid_user "$ADMIN_USER" || die "Invalid user name: use 1-64 letters, digits, '.', '_' or '-'."
+[ -z "$ADMIN_EMAIL" ] || valid_email "$ADMIN_EMAIL" || die "Invalid admin e-mail address."
+[ -z "$ACME_EMAIL_IN" ] || valid_email "$ACME_EMAIL_IN" || die "Invalid --acme-email address."
+[ -z "$PROXY_NETWORK_IN" ] || valid_network "$PROXY_NETWORK_IN" || die "Invalid Docker network name '$PROXY_NETWORK_IN'."
+valid_group "$USER_GROUP" || die "Invalid group name '$USER_GROUP' (lowercase letters, digits, '_' or '-')."
+[ -z "$VERSION_IN" ] || valid_version "$VERSION_IN" || die "Invalid --version '$VERSION_IN' (use X.Y.Z, edge or local)."
+case "$AUTH_MODE_IN" in ""|authelia|external) ;; *) die "--auth-mode must be authelia or external." ;; esac
+
 # --- small utilities ---------------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
 dc() { (cd "$DEPLOY" && docker compose "$@"); }
-
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 gen_hex() { # gen_hex BYTES -> 2*BYTES hex characters
   if have openssl; then openssl rand -hex "$1"; else head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; fi
@@ -104,6 +168,11 @@ gen_password() { # 20 chars, no ambiguous or shell-special characters
   done
   printf '%s' "${out:0:20}"
 }
+sha256_hex() {
+  if have sha256sum; then sha256sum | awk '{print $1}'
+  elif have shasum; then shasum -a 256 | awk '{print $1}'
+  else openssl dgst -sha256 | awk '{print $NF}'; fi
+}
 
 env_get() { # env_get KEY -> value (empty if missing)
   [ -f "$ENV_FILE" ] || return 0
@@ -111,6 +180,7 @@ env_get() { # env_get KEY -> value (empty if missing)
 }
 env_put() { # env_put KEY VALUE : replace the line (or append). Edits in place, keeps mode.
   local k=$1 v=$2 tmp
+  if has_ctl "$v"; then die "Refusing to write a value with newlines or control characters to $ENV_FILE ($k)."; fi
   tmp=$(mktemp)
   if grep -q "^$k=" "$ENV_FILE" 2>/dev/null; then
     K="$k" V="$v" awk 'index($0, ENVIRON["K"] "=") == 1 { print ENVIRON["K"] "=" ENVIRON["V"]; next } { print }' "$ENV_FILE" >"$tmp"
@@ -157,20 +227,104 @@ ask_secret() { # ask_secret VAR "prompt" : hidden input, empty => stays empty
   fi
   eval "$var=\$reply"
 }
+confirm() { # confirm "question" [default y|n] -> 0 for yes. Non-interactive: the default (--yes: always yes).
+  local q=$1 def=${2:-y} reply
+  if [ "$YES" = 1 ]; then return 0; fi
+  if [ "$INTERACTIVE" = 0 ]; then [ "$def" = y ]; return; fi
+  if [ "$def" = y ]; then printf '%s [Y/n]: ' "$q"; else printf '%s [y/N]: ' "$q"; fi
+  IFS= read -r reply || reply=""
+  reply=${reply:-$def}
+  case "$reply" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
 
-valid_host() { printf '%s' "$1" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'; }
-valid_user() { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$'; }
-valid_email() { printf '%s' "$1" | grep -Eq '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$'; }
 yaml_q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
+
+ver_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$2" ]; }   # $1 >= $2
 
 need_docker() {
   have docker || die "Docker is not installed. See https://docs.docker.com/engine/install/"
   docker info >/dev/null 2>&1 || die "Cannot talk to the Docker daemon (is it running, and are you in the 'docker' group?)"
   docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required ('docker compose', not 'docker-compose'). See https://docs.docker.com/compose/install/"
+  # compose.yaml mounts only incomplete/ into qBittorrent and only library/ into the gateway/api (volume.subpath):
+  # that needs Docker Engine 26+ (API 1.45) and Compose 2.26+.
+  local engine comp
+  engine=$(docker version -f '{{.Server.Version}}' 2>/dev/null || true); comp=$(docker compose version --short 2>/dev/null || true); comp=${comp#v}
+  if [[ $engine =~ ^[0-9]+\.[0-9]+ ]] && ! ver_ge "$engine" 26.0; then
+    die "Docker Engine $engine is too old: this stack needs 26.0 or newer (volume subpaths). Upgrade Docker: https://docs.docker.com/engine/install/"
+  fi
+  if [[ $comp =~ ^[0-9]+\.[0-9]+ ]] && ! ver_ge "$comp" 2.26; then
+    die "Docker Compose $comp is too old: this stack needs 2.26 or newer (volume subpaths). See https://docs.docker.com/compose/install/"
+  fi
 }
 
-authelia_image() { # single source of truth: deploy/compose.yaml
+authelia_image() { # single source of truth: deploy/compose.yaml (tag, and @sha256 digest when pinned)
   sed -n 's/^[[:space:]]*image:[[:space:]]*\(authelia\/authelia:[^[:space:]]*\).*/\1/p' "$DEPLOY/compose.yaml" | head -n 1
+}
+helper_image() { # the busybox of the init service: used for volume housekeeping (backup, restore, fingerprint)
+  sed -n 's/^[[:space:]]*image:[[:space:]]*\(busybox:[^[:space:]]*\).*/\1/p' "$DEPLOY/compose.yaml" | head -n 1
+}
+
+# --- Docker volumes (backup, restore, APP_SECRET fingerprint) ---------------------------------------
+project_name() {
+  local p=${COMPOSE_PROJECT_NAME:-}
+  [ -n "$p" ] || p=$(env_get COMPOSE_PROJECT_NAME)
+  printf '%s' "${p:-seedbox}"
+}
+vol_name() { # vol_name data -> the Docker volume compose created for it (empty if none)
+  docker volume ls -q --filter "label=com.docker.compose.project=$(project_name)" --filter "label=com.docker.compose.volume=$1" | head -n 1
+}
+vol_run() { # vol_run VOLUME MODE(ro|rw) EXTRA_DOCKER_ARGS... -- SHELL_SNIPPET   (root, no network, pinned busybox)
+  local vol=$1 mode=$2; shift 2
+  local extra=()
+  while [ "$1" != "--" ]; do extra+=("$1"); shift; done
+  shift
+  docker run --rm --network none --user 0:0 -v "$vol:/v:$mode" ${extra[@]+"${extra[@]}"} "$(helper_image)" sh -c "$1"
+}
+
+# A change of APP_SECRET makes every encrypted value in the database (destination credentials, torrent sources,
+# VPN configs) unreadable. A short non-secret fingerprint of the secret is kept NEXT TO THE DATA (in the data
+# volume), so a regenerated or edited deploy/.env is noticed instead of silently producing an unusable install.
+secret_fpr() { printf 'docker-seedbox app-secret fingerprint v1\n%s' "$(env_get APP_SECRET)" | sha256_hex | cut -c1-16; }
+fpr_stored() { # prints the fingerprint stored in the data volume, nothing if none/no volume
+  local vol; vol=$(vol_name data)
+  [ -n "$vol" ] || return 0
+  vol_run "$vol" ro -- "cat /v/$FPR_FILE 2>/dev/null || true" 2>/dev/null || true
+}
+fpr_record() { # write the fingerprint if the volume has none (fresh install, or one that predates this check)
+  local vol; vol=$(vol_name data)
+  [ -n "$vol" ] || return 0
+  [ -z "$(fpr_stored)" ] || return 0
+  vol_run "$vol" rw -e "FPR=$(secret_fpr)" -- "printf '%s' \"\$FPR\" > /v/$FPR_FILE && chown 1000:1000 /v/$FPR_FILE && chmod 644 /v/$FPR_FILE" >/dev/null 2>&1 \
+    || warn "Could not record the APP_SECRET fingerprint in the data volume."
+}
+fpr_check() { # fpr_check [force] : die (or warn when force) when the data volume belongs to a different APP_SECRET
+  local stored
+  stored=$(fpr_stored)
+  [ -n "$stored" ] || return 0
+  [ "$stored" != "$(secret_fpr)" ] || return 0
+  if [ "$ACCEPT_NEW_SECRET" = 1 ]; then
+    warn "APP_SECRET differs from the one the database was created with. Stored credentials (destinations, VPN configs, torrent sources) are UNREADABLE; re-enter them in the Admin UI."
+    local vol; vol=$(vol_name data)
+    vol_run "$vol" rw -e "FPR=$(secret_fpr)" -- "printf '%s' \"\$FPR\" > /v/$FPR_FILE" >/dev/null 2>&1 || true
+    return 0
+  fi
+  die "APP_SECRET in $ENV_FILE is not the one the existing database in volume '$(vol_name data)' was created with.
+Everything encrypted in that database (destination credentials, VPN configs, torrent sources) would be unreadable.
+  - Restore your original deploy/.env (or './setup.sh restore <backup>'), then run this again; or
+  - if the secret is really lost, continue with --accept-new-secret and re-enter those credentials in the Admin UI."
+}
+
+# --- AUTH_MODE=external + bundled proxy -----------------------------------------------------------
+check_auth_proxy() { # check_auth_proxy AUTH_MODE PROXY
+  [ "$1" = external ] && [ "$2" = bundled ] || return 0
+  if [ "$I_KNOW" = 1 ] || [ "$(env_get ALLOW_EXTERNAL_AUTH_WITH_BUNDLED_PROXY)" = 1 ]; then
+    warn "AUTH_MODE=external with the bundled proxy: the gateway is on the internet with NO authentication in front of it. Anyone can send 'Remote-User: admin'."
+    return 0
+  fi
+  die "AUTH_MODE=external together with the bundled proxy publishes the gateway on ports 80/443 with nothing that authenticates.
+In external mode the gateway trusts the Remote-User/Remote-Groups headers: anyone could claim to be an admin.
+Put your SSO proxy in front (use --proxy external or --proxy none and reach the gateway only through it), or pass
+--i-know-external-auth-is-unsafe if something else (a firewall, a tunnel) really guarantees that only your SSO can reach the gateway."
 }
 
 # --- Authelia users -------------------------------------------------------------------------------
@@ -192,19 +346,23 @@ hash_password() { # hash_password PASSWORD -> argon2id digest, via the pinned Au
   printf '%s\n' "$out" | sed -n 's/^Digest: \(\$argon2.*\)$/\1/p' | head -n 1
 }
 
-user_exists() { [ -f "$USERS_FILE" ] && grep -q "^  $1:" "$USERS_FILE"; }
+user_exists() { [ -f "$USERS_FILE" ] && grep -qxF "  $1:" "$USERS_FILE"; }
 
 write_user() { # write_user NAME PASSWORD EMAIL GROUPS(comma-separated)
   local name=$1 pw=$2 email=$3 groups=$4 digest g
-  valid_user "$name" || die "Invalid user name '$name' (use lowercase letters, digits, . _ -)"
+  reject_ctl "user name" "$name"; reject_ctl "e-mail" "$email"; reject_ctl "password" "$pw"; reject_ctl "groups" "$groups"
+  valid_user "$name" || die "Invalid user name '$name' (use 1-64 letters, digits, . _ -)"
+  [[ $name =~ ^[a-z0-9] ]] || die "Invalid user name '$name' (must start with a letter or digit)"
   valid_email "$email" || die "Invalid e-mail address '$email'"
   [ "${#pw}" -ge 8 ] || die "Password must be at least 8 characters"
+  for g in $(printf '%s' "$groups" | tr ',' ' '); do valid_group "$g" || die "Invalid group name '$g'"; done
   user_exists "$name" && die "User '$name' already exists in $USERS_FILE"
   digest=$(hash_password "$pw")
   # shellcheck disable=SC2016
   case "$digest" in '$argon2'*) ;; *) die "Unexpected hash output from Authelia" ;; esac
   mkdir -p "$USERS_DIR"
   [ -f "$USERS_FILE" ] || { printf 'users:\n' >"$USERS_FILE"; }
+  chmod 600 "$USERS_FILE"
   {
     printf '  %s:\n' "$name"
     printf '    disabled: false\n'
@@ -224,6 +382,8 @@ cmd_add_user() {
   ask ADMIN_USER "Username" ""
   ask ADMIN_EMAIL "E-mail" ""
   [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_EMAIL" ] || die "Username and e-mail are required (use --admin-user / --admin-email)"
+  reject_ctl "username" "$ADMIN_USER"; reject_ctl "e-mail" "$ADMIN_EMAIL"
+  valid_user "$ADMIN_USER" || die "Invalid user name: use 1-64 letters, digits, '.', '_' or '-'."
   local generated=0 groups="users"
   if [ -z "$ADMIN_PASSWORD" ]; then ask_secret ADMIN_PASSWORD "Password (empty = generate one)"; fi
   if [ -z "$ADMIN_PASSWORD" ]; then ADMIN_PASSWORD=$(gen_password); generated=1; fi
@@ -233,6 +393,59 @@ cmd_add_user() {
   say "User '$ADMIN_USER' added (groups: $groups). Authelia picks it up automatically."
   if [ "$generated" = 1 ]; then say "Generated password: $ADMIN_PASSWORD"; fi
   say "To make someone an admin: ./setup.sh add-user --group admins ..."
+}
+
+# --- releases and images ---------------------------------------------------------------------------
+registry() { local r; r=$(env_get SEEDBOX_REGISTRY); printf '%s' "${r:-ghcr.io/ma-04}"; }
+
+latest_release() { # prints X.Y.Z of the newest non-prerelease GitHub release; nothing when unknown (none yet, offline, rate-limited)
+  local reg owner repo body tag
+  reg=$(registry)
+  case "$reg" in ghcr.io/*) owner=${reg#ghcr.io/}; owner=${owner%%/*} ;; *) return 0 ;; esac
+  repo=${SEEDBOX_REPO:-$owner/docker-seedbox}
+  have curl || return 0
+  body=$(curl -fsS -m 5 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null) || return 0
+  tag=$(printf '%s\n' "$body" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([0-9][^"]*\)".*/\1/p' | head -n 1)
+  if [ -n "$tag" ] && valid_version "$tag"; then printf '%s' "$tag"; fi
+  return 0
+}
+
+image_exists() { # image_exists VERSION : is the vpn image of that version in the registry? (all five are pushed together)
+  local ref; ref="$(registry)/docker-seedbox-vpn:$1"
+  if have timeout; then timeout 30 docker manifest inspect "$ref" >/dev/null 2>&1; else docker manifest inspect "$ref" >/dev/null 2>&1; fi
+}
+
+use_local_build() { # use_local_build REASON : switch this run to building from the clone (asks first when interactive)
+  warn "$1"
+  if ! confirm "Build the images from this clone instead? (takes a few minutes)" y; then
+    die "Nothing to start. Re-run with --build to build locally, or --version X.Y.Z once that release is published."
+  fi
+  say "Building from this clone."
+  BUILD=1
+}
+
+resolve_images() { # decide pull-vs-build for install; pins SEEDBOX_VERSION in .env
+  if [ "$BUILD" = 1 ]; then env_put SEEDBOX_VERSION local; return 0; fi
+  local cur ver
+  cur=$(env_get SEEDBOX_VERSION)
+  if [ -n "$VERSION_IN" ]; then ver=$VERSION_IN
+  elif [ -z "$cur" ] || [ "$cur" = latest ]; then ver=$(latest_release)
+  else ver=$cur; fi
+  if [ "$ver" = local ]; then BUILD=1; return 0; fi
+  if [ -z "$ver" ]; then
+    if [ "$NO_START" = 1 ]; then return 0; fi
+    use_local_build "No published release found (none yet, GitHub unreachable or rate-limited). The images are not available from $(registry)."
+    env_put SEEDBOX_VERSION local
+    return 0
+  fi
+  if [ "$NO_START" = 1 ]; then env_put SEEDBOX_VERSION "$ver"; return 0; fi
+  if ! image_exists "$ver"; then
+    use_local_build "No published image $(registry)/docker-seedbox-vpn:$ver (not built yet, wrong registry, or the package is private)."
+    env_put SEEDBOX_VERSION local
+    return 0
+  fi
+  env_put SEEDBOX_VERSION "$ver"
+  say "Using released images, version $ver (pinned as SEEDBOX_VERSION in deploy/.env)."
 }
 
 # --- install ---------------------------------------------------------------------------------------
@@ -259,7 +472,16 @@ cmd_install() {
   # ---- configuration ----------------------------------------------------------------------------
   step "Configuration"
   local fresh=0
-  if [ ! -f "$ENV_FILE" ]; then cp "$DEPLOY/.env.example" "$ENV_FILE"; fresh=1; fi
+  if [ ! -f "$ENV_FILE" ]; then
+    fresh=1
+    # A lost deploy/.env next to a surviving database: a new APP_SECRET would make that database unreadable.
+    if [ -n "$(fpr_stored)" ] && [ "$ACCEPT_NEW_SECRET" != 1 ]; then
+      die "deploy/.env is missing, but the data volume '$(vol_name data)' of project '$(project_name)' already holds a database created with another APP_SECRET.
+Generating a new secret would make every stored credential unreadable. Restore your deploy/.env (or run './setup.sh restore <backup>'),
+or continue with --accept-new-secret if you want a new secret and will re-enter credentials in the Admin UI."
+    fi
+    cp "$DEPLOY/.env.example" "$ENV_FILE"
+  fi
   chmod 600 "$ENV_FILE"
 
   local cur_app cur_auth cur_files cur_cookie
@@ -268,6 +490,7 @@ cmd_install() {
 
   if [ -z "$DOMAIN" ] && [ -n "$cur_app" ]; then DOMAIN=$cur_app; fi
   ask DOMAIN "App domain (e.g. seedbox.example.com)" ""
+  reject_ctl "domain" "$DOMAIN"
   DOMAIN=$(lower "$DOMAIN")
   [ -n "$DOMAIN" ] || die "An app domain is required: ./setup.sh --domain seedbox.example.com"
   valid_host "$DOMAIN" || die "'$DOMAIN' is not a valid fully-qualified domain name (hostnames only, no https://)."
@@ -312,6 +535,11 @@ cmd_install() {
   PROXY=$(lower "$PROXY")
   case "$PROXY" in bundled|external|none) ;; *) die "--proxy must be bundled, external or none (got '$PROXY')" ;; esac
 
+  local auth_mode=${AUTH_MODE_IN:-$(env_get AUTH_MODE)}
+  auth_mode=${auth_mode:-authelia}
+  case "$auth_mode" in authelia|external) ;; *) die "AUTH_MODE must be authelia or external (got '$auth_mode')" ;; esac
+  check_auth_proxy "$auth_mode" "$PROXY"
+
   local proxy_network=${PROXY_NETWORK_IN:-$(env_get PROXY_NETWORK)}
   local acme_email=${ACME_EMAIL_IN:-$(env_get ACME_EMAIL)}
   if [ "$PROXY" = external ]; then
@@ -320,6 +548,8 @@ cmd_install() {
     ask PROXY_NETWORK_IN "Docker network of your reverse proxy" ""
     proxy_network=$PROXY_NETWORK_IN
     [ -n "$proxy_network" ] || die "External mode needs --proxy-network (the Docker network your proxy is on; see: docker network ls)"
+    reject_ctl "proxy network" "$proxy_network"
+    valid_network "$proxy_network" || die "Invalid Docker network name '$proxy_network'."
     if [ "$NO_START" = 0 ]; then
       docker network inspect "$proxy_network" >/dev/null 2>&1 || die "Docker network '$proxy_network' does not exist."
     fi
@@ -329,6 +559,8 @@ cmd_install() {
     ask ACME_EMAIL_IN "E-mail for Let's Encrypt expiry notices (optional)" ""
     acme_email=$ACME_EMAIL_IN
   fi
+  reject_ctl "ACME e-mail" "$acme_email"
+  [ -z "$acme_email" ] || valid_email "$acme_email" || die "Invalid ACME e-mail address '$acme_email'."
 
   # ---- write .env -------------------------------------------------------------------------------------
   env_put APP_HOST "$app_host"
@@ -338,10 +570,11 @@ cmd_install() {
   env_put COMPOSE_FILE "compose.yaml:compose.proxy-$PROXY.yaml"
   [ -z "$proxy_network" ] || env_put PROXY_NETWORK "$proxy_network"
   [ -z "$acme_email" ] || env_put ACME_EMAIL "$acme_email"
-  if [ "$(env_get AUTH_MODE)" = external ]; then
+  env_put AUTH_MODE "$auth_mode"
+  if [ "$auth_mode" = external ]; then
     env_put COMPOSE_PROFILES ""
+    if [ "$PROXY" = bundled ]; then env_put ALLOW_EXTERNAL_AUTH_WITH_BUNDLED_PROXY 1; fi
   else
-    env_put AUTH_MODE authelia
     env_put COMPOSE_PROFILES authelia
   fi
   [ -n "$(env_get SEEDBOX_REGISTRY)" ] || env_put SEEDBOX_REGISTRY ghcr.io/ma-04
@@ -362,7 +595,12 @@ cmd_install() {
   env_ensure AUTHELIA_STORAGE_ENCRYPTION_KEY "$(gen_hex 32)"
   env_ensure AUTHELIA_JWT_SECRET "$(gen_hex 32)"
   chmod 600 "$ENV_FILE"
-  say "Wrote $ENV_FILE (mode 600). Keep it: it holds the encryption secrets."
+  say "Wrote $ENV_FILE (mode 600). Keep it (and back it up: ./setup.sh backup): it holds the encryption secrets."
+
+  # ---- images: released version, or a local build -------------------------------------------------------
+  step "Image version"
+  resolve_images
+  if [ "$BUILD" = 1 ]; then env_put SEEDBOX_VERSION local; fi
 
   # ---- first admin user ---------------------------------------------------------------------------------
   local generated_pw=""
@@ -373,9 +611,13 @@ cmd_install() {
     else
       step "First admin user"
       ask ADMIN_USER "Admin username" "admin"
-      ADMIN_USER=$(lower "${ADMIN_USER:-admin}")
+      ADMIN_USER=${ADMIN_USER:-admin}
+      reject_ctl "admin username" "$ADMIN_USER"
+      valid_user "$ADMIN_USER" || die "Invalid user name: use 1-64 letters, digits, '.', '_' or '-'."
+      ADMIN_USER=$(lower "$ADMIN_USER")
       ask ADMIN_EMAIL "Admin e-mail" "admin@$cookie_domain"
       ask_secret ADMIN_PASSWORD "Admin password (empty = generate one)"
+      reject_ctl "admin e-mail" "$ADMIN_EMAIL"; reject_ctl "admin password" "$ADMIN_PASSWORD"
       if user_exists "$ADMIN_USER"; then
         say "User '$ADMIN_USER' already exists - leaving it unchanged."
       else
@@ -395,24 +637,25 @@ cmd_install() {
     return 0
   fi
 
-  # ---- images -------------------------------------------------------------------------------------------------
-  if [ "$BUILD" = 1 ]; then
-    step "Building images from this clone (first build takes a few minutes)"
-    dc build
-  else
-    step "Pulling images"
-    if ! dc pull; then
-      warn "Pulling failed (images not published for this version yet?). Falling back to a local build."
-      dc build
-    fi
-  fi
-
+  fpr_check
+  ensure_images
   step "Starting the stack"
   dc up -d --remove-orphans --wait --wait-timeout 300 || {
     dc ps || true
     die "Some containers did not become healthy. Inspect with: (cd deploy && docker compose logs --tail 50)   or ./setup.sh doctor"
   }
+  fpr_record
   print_summary "$generated_pw"
+}
+
+ensure_images() { # pull the pinned version, or build from this clone
+  if [ "$BUILD" = 1 ]; then
+    step "Building images from this clone (first build takes a few minutes)"
+    dc build
+  else
+    step "Pulling images ($(env_get SEEDBOX_VERSION))"
+    dc pull || die "Pulling failed. If these images are not published, run: ./setup.sh --build"
+  fi
 }
 
 print_summary() {
@@ -440,23 +683,191 @@ print_summary() {
   say "  1. Log in, open Admin -> Destinations and add where finished downloads go (Google Drive, S3/B2, local)."
   say "  2. Optional: Admin -> VPN: upload WireGuard configs, then set VPN mode to 'required'."
   say "  3. ./setup.sh doctor   checks DNS, TLS, containers and the VPN prerequisites."
-  say "  4. ./setup.sh add-user adds more logins;  ./setup.sh update  upgrades."
+  say "  4. ./setup.sh backup   (deploy/.env holds APP_SECRET: without it the database is unreadable);"
+  say "     ./setup.sh add-user adds more logins;  ./setup.sh update  upgrades."
 }
 
 # --- update ----------------------------------------------------------------------------------------------------
+running_version() { # what is actually running: the api image's version label (set on released images) and short image id
+  local cid info label iid
+  cid=$(dc ps -q api 2>/dev/null | head -n 1) || true
+  [ -n "$cid" ] || return 0
+  info=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}|{{.Image}}' "$cid" 2>/dev/null) || return 0
+  label=${info%%|*}; iid=${info#*|}; iid=${iid#sha256:}
+  printf '%s(image %s)' "${label:+$label }" "${iid:0:12}"
+}
+
 cmd_update() {
   need_docker
   [ -f "$ENV_FILE" ] || die "No deploy/.env yet - run ./setup.sh first."
+  local proxy
+  case "$(env_get COMPOSE_FILE)" in *proxy-bundled*) proxy=bundled ;; *proxy-external*) proxy=external ;; *) proxy=none ;; esac
+  check_auth_proxy "$(env_get AUTH_MODE)" "$proxy"
+  fpr_check
+  local cur target run
+  cur=$(env_get SEEDBOX_VERSION); cur=${cur:-latest}
+  run=$(running_version)
   if [ "$BUILD" = 1 ]; then
     step "Rebuilding images from this clone"
+    say "Version: ${cur} -> local build of $(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo 'this clone')${run:+   (running now: $run)}"
+    env_put SEEDBOX_VERSION local
     dc build --pull
   else
-    step "Pulling newer images"
+    target=$VERSION_IN
+    [ -n "$target" ] || target=$(latest_release)
+    if [ -z "$target" ]; then
+      if [ "$cur" = local ]; then
+        die "These images were built from this clone. Pull the new source (git pull) and run: ./setup.sh update --build
+(or pin a published release with: ./setup.sh update --version X.Y.Z)"
+      fi
+      warn "Could not determine the newest release (none published yet, offline, or rate-limited); staying on '$cur'. Pin one with --version X.Y.Z."
+      target=$cur
+    fi
+    if [[ $cur =~ ^[0-9] ]] && [[ $target =~ ^[0-9] ]] && [ "$cur" != "$target" ] && ! ver_ge "$target" "$cur"; then
+      [ "$ALLOW_DOWNGRADE" = 1 ] || die "$target is older than the installed $cur. Database migrations are not reversible: restore a backup made before the upgrade (./setup.sh restore FILE), then use --allow-downgrade."
+    fi
+    step "Update: ${cur} -> ${target}${run:+   (running now: $run)}"
+    if [ "$target" != local ] && [ "$target" != "$cur" ] && ! image_exists "$target"; then
+      die "Image $(registry)/docker-seedbox-vpn:$target does not exist (not published yet, a typo, or the package is private)."
+    fi
+    say "Tip: ./setup.sh backup first; to roll back later: ./setup.sh update --version $cur --allow-downgrade (after restoring that backup)."
+    env_put SEEDBOX_VERSION "$target"
+    step "Pulling images"
     dc pull
   fi
   step "Restarting changed services"
   dc up -d --remove-orphans --wait --wait-timeout 300
-  say "Updated. The 'data' volume (database) is untouched; migrations run on api start."
+  fpr_record
+  say "Updated to $(env_get SEEDBOX_VERSION). Running images:"
+  dc ps --format '  {{.Service}}  {{.Image}}' 2>/dev/null || true
+  say "The 'data' volume (database) is untouched; migrations run on api start."
+}
+
+# --- backup / restore ----------------------------------------------------------------------------------------------
+BK_TMP=""; BK_STOPPED=""
+bk_cleanup() {
+  if [ -n "$BK_STOPPED" ]; then
+    # shellcheck disable=SC2086  # word splitting of the service list is intended
+    dc start $BK_STOPPED >/dev/null 2>&1 || warn "Could not restart: $BK_STOPPED (run: cd deploy && docker compose up -d)"
+    BK_STOPPED=""
+  fi
+  if [ -n "$BK_TMP" ]; then rm -rf "$BK_TMP"; BK_TMP=""; fi
+}
+
+cmd_backup() {
+  need_docker
+  [ -f "$ENV_FILE" ] || die "No deploy/.env yet - nothing to back up."
+  local ts out dvol avol running version
+  ts=$(date +%Y%m%d-%H%M%S)
+  out=${BACKUP_OUT:-$ROOT/seedbox-backup-$ts.tar.gz}
+  if [ -d "$out" ]; then out=${out%/}/seedbox-backup-$ts.tar.gz; fi
+  [ ! -e "$out" ] || die "$out already exists."
+  dvol=$(vol_name data); avol=$(vol_name authelia)
+  [ -n "$dvol" ] || die "No data volume found for compose project '$(project_name)' (never started?)."
+  BK_TMP=$(mktemp -d)
+  trap bk_cleanup EXIT
+
+  # Stop the writers for a consistent copy of SQLite (a few seconds for a typical database), restart them after.
+  running=$(dc ps --status running --services 2>/dev/null | grep -E '^(api|worker|authelia)$' | tr '\n' ' ' || true)
+  if [ -n "$running" ]; then
+    step "Stopping ${running% } for a consistent copy"
+    # shellcheck disable=SC2086
+    dc stop $running >/dev/null
+    BK_STOPPED=$running
+  fi
+  step "Archiving"
+  vol_run "$dvol" ro -v "$BK_TMP:/b" -- 'tar cf /b/data.tar -C /v .'
+  if [ -n "$avol" ]; then vol_run "$avol" ro -v "$BK_TMP:/b" -- 'tar cf /b/authelia.tar -C /v .'; fi
+  cp "$ENV_FILE" "$BK_TMP/env"
+  if [ -d "$USERS_DIR" ]; then cp -a "$USERS_DIR" "$BK_TMP/authelia-users"; fi
+  version=$(env_get SEEDBOX_VERSION)
+  {
+    printf 'docker-seedbox backup v1\n'
+    printf 'created=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'project=%s\n' "$(project_name)"
+    printf 'version=%s\n' "${version:-unknown}"
+    printf 'app_secret_fingerprint=%s\n' "$(secret_fpr)"
+    printf 'volumes=data%s\n' "${avol:+,authelia}"
+  } >"$BK_TMP/MANIFEST"
+  local members=(MANIFEST env data.tar)
+  [ ! -f "$BK_TMP/authelia.tar" ] || members+=(authelia.tar)
+  [ ! -d "$BK_TMP/authelia-users" ] || members+=(authelia-users)
+  tar czf "$out" -C "$BK_TMP" "${members[@]}"
+  chmod 600 "$out"
+  bk_cleanup
+  trap - EXIT
+  say "Backup written: $out ($(du -h "$out" | awk '{print $1}'), mode 600)"
+  say "It contains deploy/.env (APP_SECRET and every other secret) and the encrypted database: keep it private and"
+  say "store it away from this server. Restore with: ./setup.sh restore $out"
+}
+
+cmd_restore() {
+  need_docker
+  [ -n "$RESTORE_FILE" ] || die "Usage: ./setup.sh restore FILE"
+  [ -f "$RESTORE_FILE" ] || die "$RESTORE_FILE not found."
+  local ts bk project listing
+  ts=$(date +%Y%m%d-%H%M%S)
+  BK_TMP=$(mktemp -d)
+  trap bk_cleanup EXIT
+  bk=$BK_TMP
+  listing=$(tar tzf "$RESTORE_FILE" 2>/dev/null) || die "$RESTORE_FILE is not a readable .tar.gz archive."
+  local need
+  for need in MANIFEST env data.tar; do
+    if ! printf '%s\n' "$listing" | grep -qx "$need"; then die "$RESTORE_FILE is not a docker-seedbox backup ($need missing)."; fi
+  done
+  # Only the known members are extracted (never paths taken from the archive).
+  tar xzf "$RESTORE_FILE" -C "$bk" MANIFEST env data.tar
+  head -n 1 "$bk/MANIFEST" | grep -qx 'docker-seedbox backup v1' || die "Unsupported backup format."
+  if printf '%s\n' "$listing" | grep -qx 'authelia.tar'; then tar xzf "$RESTORE_FILE" -C "$bk" authelia.tar; fi
+  if printf '%s\n' "$listing" | grep -q '^authelia-users/'; then tar xzf "$RESTORE_FILE" -C "$bk" authelia-users; fi
+  say "Backup: $(sed -n 's/^created=//p' "$bk/MANIFEST"), version $(sed -n 's/^version=//p' "$bk/MANIFEST"), project $(sed -n 's/^project=//p' "$bk/MANIFEST")"
+  if [ -f "$ENV_FILE" ]; then
+    warn "This REPLACES deploy/.env, the Authelia users and the data volume of this installation (the current .env and users file are kept as *.pre-restore-$ts)."
+  fi
+  confirm "Restore now?" n || die "Aborted."
+
+  # Stop the CURRENT stack first, with the CURRENT .env: the backup may belong to another compose project name,
+  # which would leave this one running.
+  if [ -f "$ENV_FILE" ]; then
+    step "Stopping the current stack"
+    dc down --remove-orphans >/dev/null 2>&1 || true
+  fi
+  step "Restoring configuration"
+  if [ -f "$ENV_FILE" ]; then cp -p "$ENV_FILE" "$ENV_FILE.pre-restore-$ts"; fi
+  cp "$bk/env" "$ENV_FILE"; chmod 600 "$ENV_FILE"
+  if [ -d "$bk/authelia-users" ]; then
+    mkdir -p "$USERS_DIR"
+    if [ -f "$USERS_FILE" ]; then cp -p "$USERS_FILE" "$USERS_FILE.pre-restore-$ts"; fi
+    cp -a "$bk/authelia-users/." "$USERS_DIR/"
+    chmod 600 "$USERS_FILE" 2>/dev/null || true
+  fi
+
+  project=$(project_name)
+  restore_volume() { # restore_volume NAME TARFILE
+    local name=$1 file=$2 vol
+    vol=$(vol_name "$name")
+    if [ -z "$vol" ]; then
+      vol="${project}_$name"
+      docker volume create --label "com.docker.compose.project=$project" --label "com.docker.compose.volume=$name" "$vol" >/dev/null
+    fi
+    step "Restoring volume $vol"
+    vol_run "$vol" rw -v "$bk:/b:ro" -- "find /v -mindepth 1 -maxdepth 1 -exec rm -rf {} + && tar xf /b/$file -C /v"
+  }
+  restore_volume data data.tar
+  if [ -f "$bk/authelia.tar" ]; then restore_volume authelia authelia.tar; fi
+  bk_cleanup
+  trap - EXIT
+
+  if [ "$NO_START" = 1 ]; then
+    say "Restored. --no-start: nothing started. Next: ./setup.sh update   (or: cd deploy && docker compose up -d)"
+    return 0
+  fi
+  fpr_check
+  step "Starting the stack"
+  if [ "$(env_get SEEDBOX_VERSION)" = local ]; then BUILD=1; fi
+  ensure_images
+  dc up -d --remove-orphans --wait --wait-timeout 300 || die "Some containers did not become healthy: ./setup.sh doctor"
+  say "Restored and running."
 }
 
 # --- doctor ----------------------------------------------------------------------------------------------------
@@ -477,11 +888,47 @@ cmd_doctor() {
   step "docker-seedbox doctor"
   if have docker && docker info >/dev/null 2>&1; then ok "Docker daemon reachable"; else bad "Docker is not installed or not running"; fi
   if docker compose version >/dev/null 2>&1; then ok "Docker Compose $(docker compose version --short)"; else bad "Docker Compose v2 missing"; fi
+  local engine comp
+  engine=$(docker version -f '{{.Server.Version}}' 2>/dev/null || true); comp=$(docker compose version --short 2>/dev/null || true); comp=${comp#v}
+  if [[ $engine =~ ^[0-9]+\.[0-9]+ ]]; then
+    if ver_ge "$engine" 26.0; then ok "Docker Engine $engine supports volume subpaths (>= 26.0)"; else bad "Docker Engine $engine is too old: 26.0+ is required (volume subpaths)"; fi
+  fi
+  if [[ $comp =~ ^[0-9]+\.[0-9]+ ]] && ! ver_ge "$comp" 2.26; then bad "Docker Compose $comp is too old: 2.26+ is required (volume subpaths)"; fi
   if [ ! -f "$ENV_FILE" ]; then bad "deploy/.env missing - run ./setup.sh"; summary_doctor; return; fi
   ok "deploy/.env present"
   local perm
   perm=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo "")
   if [ -n "$perm" ] && [ "$perm" != 600 ]; then meh "deploy/.env has mode $perm; run: chmod 600 deploy/.env"; fi
+  if [ -f "$USERS_FILE" ]; then
+    perm=$(stat -c '%a' "$USERS_FILE" 2>/dev/null || stat -f '%Lp' "$USERS_FILE" 2>/dev/null || echo "")
+    if [ -n "$perm" ] && [ "$perm" != 600 ]; then meh "$USERS_FILE has mode $perm (it holds password hashes); run: chmod 600 $USERS_FILE"; fi
+  fi
+
+  say ""; say "Version"
+  local ver run
+  ver=$(env_get SEEDBOX_VERSION)
+  run=$(running_version)
+  ok "SEEDBOX_VERSION=${ver:-latest}${run:+, running api image: $run}"
+  case "${ver:-latest}" in latest) meh "SEEDBOX_VERSION=latest is not pinned; ./setup.sh update pins the newest release" ;; esac
+
+  say ""; say "Secrets and authentication"
+  local proxy fp_stored
+  case "$(env_get COMPOSE_FILE)" in *proxy-bundled*) proxy=bundled ;; *proxy-external*) proxy=external ;; *) proxy=none ;; esac
+  if [ "$(env_get AUTH_MODE)" = external ] && [ "$proxy" = bundled ]; then
+    bad "AUTH_MODE=external with the bundled proxy: the gateway is public with no authentication in front of it (anyone can claim to be admin)"
+  elif [ "$(env_get AUTH_MODE)" = external ]; then
+    meh "AUTH_MODE=external: make sure ONLY your SSO proxy can reach the gateway"
+  else
+    ok "AUTH_MODE=$(env_get AUTH_MODE)"
+  fi
+  fp_stored=$(fpr_stored)
+  if [ -z "$fp_stored" ]; then
+    meh "No APP_SECRET fingerprint recorded in the data volume yet (it is written on the next ./setup.sh / update)"
+  elif [ "$fp_stored" = "$(secret_fpr)" ]; then
+    ok "APP_SECRET matches the one the database was created with"
+  else
+    bad "APP_SECRET in deploy/.env is NOT the one the database was created with: stored credentials are unreadable. Restore the original .env (or ./setup.sh restore FILE)"
+  fi
 
   say ""; say "DNS"
   local h ips
@@ -545,5 +992,7 @@ case "$CMD" in
   install) cmd_install ;;
   add-user) cmd_add_user ;;
   update) cmd_update ;;
+  backup) cmd_backup ;;
+  restore) cmd_restore ;;
   doctor) cmd_doctor ;;
 esac

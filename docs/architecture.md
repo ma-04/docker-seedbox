@@ -19,8 +19,10 @@ This file is the contract between components. Change it before changing an inter
 | `qbittorrent` | `qbittorrentofficial/qbittorrent-nox` | Torrent engine, `network_mode: service:vpn`. | none |
 | `apps/drive-proxy` | Cloudflare Worker (not in compose) | Signed-URL download proxy for the shared Google Drive. | — |
 
-Volumes: `data` (SQLite, api+worker), `downloads` (qbittorrent+worker+api rw, gateway ro; the api only writes a probe file for the local-destination test),
-`authelia`, `qbt-config`. No container mounts the Docker socket. Nothing but `gateway`
+Volumes: `data` (SQLite, api+worker), `downloads` (worker: whole volume rw; qbittorrent: only the `incomplete/` subpath rw; gateway: only the `library/` subpath, read-only; api: only the `library/` subpath, for the local-destination test probe),
+`authelia`, `qbt-config`. The `downloads` subpaths are Compose `volume.subpath` mounts (Docker Engine 26+, Compose 2.26+), so qBittorrent, which parses untrusted
+input in the VPN namespace, never sees the delivered files of other users; the worker sees both and `incomplete/<infohash>` -> `library/...` stays a rename on one filesystem.
+The one-shot `init` service creates the subfolders (a subpath must exist before its container starts) and fixes ownership. Capabilities: every service drops `ALL`; `vpn` keeps `NET_ADMIN`, `qbittorrent` the five its root-to-1000 entrypoint needs plus `KILL`, `authelia` and `nginx-proxy` only what their entrypoints need (see the compose files). No container mounts the Docker socket. Nothing but `gateway`
 is reachable from outside the compose network.
 
 TLS is terminated by an outer proxy (nginx-proxy + acme-companion in `deploy/proxy/`,
@@ -305,6 +307,8 @@ a whitelist is the only safe surface. If the engine is unreachable the API answe
 | `VPN_URL` | api, worker | `http://vpn:8000` |
 | `PORT` | api | `3000` |
 | `LAN_CIDRS` | vpn, qbittorrent | compose subnet, default `172.31.250.0/24` |
+| `CONTROL_TRUSTED_IPS` | vpn | addresses allowed to reach the control API (compose: `API_IP,WORKER_IP`); empty = whole `LAN_CIDRS` |
+| `VPN_LAN_ALLOW_OUT` | vpn | **test-only** LAN `ip[:port]` list qBittorrent may reach (e2e/test fixtures); empty by default |
 | `LAN_IP_RANGE`, `VPN_IPV4`, `API_IP`, `WORKER_IP` | compose | fixed addresses of `vpn`/`api`/`worker` (`172.31.250.2`/`.3`/`.4`) and the range for everything else (`172.31.250.128/25`); all derived from `LAN_CIDRS` by `setup.sh`; compose passes `API_IP`,`WORKER_IP` to qbittorrent as `QBT_TRUSTED_IPS` |
 | `QBT_TRUSTED_IPS` | qbittorrent | comma-separated addresses allowed to use the WebUI without a password (`/32` implied); empty = nobody |
 | `VPN_MTU` | vpn | WireGuard interface MTU 576-1500; unset = 1280; a config `MTU =` wins |
@@ -380,11 +384,14 @@ The exact compose blocks for `vpn` and `qbittorrent` are in `services/vpn/README
 
 ```
 GET  /status      -> { mode, connected, name, publicIp, lastHandshakeSec, since, mtu }
-POST /connect     { name, config }   -> brings the tunnel up (replacing any current one)
+POST /connect     { name, config }   -> brings the tunnel up (replacing any current one); 409 while the mode is off
 POST /disconnect
 POST /mode        { mode: "off" | "required" }
 ```
 
+`/connect` is refused with **409** while the mode is `off` (checked under the same lock as `/mode`, before anything is touched), so a worker that raced an admin's
+switch to off cannot bring a tunnel up; the worker only connects in `required` mode, the admin "connect" action has to be handled as a 409. Keys must match
+`^[A-Za-z0-9+/]{43}=$`; command output is never put into HTTP bodies (400/409/502 carry fixed messages, other failures "internal error"); `wg`'s output, which can echo configuration, is also kept out of the logs (generic category only), while `ip`/`nft` failures are logged in full for the operator.
 `/connect` takes raw wg-quick text, rejects `PreUp/PostUp/PreDown/PostDown/SaveConfig` (400),
 executes nothing from it, strips IPv6 `Address`/`DNS`/`AllowedIPs` (`::/0`), waits for a handshake
 (`502` if none; the previous tunnel is kept) and is make-before-break: the old tunnel carries
@@ -409,12 +416,20 @@ conservative default is used instead.
 
 Kill switch (always on in `required` mode, including before the first `/connect` and during
 rotation): one nftables table, replaced atomically and installed before the API listens. OUTPUT
-policy `drop`; allowed only to loopback, `LAN_CIDRS` (the compose subnet, so `api`/`worker` can
-reach qBittorrent's WebUI on `:8080` and the e2e tracker/seeder), `wg*` interfaces and the UDP
-endpoint of the tunnel being brought up / currently up. Established-connection state grants
-nothing. IPv6 is dropped entirely. In `off` mode traffic leaves via the container's normal
-route (and a tunnel, if any, is torn down). Input from the tunnel to `:8000`/`:8080` is dropped in
-both modes. Config is held in process memory only (never on disk, argv or logs).
+policy `drop`; allowed only to loopback, `wg*` interfaces, the UDP endpoint of the tunnel being brought up /
+currently up (fwmarked packets only) and, towards `LAN_CIDRS` (the compose subnet), **only** replies
+(`ct state established,related`: api/worker talking to the WebUI `:8080` and control `:8000`) and traffic of uid 0
+(the sidecar itself: Docker DNS to resolve a WireGuard endpoint host). Nothing started by qBittorrent's uid can open
+a connection to the LAN: not the Docker bridge gateway (the host), not a sibling container, not any URL a user makes
+qBittorrent fetch. The established accept is scoped to LAN destinations (an unscoped one would let connections opened
+in `off` mode survive a switch to `required`). IPv6 is dropped entirely. In `off` mode the output policy is accept
+(internet-direct; a tunnel, if any, is torn down) **but the same LAN rules apply**, so `off` is not a way around them.
+INPUT from the LAN reaches only the WebUI port (any LAN address; qBittorrent's own auth whitelist decides) and the
+control port, which only `CONTROL_TRUSTED_IPS` (compose: `API_IP`, `WORKER_IP`) may reach; input from the tunnel to
+`:8000`/`:8080` is dropped in both modes. `VPN_LAN_ALLOW_OUT` (`ip[:port],...`, empty by default) is a **test-only**
+exception list for the hermetic fixtures that sit on the LAN by IP (the e2e tracker `172.31.250.30:6969` and seeder
+`172.31.250.31:51413`, set in `deploy/compose.e2e.yaml`; `services/vpn/test`): qBittorrent may connect to exactly
+those and they may connect in. Config is held in process memory only (never on disk, argv or logs).
 
 DNS: while a tunnel is up the sidecar overwrites `/etc/resolv.conf` *in place* (it is
 shared with `qbittorrent`) with the config's `DNS =` servers (else `VPN_FALLBACK_DNS`, default
@@ -430,7 +445,9 @@ entrypoint that (re)asserts, in `qBittorrent.conf` (`[WebUI]` section in qBittor
 port 8080, password-less access only for `QBT_TRUSTED_IPS` (compose: the static `api` and `worker` /32 addresses)
 via `AuthSubnetWhitelist`, `LocalHostAuth=false` (loopback is shared only with the vpn sidecar), host-header
 validation and CSRF protection off, no UPnP, anonymous mode off, no interface binding, and on first
-start only: DHT/PeX on, LSD off, no pre-allocation, default save path `/downloads/incomplete`;
+start only: DHT/PeX on, LSD off, anonymous mode off, no pre-allocation, default save path `/downloads/incomplete`
+(everything in the app's engine-settings whitelist, `apps/api/src/api/engine.ts`, is seeded once and then belongs to the admin; only the
+security-critical keys are re-asserted on every start: WebUI whitelist/port/host-header/CSRF design, no UPnP, no autorun, no interface binding);
 it runs as uid/gid 1000 and refuses to start with `PUID`/`PGID` 0. Every other address in the compose network must
 authenticate, and nobody knows the password (none is stored, so qBittorrent generates a random temporary one per
 start and only logs it): a compromised sibling container can no longer call `setPreferences`/autorun (= code

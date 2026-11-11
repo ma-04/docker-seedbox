@@ -1,5 +1,5 @@
 # docker-seedbox gateway: the only entrypoint. Build context: services/gateway
-FROM nginxinc/nginx-unprivileged:1.30-alpine
+FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03
 
 # Only these variables are substituted into the templates (nginx's own $vars stay intact).
 ENV NGINX_ENVSUBST_FILTER='^(APP_HOST|AUTH_HOST|FILES_HOST|GATEWAY_SECRET)$' \

@@ -34,7 +34,7 @@ services:
   # first start, whichever container happens to touch a volume first. `library` is world-readable
   # (the gateway runs as nginx, uid 101, and serves it read-only).
   init:
-    image: busybox:1.37
+    image: busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
     restart: "no"
     user: "0:0"
     command:
@@ -67,7 +67,11 @@ services:
       FILES_HOST: ${FILES_HOST:?FILES_HOST is required}
       GATEWAY_SECRET: ${GATEWAY_SECRET:?run ./setup.sh to generate secrets}
     volumes:
-      - downloads:/downloads:ro
+      - type: volume                    # only the delivered files, read-only (never incomplete/)
+        source: downloads
+        target: /downloads/library
+        read_only: true
+        volume: { subpath: library }
     read_only: true
     tmpfs:
       - /tmp:uid=101,gid=101
@@ -82,7 +86,7 @@ services:
   # ---------------------------------------------------------------- authelia
   # Login portal (AUTH_MODE=authelia). Not started when COMPOSE_PROFILES lacks "authelia".
   authelia:
-    image: authelia/authelia:4.39.28
+    image: authelia/authelia:4.39.28@sha256:bd97cff4fcbf715b5ff1f9ae286afbe6033afce385302520b0368122d43a6f54
     profiles: ["authelia"]
     restart: unless-stopped
     environment:
@@ -99,6 +103,11 @@ services:
       - ./authelia/users:/users          # users_database.yml lives here (setup.sh add-user)
       - authelia:/data                   # SQLite + notification.txt
     security_opt: ["no-new-privileges:true"]
+    # The image entrypoint starts as root, chowns its config and drops to PUID/PGID with su-exec (SETUID/SETGID);
+    # DAC_OVERRIDE/FOWNER let that root read and rewrite users_database.yml, which setup.sh keeps at mode 600 and
+    # owned by whoever ran it.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
     logging: *logging
 
   # ---------------------------------------------------------------- web
@@ -122,7 +131,10 @@ services:
       PORT: "3000"
     volumes:
       - data:/data
-      - downloads:/downloads            # only for the local-destination "Test" (mkdir + write probe in library/)
+      - type: volume                    # only for the local-destination "Test" (mkdir + write probe in library/)
+        source: downloads
+        target: /downloads/library
+        volume: { subpath: library }
     read_only: true
     tmpfs: ["/tmp:uid=1000,gid=1000"]
     security_opt: ["no-new-privileges:true"]
@@ -173,12 +185,14 @@ services:
     image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/docker-seedbox-vpn:${SEEDBOX_VERSION:-latest}
     build: { context: ../services/vpn }
     restart: unless-stopped
-    cap_add: [NET_ADMIN]              # the only privilege needed (kernel WireGuard, Linux >= 5.6)
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]              # the only capability kept (kernel WireGuard + nftables, Linux >= 5.6)
     sysctls:
       net.ipv6.conf.all.disable_ipv6: "1"
     environment:
       VPN_CONTROL_TOKEN: ${VPN_CONTROL_TOKEN:?run ./setup.sh to generate secrets}
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
+      CONTROL_TRUSTED_IPS: ${API_IP:-172.31.250.3},${WORKER_IP:-172.31.250.4}   # only api and worker may reach the control API :8000
       VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-required}   # fail closed after any restart until the worker applies vpn.mode
       VPN_MTU: ${VPN_MTU:-}              # empty = 1280 unless the WireGuard config sets MTU =; see docs/configuration.md
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -209,7 +223,10 @@ services:
       QBT_TRUSTED_IPS: ${API_IP:-172.31.250.3},${WORKER_IP:-172.31.250.4}
     volumes:
       - qbt-config:/config
-      - downloads:/downloads
+      - type: volume                    # qBittorrent sees only incomplete/, never library/ (the delivered files of every user)
+        source: downloads
+        target: /downloads/incomplete
+        volume: { subpath: incomplete }
     security_opt: ["no-new-privileges:true"]
     # The entrypoint starts as root only to fix ownership and then drops to PUID/PGID (1000).
     cap_drop: [ALL]

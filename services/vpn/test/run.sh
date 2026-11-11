@@ -30,6 +30,22 @@ intruder_code() { $DC exec -T lan-intruder curl -s -m 5 -o /dev/null -w '%{http_
 mode_noop() { echo '{"mode":"required"}' | $DC exec -T lan-client /t/ctl.sh POST /mode | head -1 | jq -e '.connected and .mode=="required"'; }
 qbt_refuses_root() { docker run --rm -e PUID=0 sbvpn-qbittorrent 2>&1 | grep -q 'refusing to run'; }
 status() { ctl GET /status | head -1; }
+probe_rc() { probe curl -sS -m 4 -o /dev/null "$@" >/dev/null 2>&1; echo $?; }   # curl exit code: 0 ok, 28 = timed out (dropped)
+# LAN policy: nothing running as uid 1000 (qBittorrent, or any URL it is made to fetch) may open a connection to
+# the LAN (bridge gateway = the host, sibling containers). Every "blocked" check expects a TIMEOUT (exit 28), not
+# "refused" (7): refused would mean the packet got through and nothing listened. Positive controls: root (the sidecar)
+# reaches the sibling's listener, and the one VPN_LAN_ALLOW_OUT entry (client:9000) is reachable while client:9001 is not.
+lan_policy() { # mode-label
+  check "$1: uid 1000 -> sibling container :9999 times out (dropped)" test "$(probe_rc http://172.31.250.51:9999/)" = 28
+  check "$1: uid 1000 -> bridge gateway (the host) :22 times out (dropped)" test "$(probe_rc http://172.31.250.1:22/)" = 28
+  check "$1: uid 1000 -> allow-listed IP on another port (client:9001) times out" test "$(probe_rc http://172.31.250.50:9001/)" = 28
+  # positive probes retry (first packets after a container start can be slow on a loaded host); "blocked" ones never do
+  check "$1: uid 1000 -> allow-listed ip:port (VPN_LAN_ALLOW_OUT client:9000) works" retry 5 sh_ '[ "$(probe_rc http://172.31.250.50:9000/)" = 0 ]'
+  check "$1: positive control: root (the sidecar) reaches the sibling :9999" retry 5 $DC exec -T -u 0 probe curl -fsS -m 4 http://172.31.250.51:9999/
+  check "$1: positive control: the in-namespace listener answers on loopback" retry 5 probe curl -fsS -m 4 http://127.0.0.1:9100/
+  check "$1: sibling -> in-namespace listener :9100 times out (LAN input only reaches the WebUI/control ports)" test "$($DC exec -T lan-intruder curl -s -m 4 -o /dev/null -w '%{http_code}' http://vpn:9100/)" = 000
+  check "$1: sibling -> WebUI :8080 still answers (403: not whitelisted)" test "$(intruder_code http://vpn:8080/api/v2/app/version)" = 403
+}
 connect() { # name file : POST /connect with the generated config
   $DC cp "$WORK/$2.conf" lan-client:/tmp/cfg.conf >/dev/null 2>&1
   $DC exec -T lan-client sh -c "jq -Rs --arg name '$1' '{name:\$name, config:.}' /tmp/cfg.conf | /t/ctl.sh POST /connect"
@@ -45,7 +61,7 @@ trap cleanup EXIT
 # Positive probes right after /connect or a restart: the tunnel needs a moment on a loaded host. Retries only for
 # "does work" checks (never for the "must not work" ones) and reports when more than one attempt was needed.
 retry() { local n=$1 i; shift; for i in $(seq 1 "$n"); do if "$@"; then [ "$i" -gt 1 ] && echo "needed $i attempts: ${*:1:4}" >> "$WORK/retries"; return 0; fi; sleep 1; done; return 1; }
-export -f retry ctl probe probe_ip jqs status connect sh_ has jqok intruder_code mode_noop qbt_refuses_root
+export -f retry ctl probe probe_rc probe_ip jqs status connect sh_ has jqok intruder_code mode_noop qbt_refuses_root
 export DC WORK
 
 section "build + keys"
@@ -80,7 +96,7 @@ sleep 1
 # ---------------------------------------------------------------- 1
 section "1. off mode"
 check "status mode=off, not connected" test "$(status | jqs '.mode+" "+(.connected|tostring)')" = "off false"
-check "namespace reaches the direct echo service" sh_ "probe_ip 172.31.251.20 | grep -q '^direct 172.31.251.2\$'"
+check "namespace reaches the direct echo service" retry 10 sh_ "probe_ip 172.31.251.20 | grep -q '^direct 172.31.251.2\$'"
 check "WebUI :8080 reachable from LAN client" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
 check "resolv.conf = Docker resolver" $DC exec -T probe grep -q 127.0.0.11 /etc/resolv.conf
 check "qBittorrent healthy" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
@@ -92,7 +108,40 @@ check "untrusted sibling container: WebUI API is 403 (needs a password nobody kn
 check "untrusted sibling container: setPreferences (autorun = RCE) is 403" test "$(intruder_code -X POST --data-urlencode 'json={"autorun_enabled":true}' http://vpn:8080/api/v2/app/setPreferences)" = 403
 checkno "untrusted sibling container: default password adminadmin does not log in" bash -c "$DC exec -T lan-intruder curl -s -m 5 -d 'username=admin&password=adminadmin' http://vpn:8080/api/v2/auth/login | grep -q 'Ok.'"
 check "qBittorrent entrypoint refuses PUID=0" qbt_refuses_root
+check "start a listener as uid 1000 inside the namespace (for the inbound checks)" $DC exec -T -d -u 1000 -e LISTEN_NAME=ns probe socat TCP4-LISTEN:9100,fork,reuseaddr EXEC:"/t/listen.sh reply 9100"
+sleep 1
+section "1a. LAN policy in off mode (internet-direct stays open, LAN is restricted)"
+lan_policy off
+check "off: uid 1000 still reaches the 'internet' directly" retry 5 sh_ '[ "$(probe_rc http://172.31.251.20/)" = 0 ]'
 check "qBittorrent runs as uid 1000" bash -c "$DC exec -T qbittorrent sh -c 'ps -o user,args | grep \"[q]bittorrent-nox\"' | grep -q qbtUser"
+
+section "1b. /connect is refused (409) in off mode"
+OUT=$(connect A A); echo "$OUT" | head -1
+check "POST /connect while mode=off -> 409" has '^HTTP 409$'
+checkno "no wg interface was created" $DC exec -T vpn ip link show wg0
+check "still off and not connected" test "$(status | jqs '.mode+" "+(.connected|tostring)')" = "off false"
+
+section "1c. qBittorrent: admin changes to whitelisted engine settings survive a restart; security keys are re-asserted"
+qbt_api() { $DC exec -T lan-client curl -fsS -m 8 "$@"; }
+qbt_prefs() { qbt_api http://vpn:8080/api/v2/app/preferences; }
+check "set engine settings through the WebUI API (anonymous mode, max_connec, dl_limit, queueing)" qbt_api --data-urlencode 'json={"anonymous_mode":true,"max_connec":123,"dl_limit":2097152,"queueing_enabled":false,"autorun_enabled":true,"autorun_on_torrent_added_enabled":true}' http://vpn:8080/api/v2/app/setPreferences
+$DC restart -t 20 qbittorrent >/dev/null 2>&1
+for i in $(seq 1 40); do qbt_prefs >/dev/null 2>&1 && break; sleep 1; done
+OUT=$(qbt_prefs)
+check "after restart: anonymous_mode, max_connec, dl_limit and queueing kept (whitelisted keys are first-start-only)" jqok '.anonymous_mode and .max_connec==123 and .dl_limit==2097152 and (.queueing_enabled|not)'
+check "after restart: autorun forced off again (security key)" jqok '(.autorun_enabled|not) and ((.autorun_on_torrent_added_enabled // false)|not)'
+check "after restart: WebUI whitelist, no UPnP and no interface binding re-asserted" jqok '.bypass_auth_subnet_whitelist_enabled and .bypass_auth_subnet_whitelist=="172.31.250.50/32" and (.upnp|not) and .current_network_interface==""'
+echo "$OUT" | jq -c 'with_entries(select(.key|test("autorun")))' | sed 's/^/  (autorun keys: /;s/$/)/'
+# restore the defaults for the rest of the run
+qbt_api --data-urlencode 'json={"anonymous_mode":false}' http://vpn:8080/api/v2/app/setPreferences >/dev/null 2>&1
+OUT=""
+
+section "1d. qBittorrent sees only incomplete/ of the downloads volume (never library/)"
+docker run --rm -v sbvpn_downloads:/d sbvpn-tools sh -c 'echo secret > /d/library/marker; chmod 644 /d/library/marker'
+check "qbittorrent: /downloads contains only incomplete" test "$($DC exec -T qbittorrent ls -A /downloads)" = incomplete
+checkno "qbittorrent: the library marker is invisible" $DC exec -T qbittorrent test -e /downloads/library/marker
+check "qbittorrent (uid 1000) can write into incomplete/" $DC exec -T -u 1000 qbittorrent sh -c 'echo x > /downloads/incomplete/probe && rm /downloads/incomplete/probe'
+check "the library marker lives in the same volume, outside qbittorrent's subtree" sh_ "docker run --rm -v sbvpn_downloads:/d sbvpn-tools sh -c 'ls -A /d/incomplete >/dev/null && test -f /d/library/marker'"
 
 # ---------------------------------------------------------------- 2
 section "2. required mode, no tunnel"
@@ -109,6 +158,9 @@ checkno "IPv6 egress fails" probe curl -g -6 -sS -m 3 'http://[2606:4700:4700::1
 check "resolv.conf has no nameserver (fail closed)" bash -c "! $DC exec -T probe grep -q '^nameserver' /etc/resolv.conf"
 check "WebUI still reachable from LAN client" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
 check "status: required, not connected" test "$(status | jqs '.mode+" "+(.connected|tostring)')" = "required false"
+section "2a. LAN policy in required mode"
+lan_policy required
+checkno "required: uid 1000 cannot reach the internet-direct echo either" test "$(probe_rc http://172.31.251.20/)" = 0
 
 # ---------------------------------------------------------------- 3
 section "3. connect A (hostname endpoint, ::/0 in AllowedIPs)"
@@ -192,6 +244,7 @@ checkno "zero direct successes through all of the above" probe test -s /tmp/leak
 
 # ---------------------------------------------------------------- 6
 section "6. auth, hostile config, logs"
+check "control API :8000 unreachable from an untrusted sibling (CONTROL_TRUSTED_IPS)" test "$(intruder_code http://vpn:8000/status)" = 000
 check "no token -> 401" bash -c "$DC exec -T lan-client curl -s -m 5 -o /dev/null -w '%{http_code}' http://vpn:8000/status | grep -q 401"
 check "wrong token -> 401" bash -c "$DC exec -T lan-client /t/ctl.sh GET /status wrong | grep -q 'HTTP 401'"
 check "wrong token on POST /mode -> 401 and mode unchanged" bash -c "echo '{\"mode\":\"off\"}' | $DC exec -T lan-client /t/ctl.sh POST /mode wrong | grep -q 'HTTP 401' && [ \"\$(status | jq -r .mode)\" = required ]"
@@ -201,6 +254,11 @@ checkno "PostUp command was not executed (/tmp/pwned absent)" $DC exec -T vpn te
 for h in PreUp PreDown PostDown SaveConfig; do
   { cat "$WORK/A.conf"; echo "$h = touch /tmp/pwned"; } > "$WORK/evil.conf"
   check "config with $h -> 400" sh_ "connect evil evil | grep -q '^HTTP 400'"
+done
+for fld in PrivateKey PublicKey; do
+  sed "s|^$fld = \(.\{20\}\)|$fld = \1\r|" "$WORK/A.conf" > "$WORK/cr.conf"
+  grep -q "$(printf '\r')" "$WORK/cr.conf" || echo "  (test bug: no CR written)"
+  check "$fld with an embedded CR -> 400" sh_ "connect cr cr | grep -q '^HTTP 400'"
 done
 check "tunnel A untouched by rejected configs" test "$(status | jqs .name)" = null -o "$(status | jqs .name)" = A
 check "invalid JSON -> 400" bash -c "echo 'nope' | $DC exec -T lan-client /t/ctl.sh POST /connect | grep -q 'HTTP 400'"

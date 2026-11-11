@@ -22,11 +22,12 @@ import (
 func logf(format string, a ...any) { log.Printf(format, a...) }
 
 type Server struct {
-	token, webPorts, pubURL, fallbackDNS string
-	lan                                  []netip.Prefix
-	envMTU                               int // VPN_MTU, 0 = unset
-	handshakeTimeout                     time.Duration
-	origNS, origResolv                   string
+	token, pubURL, fallbackDNS string
+	lan                        []netip.Prefix
+	fw                         fwPolicy
+	envMTU                     int // VPN_MTU, 0 = unset
+	handshakeTimeout           time.Duration
+	origNS, origResolv         string
 
 	opMu sync.Mutex // serialises mutating operations
 
@@ -73,10 +74,15 @@ func (s *Server) status() statusDTO {
 	return d
 }
 
-var errBadRequest = errors.New("bad request")
+var (
+	errBadRequest = errors.New("bad request")
+	// errModeOff: /connect is refused while the mode is off. The worker could otherwise race an admin switching to off
+	// and bring a tunnel up in a mode that is supposed to have none.
+	errModeOff = errors.New("vpn mode is off")
+)
 
 func (s *Server) rules(mode string, eps ...netip.AddrPort) string {
-	return buildRuleset(mode, s.lan, eps, s.webPorts)
+	return buildRuleset(mode, s.fw, eps)
 }
 
 func (s *Server) failClosedDNS() { writeResolv("# vpn: no tunnel up, DNS disabled (kill switch)\n") }
@@ -85,6 +91,14 @@ func (s *Server) openDNS()       { writeResolv(s.origResolv) }
 func (s *Server) connect(name string, cfg *WGConfig) (err error) {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	// Checked under opMu (setMode holds it too), before anything touches the system: the mode cannot change between
+	// this check and the tunnel being up.
+	s.mu.Lock()
+	off := s.mode == "off"
+	s.mu.Unlock()
+	if off {
+		return errModeOff
+	}
 	ep, err := s.resolveEndpoint(cfg.EndpointHost, cfg.EndpointPort)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errBadRequest, err)
@@ -250,7 +264,10 @@ func resolveDefaultMode(v string) (string, error) {
 	return "", errors.New("VPN_DEFAULT_MODE must be off or required")
 }
 
-var errHandshake = errors.New("handshake failed")
+var (
+	errHandshake = errors.New("handshake failed")
+	errWireGuard = errors.New("wireguard configuration failed")
+)
 
 // teardown removes the tunnel (if any). The caller holds opMu.
 func (s *Server) teardown() {
@@ -352,6 +369,23 @@ func (s *Server) publicIPLoop() {
 	}
 }
 
+// publicError maps an internal error to the status code and the message that may go into an HTTP body. Only errors
+// built from validated input or fixed text are passed through; everything else (command output from `ip`, `nft`
+// or `wg`, which can echo configuration) is reduced to a generic message and stays out of the response.
+func publicError(err error) (int, string) {
+	switch {
+	case errors.Is(err, errModeOff):
+		return 409, "VPN mode is off: set it to required before connecting"
+	case errors.Is(err, errBadRequest):
+		return 400, err.Error()
+	case errors.Is(err, errHandshake):
+		return 502, err.Error()
+	case errors.Is(err, errWireGuard):
+		return 500, "WireGuard rejected the configuration"
+	}
+	return 500, "internal error (see the vpn container log)"
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -388,14 +422,11 @@ func (s *Server) handler() http.Handler {
 			return
 		}
 		if err := s.connect(in.Name, cfg); err != nil {
-			code := 500
-			if errors.Is(err, errBadRequest) {
-				code = 400
-			} else if errors.Is(err, errHandshake) {
-				code = 502
-			}
-			logf("connect %q failed", in.Name)
-			fail(w, code, err.Error())
+			code, msg := publicError(err)
+			// The log gets the real cause (ip/nft output; wgSetConf already reduced wg failures to a generic error);
+			// the HTTP body only the public message.
+			logf("connect %q failed (%d: %s): %v", in.Name, code, msg, err)
+			fail(w, code, msg)
 			return
 		}
 		logf("connect %q ok", in.Name)
@@ -416,7 +447,8 @@ func (s *Server) handler() http.Handler {
 			return
 		}
 		if err := s.setMode(in.Mode); err != nil {
-			fail(w, 500, err.Error())
+			logf("mode %s failed: %v", in.Mode, err)
+			fail(w, 500, "internal error (see the vpn container log)")
 			return
 		}
 		logf("mode=%s", in.Mode)
@@ -467,7 +499,28 @@ func main() {
 	if s.envMTU, err = parseMTUEnv(os.Getenv("VPN_MTU")); err != nil {
 		log.Fatal(err)
 	}
-	s.webPorts = "8000, " + env("WEBUI_PORT", "8080")
+	controlPort := addr[strings.LastIndex(addr, ":")+1:]
+	if n, err := strconv.Atoi(controlPort); err != nil || n < 1 || n > 65535 {
+		log.Fatalf("invalid CONTROL_ADDR %q", addr)
+	}
+	webPort := env("WEBUI_PORT", "8080")
+	if n, err := strconv.Atoi(webPort); err != nil || n < 1 || n > 65535 {
+		log.Fatalf("invalid WEBUI_PORT %q", webPort)
+	}
+	controlFrom, err := parseControlTrusted(os.Getenv("CONTROL_TRUSTED_IPS"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	// VPN_LAN_ALLOW_OUT is for the hermetic test fixtures only (e2e tracker/seeder, services/vpn/test): it lets
+	// qBittorrent open connections to the listed LAN addresses. Never set it on a real deployment.
+	allowOuts, err := parseAllowOut(os.Getenv("VPN_LAN_ALLOW_OUT"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	s.fw = fwPolicy{lan: s.lan, webPort: webPort, controlPort: controlPort, controlFrom: controlFrom, allowOut: allowOuts}
+	if len(allowOuts) > 0 {
+		logf("WARNING: VPN_LAN_ALLOW_OUT is set (%d entries): qBittorrent may reach those LAN addresses. Test setups only.", len(allowOuts))
+	}
 	if n, err := strconv.Atoi(env("HANDSHAKE_TIMEOUT_SEC", "20")); err == nil && n > 0 {
 		s.handshakeTimeout = time.Duration(n) * time.Second
 	} else {

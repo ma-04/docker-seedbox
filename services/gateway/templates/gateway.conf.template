@@ -25,8 +25,10 @@ map "" $gateway_secret {
   default "${GATEWAY_SECRET}";
 }
 
-# No query strings in logs: download signatures travel in the query.
-log_format files '$remote_addr [$time_local] "$request_method $uri" $status $body_bytes_sent';
+# No query strings in logs, on every server (this is the http-level default): download signatures, magnet links
+# (/add?magnet=...) and Authelia's rd= redirect targets all travel in the query. $uri is the path only.
+log_format noquery '$remote_addr [$time_local] "$request_method $uri" $status $body_bytes_sent';
+access_log /dev/stdout noquery;
 
 # --- anything with an unknown Host ------------------------------------------------------
 server {
@@ -146,7 +148,7 @@ server {
   listen 8080;
   server_name ${FILES_HOST};
   server_tokens off;
-  access_log /dev/stdout files;
+  access_log /dev/stdout noquery;
 
   location = /healthz {
     access_log off;
