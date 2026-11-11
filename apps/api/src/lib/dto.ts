@@ -84,7 +84,20 @@ export interface VpnStatusDto extends VpnStatus { reachable: boolean; activeConf
 export interface VpnRotateDto { configId?: number }
 
 /** GET/PUT /admin/settings. `google.oauthClientSecret` is masked on read; PUT accepts a partial object. */
-export type SettingsDto = Settings;
+export type SettingsDto = Omit<Settings, Extract<keyof Settings, `trackers.${string}`>>;
+
+/** GET/PUT /admin/trackers. See docs/architecture.md § Tracker lists. */
+export interface TrackerListStatusDto {
+  url: string; lastFetchedAt: number | null; lastAttemptAt: number | null; ok: boolean; error: string | null; trackerCount: number;
+}
+export interface TrackersDto {
+  enabled: boolean; urls: string[]; refreshHours: number; maxTrackers: number;
+  lists: TrackerListStatusDto[];
+  /** manualCount: the admin's own trackers. effectiveCount: what the engine is given (manual + fetched, deduplicated, capped). */
+  manualCount: number; effectiveCount: number;
+  refreshRequestedAt: number | null;
+}
+export interface TrackersUpdateDto { urls?: string[]; refreshHours?: number; maxTrackers?: number }
 
 export interface UserDto {
   id: number; username: string; email: string | null; displayName: string | null; isAdmin: boolean;
