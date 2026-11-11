@@ -183,6 +183,8 @@ jobs:
   attest:
     name: Attest ${{ matrix.image }}
     needs: [guard, tag]
+    # GitHub does not offer artifact attestations for user-owned private repositories.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
