@@ -20,11 +20,11 @@ describe('canonicalizeMagnet', () => {
     expect(() => canonicalizeMagnet(base + 'a'.repeat(MAX_MAGNET_BYTES - base.length))).not.toThrow();
     expect(() => canonicalizeMagnet(base + '\u00e9'.repeat(MAX_MAGNET_BYTES / 2))).toThrow(/too long/); // bytes, not chars
   });
-  it.each(['http://x', 'magnet:?dn=x', `magnet:?xt=urn:btmh:1220${'a'.repeat(64)}`, `magnet:?xt=urn:btih:${HEX.slice(1)}`, `magnet:?xt=urn:btih:${HEX}zz`, ''])('rejects %s', (m) => {
+  it.each(['http://x', 'magnet:?dn=x', `magnet:?xt=urn:btmh:1220${'a'.repeat(64)}`, `magnet:?xt=urn:btih:${HEX.slice(1)}`, `magnet:?xt=urn:btih:${HEX}zz`, `magnet:?xt=urn:btih:${HEX}&xt=urn:btmh:1220${'a'.repeat(64)}`, `magnet:?xt=urn:btih:${HEX}&xt=urn:btih:${'b'.repeat(40)}`, ''])('rejects %s', (m) => {
     expect(() => canonicalizeMagnet(m)).toThrow(SourceError);
   });
   it('rebuilds from parsed fields only: drops ws=, xs=, as=, x.pe=, so=, kt=, unknown keys and unsafe trackers', () => {
-    const raw = `magnet:?xt=urn:btih:${B32}&xt=urn:btmh:1220${'a'.repeat(64)}&dn=${enc('Big Buck Bunny')}`
+    const raw = `magnet:?xt=urn:btih:${B32}&dn=${enc('Big Buck Bunny')}`
       + `&tr=${enc('udp://tracker.example.com:1337/announce')}&tr=${enc('http://127.0.0.1:6969/announce')}&tr=${enc('https://10.0.0.5/a')}`
       + `&tr=${enc('http://172.31.250.1/x')}&tr=${enc('udp://tracker')}&tr=${enc('ftp://tracker.example.com/x')}&tr=${enc('https://u:p@tracker.example.com/a')}`
       + `&tr=${enc('wss://tracker.example.org/')}&ws=${enc('http://169.254.169.254/latest')}&xs=${enc('http://evil.example/x.torrent')}`

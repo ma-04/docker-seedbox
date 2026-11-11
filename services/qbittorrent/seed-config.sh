@@ -1,6 +1,13 @@
 #!/bin/sh
-# Seeds / enforces qBittorrent.conf, then hands over to the official entrypoint
-# (which drops to uid/gid $PUID/$PGID = 1000).
+# Entrypoint (under tini). The only things done as root are: validate PUID/PGID, make the /config volume root
+# ownable by that user (a NON-recursive `chown -h` of the directory itself), and drop to PUID:PGID. EVERYTHING that
+# touches /config beyond that (conf-edit.sh: seeding qBittorrent.conf) and qBittorrent itself run as the unprivileged
+# user, so a compromised qBittorrent, which owns /config and can plant symlinks in it, never gets root to follow them.
+#
+# The official /entrypoint.sh is deliberately NOT used: it runs `chown -R` on /config and rewrites config as root
+# (both follow planted symlinks), and edits /etc/passwd. This script starts qbittorrent-nox exactly like it does
+# (--confirm-legal-notice, --profile=/config, webui/torrenting port) minus those root-side steps. The container runs
+# with `read_only: true`, so this script, /entrypoint.sh and the rest of the rootfs cannot be replaced either.
 set -eu
 
 # Never run the torrent client (internet-facing, parses untrusted input) as root.
@@ -11,91 +18,32 @@ if [ "$PUID" -eq 0 ] || [ "$PGID" -eq 0 ]; then
   echo "seed-config: refusing to run qBittorrent as uid/gid 0 (PUID=$PUID PGID=$PGID); use a non-zero PUID/PGID" >&2
   exit 1
 fi
-if [ "$(id -u)" -ne 0 ] && [ "$(id -u)" -ne "$PUID" ]; then
-  echo "seed-config: running as uid $(id -u), which is not PUID=$PUID" >&2
-fi
 
-CONF=/config/qBittorrent/config/qBittorrent.conf
-mkdir -p "$(dirname "$CONF")"
-[ -f "$CONF" ] || : > "$CONF"
+CONFIG_DIR=${CONFIG_DIR:-/config}
+EDIT=${CONF_EDIT:-/conf-edit.sh}
+RUN_AS_USER=${RUN_AS_USER:-qbtUser}   # the image's passwd entry (uid/gid 1000); tests override it
 
-# set_key SECTION KEY VALUE : replace KEY inside [SECTION] or add it (creating the section).
-set_key() {
-  SEC="$1" KEY="$2" VAL="$3" awk '
-    BEGIN { sec = ENVIRON["SEC"]; key = ENVIRON["KEY"]; val = ENVIRON["VAL"] }
-    function flush() { if (insec && !done) { print key "=" val; done = 1 } }
-    /^\[.*\]$/ { flush(); insec = ($0 == "[" sec "]"); if (insec) seen = 1; print; next }
-    insec && index($0, key "=") == 1 { if (!done) { print key "=" val; done = 1 } ; next }
-    { print }
-    END { flush(); if (!seen) { print "[" sec "]"; print key "=" val } }
-  ' "$CONF" > "$CONF.tmp" && cat "$CONF.tmp" > "$CONF" && rm -f "$CONF.tmp"
-}
-
-# WebUI access without a password is granted ONLY to the addresses in QBT_TRUSTED_IPS (compose gives `api` and
-# `worker` static IPs and passes exactly those two). Everything else in the compose network, e.g. a compromised
-# sibling container, must authenticate, and nobody knows the password: with no WebUI password stored, qBittorrent
-# (>= 4.6.1) generates a random temporary one at every start and only prints it to the log. Anyone who could call
-# setPreferences/autorun would get code execution in this container, so an empty list means "nobody".
-TRUSTED=""
-for ip in $(printf '%s' "${QBT_TRUSTED_IPS:-}" | tr ',' ' '); do
-  case "$ip" in
-    ''|*[!0-9a-fA-F:./]*) echo "seed-config: invalid QBT_TRUSTED_IPS entry '$ip'" >&2; exit 1 ;;
-  esac
-  case "$ip" in */*) ;; *:*) ip="$ip/128" ;; *) ip="$ip/32" ;; esac
-  TRUSTED="${TRUSTED:+$TRUSTED, }$ip"   # Qt reads an unquoted "a, b" as a string list
-done
-if [ -z "$TRUSTED" ]; then
-  echo "seed-config: QBT_TRUSTED_IPS is empty: the WebUI will require a password nobody knows, so api/worker cannot reach it" >&2
-  set_key WebUI 'AuthSubnetWhitelistEnabled' false
+if [ "$(id -u)" -eq 0 ]; then
+  # The image's qbtUser is 1000:1000. Another PUID/PGID needs a passwd edit, which a read-only rootfs forbids.
+  if [ "$PUID" != "$(id -u "$RUN_AS_USER")" ] || [ "$PGID" != "$(id -g "$RUN_AS_USER")" ]; then
+    sed -i "s|^$RUN_AS_USER:x:[0-9]*:[0-9]*:|$RUN_AS_USER:x:$PUID:$PGID:|" /etc/passwd 2>/dev/null \
+      || { echo "seed-config: PUID/PGID other than the image's $RUN_AS_USER ($(id -u "$RUN_AS_USER"):$(id -g "$RUN_AS_USER")) need a writable /etc/passwd; the container's root filesystem is read-only" >&2; exit 1; }
+    sed -i "s|^$RUN_AS_USER:x:[0-9]*:|$RUN_AS_USER:x:$PGID:|" /etc/group 2>/dev/null || true
+  fi
+  # The one privileged write: ownership of the volume's top directory (-h: never through a link, no -R).
+  [ -d "$CONFIG_DIR" ] && [ ! -L "$CONFIG_DIR" ] || { echo "seed-config: $CONFIG_DIR must be a real directory" >&2; exit 1; }
+  chown -h "$PUID:$PGID" "$CONFIG_DIR" 2>/dev/null || true
+  DROP="doas -u $RUN_AS_USER"
 else
-  set_key WebUI 'AuthSubnetWhitelistEnabled' true
+  DROP=""
+  [ "$(id -u)" -eq "$PUID" ] || echo "seed-config: running as uid $(id -u), which is not PUID=$PUID" >&2
 fi
 
-# A WebUI password stored by an earlier run/admin would be a credential somebody knows: drop it so the random
-# temporary password (verified in qBittorrent 5.3.0: WebUI::WebUI(tempPasswordHash), src/app/application.cpp)
-# is the only one. A stored Password_PBKDF2 takes precedence over the temporary one (src/webui/webui.cpp).
-awk '!/^Password_PBKDF2=/' "$CONF" > "$CONF.tmp" && cat "$CONF.tmp" > "$CONF" && rm -f "$CONF.tmp"
+# shellcheck disable=SC2086  # $DROP is a fixed two-word command
+$DROP /usr/bin/env "CONFIG_DIR=$CONFIG_DIR" "QBT_TRUSTED_IPS=${QBT_TRUSTED_IPS:-}" "QBT_WEBUI_PORT=${QBT_WEBUI_PORT:-8080}" "$EDIT"
 
-# Security-critical keys, re-applied on EVERY start (the WebUI is only reachable inside the compose network and is never
-# routed by the gateway). Nothing an admin can tune from the app's engine settings (apps/api/src/api/engine.ts:
-# limits, queueing, DHT/PeX/LSD, encryption, anonymous mode, listen port, extra trackers) may be in this block: those are
-# seeded on first start only, below, so a change made in the UI survives a restart.
-set_key WebUI 'Address' '*'
-set_key WebUI 'Port' "${QBT_WEBUI_PORT:-8080}"
-set_key WebUI 'AuthSubnetWhitelist' "$TRUSTED"
-# Loopback is shared only with the vpn sidecar (same network namespace): siblings arrive with their own address,
-# the tunnel side is dropped by the sidecar's firewall. Keeping it open lets the image HEALTHCHECK work.
-set_key WebUI 'LocalHostAuth' false
-set_key WebUI 'HostHeaderValidation' false
-set_key WebUI 'ServerDomains' '*'
-set_key WebUI 'CSRFProtection' false
-set_key WebUI 'ClickjackingProtection' false
-set_key LegalNotice Accepted true
-set_key Network 'PortForwardingEnabled' false   # UPnP / NAT-PMP
-# No autorun: a program run on torrent events would be code execution for anyone who can reach setPreferences.
-set_key AutoRun 'enabled' false
-set_key AutoRun 'OnTorrentAdded\Enabled' false
-set_key AutoRun 'OnTorrentFinished\Enabled' false
-set_key BitTorrent 'Session\Interface' ''
-set_key BitTorrent 'Session\InterfaceName' ''
-set_key BitTorrent 'Session\InterfaceAddress' ''
-
-# Defaults on first start only (an admin may change these later in the WebUI; every key of the engine-settings whitelist
-# that this image seeds belongs here, never in the block above).
-if ! grep -q 'Session.DefaultSavePath=' "$CONF"; then
-  set_key BitTorrent 'Session\DefaultSavePath' /downloads/incomplete
-  set_key BitTorrent 'Session\TempPathEnabled' false
-  set_key BitTorrent 'Session\Preallocation' false
-  set_key BitTorrent 'Session\DHTEnabled' true
-  set_key BitTorrent 'Session\PeXEnabled' true
-  set_key BitTorrent 'Session\AnonymousModeEnabled' false
-  set_key BitTorrent 'Session\LSDEnabled' false
-  set_key BitTorrent 'Session\Port' 6881
-  set_key Meta 'MigrationVersion' 9999
-fi
-
-mkdir -p /downloads/incomplete
-# /config is small and was partly created by this script as root: fix the whole tree. /downloads can be huge: top level only.
-chown -R "$PUID:$PGID" /config 2>/dev/null || true
-chown "$PUID:$PGID" /downloads /downloads/incomplete 2>/dev/null || true
-exec /entrypoint.sh "$@"
+legal=""
+case "$(printf '%s' "${QBT_LEGAL_NOTICE:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" in confirm) legal="--confirm-legal-notice" ;; esac
+[ -z "${UMASK:-}" ] || umask "$UMASK"
+# shellcheck disable=SC2086
+exec $DROP /usr/bin/env HOME=/tmp qbittorrent-nox ${legal:+"$legal"} "--profile=$CONFIG_DIR" ${QBT_TORRENTING_PORT:+"--torrenting-port=$QBT_TORRENTING_PORT"} ${QBT_WEBUI_PORT:+"--webui-port=$QBT_WEBUI_PORT"} "$@"

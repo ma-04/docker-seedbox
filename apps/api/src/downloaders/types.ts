@@ -43,6 +43,8 @@ export interface Downloader {
   /** `null` when the downloader does not know the ref (never added, or removed behind our back). */
   status(ref: string): Promise<DownloadStatus | null>;
   remove(ref: string, deleteData: boolean): Promise<void>;
+  /** Lowercase ids of everything the downloader holds in the app's category (used to find torrents we do not track). */
+  list(): Promise<string[]>;
 }
 
 /**

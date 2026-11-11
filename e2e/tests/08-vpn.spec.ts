@@ -4,8 +4,8 @@ import { getManifest, probe, qbtTorrents, wgConfig } from '../lib/infra';
 
 test.describe.configure({ mode: 'serial' });
 
-const DIRECT = 'http://172.31.251.20/';    // "the internet": reachable only outside the tunnel
-const BEHIND = 'http://172.31.252.20/';    // reachable only through a WireGuard server
+const DIRECT = 'http://198.51.100.20/';    // "the internet": reachable only outside the tunnel
+const BEHIND = 'http://203.0.113.20/';    // reachable only through a WireGuard server
 const TRACKER = 'http://172.31.250.30:6969/healthz';   // on the LAN (LAN_CIDRS)
 
 test.describe('8. VPN', () => {
@@ -64,11 +64,11 @@ test.describe('8. VPN', () => {
     await page.goto('/admin/vpn');
     const before = await status(page);
     const exitIp = (s: any) => s.publicIp as string | null;
-    await expect.poll(async () => exitIp(await status(page)), { timeout: 30_000 }).toMatch(/^172\.31\.252\.1[12]$/);
+    await expect.poll(async () => exitIp(await status(page)), { timeout: 30_000 }).toMatch(/^203\.0\.113\.1[12]$/);
     const first = exitIp(await status(page))!;
 
     await page.getByRole('button', { name: 'Rotate now' }).click();
-    await expect.poll(async () => { const s = await status(page); return s.connected && s.name !== before.name ? exitIp(s) : null; }, { timeout: 60_000 }).toMatch(/^172\.31\.252\.1[12]$/);
+    await expect.poll(async () => { const s = await status(page); return s.connected && s.name !== before.name ? exitIp(s) : null; }, { timeout: 60_000 }).toMatch(/^203\.0\.113\.1[12]$/);
     const second = exitIp(await status(page))!;
     expect(second).not.toBe(first);
     await expect(page.getByTestId('vpn-config-row').filter({ hasText: 'active' })).toHaveCount(1);

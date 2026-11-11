@@ -33,13 +33,21 @@ sidecar: Alpine + `wireguard-tools` + `iproute2` + `nftables` + a ~500-line stat
 
 * **Kill switch** — one nftables table `inet sbvpn`, replaced atomically (single `nft -f`
   transaction), installed *before* the control API listens (and qBittorrent waits for the
-  healthcheck). In `required` mode the OUTPUT policy is `drop`; only loopback, `LAN_CIDRS`,
-  `wg*` interfaces and the UDP endpoint of the tunnel being brought up/currently up are accepted.
-  IPv6 (except loopback) is dropped; the sidecar also disables it via sysctl. Nothing is
-  allowed because of connection state, so a connection opened in `off` mode does not survive the
-  switch to `required`.
-* **Docker's embedded resolver** (`127.0.0.11`, which forwards from the host side) is usable by
-  uid 0 only, i.e. by this process, solely to resolve a WireGuard *endpoint hostname*
+  healthcheck). In `required` mode the OUTPUT policy is `drop`; only the `lo` device, `wg*` interfaces and the UDP
+  endpoint of the tunnel being brought up/currently up are accepted. In **both** modes (so `off` is no way around
+  it) every uid, root included (there is no uid exemption), is dropped towards `LAN_CIDRS` (only replies to
+  connections the api/worker opened are accepted) and towards every private / loopback-adjacent / link-local / CGNAT /
+  multicast / reserved IPv4 range (`10/8`, `172.16/12` (so every other Docker bridge and the host at `172.17.0.1`),
+  `192.168/16`, `100.64/10`, `169.254/16` (cloud metadata), `127/8` off the `lo` device, `224/4`, `240/4`, ...),
+  on every interface except `lo`. Through `wg*` these destinations are dropped as well, **except the tunnel's DNS
+  servers on port 53**: the VPN provider's DNS is usually a private address (`10.2.0.1`) and DNS must keep working,
+  but nothing else of the provider's internal network can be probed (the safer of the two options; a provider that
+  needs another private address, e.g. for port forwarding, is not supported). All IPv6 off `lo` is dropped in both
+  modes; the sidecar also disables it via sysctl. Nothing is allowed because of connection state except those LAN
+  replies, so a connection opened in `off` mode does not survive the switch to `required`. RFC 5737 documentation
+  ranges are not blocked (the hermetic test stacks use them as their fake internet).
+* **Docker's embedded resolver** (`127.0.0.11`, reached over the `lo` device, so it needs no LAN rule) is usable by
+  uid 0 only in `required` mode, i.e. by this process, solely to resolve a WireGuard *endpoint hostname*
   (that one lookup is the only thing that leaves the namespace outside the tunnel; use an IP
   endpoint to avoid it). qBittorrent (uid 1000) cannot use it.
 * **Connecting** — the config is parsed and whitelisted (`PrivateKey`, `Address`, `DNS`, `MTU`,
@@ -142,6 +150,10 @@ services:
     network_mode: service:vpn         # shares the vpn namespace (and its kill switch)
     environment:
       LAN_CIDRS: ${LAN_CIDRS:-172.31.250.0/24}
+    read_only: true                   # the entrypoint cannot be replaced; qBittorrent writes /config, incomplete/ and /tmp
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, KILL]   # root only chowns /config (top dir) and drops to uid 1000; KILL: tini -> SIGTERM
     volumes:
       - qbt-config:/config
       - type: volume                  # only incomplete/ of the downloads volume (never library/)
@@ -168,7 +180,7 @@ Notes for the compose file as a whole:
   cut off from the LAN until it is restarted. `docker compose up -d` / `restart` handle this;
   a bare Docker restart-policy crash restart of `vpn` does not, so the worker should treat an
   unreachable `qbittorrent` as "restart me".
-* Do not add `cap_add`/`privileged` to `qbittorrent`; it needs none.
+* `qbittorrent` keeps only `CHOWN` (the `/config` top directory), `SETUID`/`SETGID` (drop to uid 1000) and `KILL` (tini forwards SIGTERM); no `DAC_OVERRIDE`/`FOWNER`, never `privileged`. Its root filesystem is read-only, and everything under `/config` is written as uid 1000 (`services/qbittorrent/conf-edit.sh`), never by root.
 
 ## Control API
 

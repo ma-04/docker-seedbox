@@ -43,7 +43,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Shellcheck
-        run: shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh services/qbittorrent/seed-config.sh
+        run: shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh services/qbittorrent/seed-config.sh services/qbittorrent/conf-edit.sh
+      - name: qBittorrent entrypoint cannot be steered through planted symlinks (plain sh, no Docker)
+        run: sh services/qbittorrent/test/symlink.sh
+      - name: Gateway refuses to serve through symlinks
+        run: |
+          docker build -q -t gateway-under-test services/gateway
+          GATEWAY_IMAGE=gateway-under-test services/gateway/test/symlinks.sh
       - name: docker compose config (every proxy mode)
         working-directory: deploy
         env:

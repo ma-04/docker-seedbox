@@ -48,15 +48,23 @@ async function deleteLocal(d: DeletionDeps, row: PendingDeletionRow): Promise<vo
   }
 
   // A torrent whose library copy is (inside) this directory and that still has active jobs would lose its source.
-  const holders = (d.db.prepare('SELECT * FROM torrents WHERE library_path IS NOT NULL').all() as TorrentRow[])
-    .filter((t) => { const p = resolve(t.library_path!); return p === target || within(target, p); });
-  for (const t of holders) {
-    if (d.db.prepare(`SELECT 1 FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE} LIMIT 1`).get(t.id)) throw new Defer('library copy still needed by an active job');
-  }
+  // The decision and the torrent's state change are ONE immediate transaction taken BEFORE the files go: a job the API
+  // adds afterwards sees a removed torrent (and downloads again) instead of a `downloaded` one whose data is gone, and
+  // a job that already exists defers the deletion until it has finished.
+  d.db.transaction(() => {
+    const holders = (d.db.prepare('SELECT * FROM torrents WHERE library_path IS NOT NULL').all() as TorrentRow[])
+      .filter((t) => { const p = resolve(t.library_path!); return p === target || within(target, p); });
+    for (const t of holders) {
+      if (d.db.prepare(`SELECT 1 FROM jobs WHERE torrent_id = ? AND state IN ${ACTIVE} LIMIT 1`).get(t.id)) throw new Defer('library copy still needed by an active job');
+    }
+    for (const t of holders) {
+      // `cleanup_pending`: a torrent the engine may still hold (moved-but-not-yet-released) is removed by the worker's sweep.
+      d.db.prepare("UPDATE torrents SET library_path = NULL, state = 'removed', dl_speed = 0, cleanup_pending = CASE WHEN state IN ('downloading','downloaded') THEN 1 ELSE cleanup_pending END WHERE id = ?").run(t.id);
+    }
+  }).immediate();
 
   const st = await lstat(target).catch(() => null);
   if (st) await rm(target, { recursive: true, force: true });
-  for (const t of holders) d.db.prepare('UPDATE torrents SET library_path = NULL WHERE id = ?').run(t.id);
 
   // Prune now-empty `<slug>-<id>` (and subdir) parents, never the library root itself.
   let dir = dirname(target);

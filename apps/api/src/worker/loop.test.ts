@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { setSetting } from '../lib/settings.js';
@@ -314,7 +314,7 @@ describe('rclone destinations', () => {
     expect(call.args.join(' ')).not.toContain(gdrive.refreshToken);
     expect(call.args.join(' ')).not.toContain(gdrive.clientSecret);
     // rclone writes straight into the job folder the worker resolved: it never creates parents itself
-    expect(call.args.slice(0, 3)).toEqual(['copy', join(s.content(H1), 'Pack'), 'DST:']);
+    expect(call.args.slice(0, 3)).toEqual(['copy', realpathSync(join(s.content(H1), 'Pack')), 'DST:']);
     expect(call.env.RCLONE_CONFIG_DST_ROOT_FOLDER_ID).toBe('ROOT/alice-1/Pack [aaaaaaaa]');
     expect(call.env.RCLONE_CONFIG_DST_TYPE).toBe('drive');
   });

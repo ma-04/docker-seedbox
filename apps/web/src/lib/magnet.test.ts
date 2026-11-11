@@ -17,8 +17,9 @@ describe('parseMagnet', () => {
     const uri = `magnet:?xt=urn:btih:${HEX}&dn=a&tr=x`;
     expect(parseMagnet(`  ${uri}\n`)).toMatchObject({ ok: true, magnet: { uri } });
   });
-  it('finds the btih among several xt values', () => {
-    expect(parseMagnet(`magnet:?xt=urn:sha1:abc&xt=urn:btih:${HEX}`).ok).toBe(true);
+  it('rejects more than one xt (the API only accepts a single v1 btih)', () => {
+    expect(parseMagnet(`magnet:?xt=urn:sha1:abc&xt=urn:btih:${HEX}`).ok).toBe(false);
+    expect(parseMagnet(`magnet:?xt=urn:btih:${HEX}&xt=urn:btih:${'b'.repeat(40)}`).ok).toBe(false);
   });
   it.each([
     ['javascript:alert(1)'], ['data:text/html,<script>1</script>'], ['http://example.com/?xt=urn:btih:' + HEX],
