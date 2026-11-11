@@ -106,6 +106,10 @@ tests and never copied to the server (the ssh probes only run `docker`, `curl` a
 instead of the Ubuntu ISO: no Ubuntu job, and the engine is throttled to 1 MiB/s by spec 04 so that specs 05 and 06 find a
 download still running; spec 07 lifts the throttle before waiting for completion.
 
+The run id (`e2e/.out/live/state.json`) must match the prefix of an already existing `live-b2` destination: spec 03 keeps an
+existing destination as it is, so a new state file next to an old destination uploads below the old prefix. Delete the
+destination (or keep the state file) between runs.
+
 Notes for the credentials you feed it:
 
 - A Drive OAuth token with the `drive.file` scope (what many rclone remotes use) can only see folders that **this OAuth

@@ -4,6 +4,9 @@ import { api, fetchHash, inQbt, jobRow, login, mask, note, serverEgressIp, sh, s
 
 test.describe.configure({ mode: 'serial' });
 
+/** A command inside the qbittorrent container as the engine's own uid (1000): the LAN policy exempts uid 0 (the sidecar; `docker exec` defaults to root). */
+const asEngine = (cmd: string) => sh(`sudo docker exec -u 1000 seedbox-qbittorrent-1 sh -c '${cmd.replace(/'/g, "'\\''")}'`);
+
 // Checks added with the final review fixes: footer, magnet hardening, /add prefill, MTU, kill-switch LAN policy and
 // file removal on job delete. Runs after the completion specs (07/08) and before the cleanup (99).
 test.describe('9. final review fixes on the live deployment', () => {
@@ -69,7 +72,7 @@ test.describe('9. final review fixes on the live deployment', () => {
     expect(gw).toMatch(/^\d+\.\d+\.\d+\.\d+$/); expect(sibling).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
     const probe = async (url: string, via: 'host' | 'qbt') => {
       const cmd = `curl -sS -m 5 -o /dev/null -w '%{http_code}' ${url}; echo " exit=$?"`;
-      const r = via === 'host' ? await sh(cmd) : await inQbt(cmd);
+      const r = via === 'host' ? await sh(cmd) : await asEngine(cmd);
       return `${r.out.trim()} ${r.err.trim()}`;
     };
     // controls: both answer from the host, so "unreachable" below really is the policy
@@ -80,7 +83,7 @@ test.describe('9. final review fixes on the live deployment', () => {
     expect(g, `gateway ${mask(gw)} must be unreachable from qbittorrent`).toMatch(/000 exit=[1-9]/);
     expect(s, `sibling ${mask(sibling)} must be unreachable from qbittorrent`).toMatch(/000 exit=[1-9]/);
     // and the tunnel itself works
-    const t = await inQbt('curl -4 -sS -m 15 https://api.ipify.org');
+    const t = await asEngine('curl -4 -sS -m 15 https://api.ipify.org');
     expect(t.code, t.err).toBe(0);
     expect(t.out.trim()).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
     expect(t.out.trim()).not.toBe(own);
