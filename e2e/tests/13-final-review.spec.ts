@@ -46,10 +46,11 @@ test.describe('13. final review fixes', () => {
     expect(ok.status, ok.text).toBe(201);
     try {
       await expect.poll(async () => (await qbtTorrents()).some((t) => t.hash.toLowerCase() === a), { timeout: 60_000 }).toBe(true);
+      const allowed = new Set([...before, a]);
       await staysTrue(async () => {
         const now = (await qbtTorrents()).map((t) => t.hash.toLowerCase());
-        return !now.includes(b) && now.length === before.length + 1;
-      }, 8000, 'only the one submitted torrent exists in qBittorrent');
+        return !now.includes(b) && now.every((h) => allowed.has(h)); // nothing but the one submitted torrent was added
+      }, 8000, 'only the one submitted torrent was added to qBittorrent');
     } finally {
       await api(page, 'DELETE', `/api/jobs/${ok.json.id}`);
       await api(page, 'DELETE', `/api/jobs/${ok.json.id}`); // second call: it was only cancelled the first time
