@@ -35,6 +35,10 @@ on:
         description: Dry run (throw-away tag, deleted afterwards) instead of publishing
         type: boolean
         default: false
+      arm64-suites:
+        description: "Dry run only: also run the VPN and e2e suites on arm64 (off = the job graph of a main/:edge build)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -60,6 +64,7 @@ jobs:
       version: ${{ steps.ref.outputs.version }}      # baked into the images (web footer, OCI version)
       immutable: ${{ steps.ref.outputs.immutable }}  # the tag the merge job creates; never moved afterwards
       push: ${{ steps.ref.outputs.push }}            # false: build + smoke-test only (fork / Dependabot dry runs)
+      arm64-suites: ${{ steps.ref.outputs.arm64 }}   # run the VPN + e2e suites on arm64 too (releases, dry runs)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -73,6 +78,7 @@ jobs:
           REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
           DRY_RUN: ${{ inputs.dry-run }}
+          ARM64_SUITES: ${{ format('{0}', inputs.arm64-suites) }}   # '' on push / pull_request
           PR_NUMBER: ${{ github.event.pull_request.number }}
           SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           ACTOR: ${{ github.actor }}
@@ -81,6 +87,7 @@ jobs:
           set -euo pipefail
           short=${GITHUB_SHA:0:7}
           push=true
+          arm64=true
           version_tag() {
             if ! printf '%s' "$REF_NAME" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
               echo "::error::tag '$REF_NAME' is not vMAJOR.MINOR.PATCH[-prerelease]"; exit 1
@@ -99,21 +106,22 @@ jobs:
             if [ "$SAME_REPO" != true ] || [ "$ACTOR" = 'dependabot[bot]' ]; then push=false; fi
           elif [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then
             kind=dryrun; version="dryrun-$RUN_ID"; immutable=$version
+            if [ "$ARM64_SUITES" = false ]; then arm64=false; fi
           elif [ "${REF#refs/tags/}" != "$REF" ]; then
             version_tag   # push of a tag, or a dispatch run on a tag
           elif [ "$EVENT" = push ] && [ "$REF" = refs/heads/main ]; then
-            kind=edge; version="edge-$short"; immutable="sha-$short"
+            kind=edge; version="edge-$short"; immutable="sha-$short"; arm64=false
           else
             echo "::error::only a vX.Y.Z tag (pushed, or dispatched with --ref vX.Y.Z), a push to main or a dry run can run this, not $EVENT on $REF"; exit 1
           fi
           {
-            echo "kind=$kind"; echo "version=$version"; echo "immutable=$immutable"; echo "push=$push"
+            echo "kind=$kind"; echo "version=$version"; echo "immutable=$immutable"; echo "push=$push"; echo "arm64=$arm64"
           } >> "$GITHUB_OUTPUT"
           {
             echo "### Release plan"
-            echo "| kind | version | immutable tag | push | commit |"
-            echo "|---|---|---|---|---|"
-            echo "| $kind | $version | \`$immutable\` | $push | \`$GITHUB_SHA\` |"
+            echo "| kind | version | immutable tag | push | arm64 VPN + e2e suites | commit |"
+            echo "|---|---|---|---|---|---|"
+            echo "| $kind | $version | \`$immutable\` | $push | $arm64 | \`$GITHUB_SHA\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   ci:
@@ -141,7 +149,7 @@ jobs:
   arm64-vpn:
     name: VPN sidecar kill-switch test (arm64)
     needs: guard
-    if: needs.guard.outputs.kind != 'edge'
+    if: needs.guard.outputs.arm64-suites == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     permissions:
@@ -163,7 +171,7 @@ jobs:
   arm64-e2e:
     name: End-to-end (Playwright, arm64)
     needs: guard
-    if: needs.guard.outputs.kind != 'edge'
+    if: needs.guard.outputs.arm64-suites == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     permissions:
@@ -187,13 +195,14 @@ jobs:
   merge:
     name: Merge ${{ matrix.image }} (amd64 + arm64)
     needs: [guard, ci, build, arm64-vpn, arm64-e2e]
-    # Every gate must be green; the arm64 suites may only be skipped for :edge. (`!cancelled()` instead of the default
-    # `success()` because a skipped arm64 job would otherwise skip this job.)
+    # Every gate must be green; the arm64 suites may only be skipped when the guard said so (:edge, or a dry run that
+    # imitates it). `!cancelled()` + explicit results instead of the implicit `success()`, which is false as soon as
+    # any job upstream was skipped. The same pattern is used by every job below.
     if: >-
       !cancelled() && needs.guard.outputs.push == 'true'
       && needs.guard.result == 'success' && needs.ci.result == 'success' && needs.build.result == 'success'
-      && (needs.arm64-vpn.result == 'success' || (needs.arm64-vpn.result == 'skipped' && needs.guard.outputs.kind == 'edge'))
-      && (needs.arm64-e2e.result == 'success' || (needs.arm64-e2e.result == 'skipped' && needs.guard.outputs.kind == 'edge'))
+      && (needs.arm64-vpn.result == 'success' || (needs.arm64-vpn.result == 'skipped' && needs.guard.outputs.arm64-suites == 'false'))
+      && (needs.arm64-e2e.result == 'success' || (needs.arm64-e2e.result == 'skipped' && needs.guard.outputs.arm64-suites == 'false'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -280,7 +289,7 @@ jobs:
   publish:
     name: Move the tags (all five images)
     needs: [guard, merge]
-    if: needs.merge.result == 'success'
+    if: "!cancelled() && needs.guard.result == 'success' && needs.merge.result == 'success'"
     runs-on: ubuntu-24.04
     # One tag move at a time per kind: two release runs never interleave (each computes "highest version" from the
     # repository's tags at that moment, so their order does not matter). NOTE: GitHub keeps one PENDING job per group;
@@ -364,7 +373,7 @@ jobs:
   verify:
     name: Verify attestations
     needs: [guard, merge, publish]
-    if: needs.merge.result == 'success' && needs.publish.result == 'success'
+    if: "!cancelled() && needs.merge.result == 'success' && needs.publish.result == 'success'"
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -405,7 +414,7 @@ jobs:
   github-release:
     name: GitHub Release
     needs: [guard, publish, verify]
-    if: needs.guard.outputs.kind == 'release' && needs.verify.result == 'success'
+    if: "!cancelled() && needs.guard.outputs.kind == 'release' && needs.publish.result == 'success' && needs.verify.result == 'success'"
     runs-on: ubuntu-24.04
     permissions:
       contents: write   # the only job that writes to the repository
@@ -463,10 +472,10 @@ jobs:
           fi
 
   cleanup:
-    name: Delete the dry-run tag
-    needs: [guard, merge, publish, verify]
-    # Also after a failure: the throw-away tag must not outlive the run.
-    if: always() && needs.guard.outputs.kind == 'dryrun' && needs.guard.outputs.push == 'true' && needs.merge.result != 'skipped'
+    name: Delete the dry-run images
+    needs: [guard, build, merge, publish, verify]
+    # Also after a failure: nothing pushed by a dry run may outlive it.
+    if: always() && needs.guard.outputs.kind == 'dryrun' && needs.guard.outputs.push == 'true'
     runs-on: ubuntu-24.04
     permissions:
       packages: write
@@ -474,20 +483,46 @@ jobs:
       IMMUTABLE: ${{ needs.guard.outputs.immutable }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      # Deletes only the package version carrying the throw-away tags (the multi-arch index). Its per-arch children stay
-      # as untagged versions, like those of every superseded :edge build.
-      - run: |
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Deletes, by exact digest, every package version this run pushed: the throw-away index (:<tag>, :<tag>-moved),
+      # the per-arch pushes (digest-* artifacts) and their image + attestation manifests. These embed the dry-run
+      # version and build time, so no other tag can share them; a version tagged with anything else is never touched.
+      - name: Delete
+        run: |
           set -uo pipefail
           owner=$GITHUB_REPOSITORY_OWNER
           case "$(gh api "users/$owner" --jq .type)" in Organization) base="orgs/$owner" ;; *) base="users/$owner" ;; esac
+          children() { docker buildx imagetools inspect --raw "$1" 2>/dev/null | jq -r '.manifests[]?.digest'; }
           rc=0
           for image in $IMAGES; do
-            pkg="docker-seedbox-$image"
-            ids=$(gh api --paginate "$base/packages/container/$pkg/versions?per_page=100" \
-                    --jq ".[] | select(.metadata.container.tags | index(\"$IMMUTABLE\")) | .id") || { rc=1; continue; }
-            for id in $ids; do
-              if gh api -X DELETE "$base/packages/container/$pkg/versions/$id" >/dev/null; then echo "deleted $pkg:$IMMUTABLE (version $id)"
-              else echo "::warning::could not delete $pkg:$IMMUTABLE (version $id)"; rc=1; fi
+            pkg="docker-seedbox-$image"; ref="ghcr.io/${owner,,}/$pkg"
+            digests=()
+            if idx=$(docker buildx imagetools inspect "$ref:$IMMUTABLE" --format '{{ json .Manifest }}' 2>/dev/null | jq -r .digest) && [ -n "$idx" ]; then
+              digests+=("$idx"); mapfile -t -O "${#digests[@]}" digests < <(children "$ref@$idx")
+            fi
+            for f in digests/"$image"-*; do
+              [ -s "$f" ] || continue
+              d=$(cat "$f"); digests+=("$d"); mapfile -t -O "${#digests[@]}" digests < <(children "$ref@$d")
             done
+            [ "${#digests[@]}" -gt 0 ] || { echo "$pkg: nothing pushed"; continue; }
+            want=$(printf '%s\n' "${digests[@]}" | sort -u)
+            gh api --paginate "$base/packages/container/$pkg/versions?per_page=100" \
+                --jq '.[] | "\(.id) \(.name) \(.metadata.container.tags | join(","))"' > versions || { rc=1; continue; }
+            while read -r id name tags; do
+              grep -qxF "$name" <<<"$want" || continue
+              case ",$tags," in ",,"|",$IMMUTABLE,"|",$IMMUTABLE,$IMMUTABLE-moved,"|",$IMMUTABLE-moved,$IMMUTABLE,") ;;
+                *) echo "::warning::$pkg $name is tagged '$tags': left alone"; continue ;; esac
+              if gh api -X DELETE "$base/packages/container/$pkg/versions/$id" >/dev/null; then echo "deleted $pkg@$name${tags:+ ($tags)}"
+              else echo "::warning::could not delete $pkg@$name (version $id)"; rc=1; fi
+            done < versions
           done
           exit $rc

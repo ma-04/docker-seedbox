@@ -111,11 +111,12 @@ Images are published to `ghcr.io/ma-04/docker-seedbox-{api,web,gateway,vpn,qbitt
 **Architectures.** Every tag is a multi-arch image for `linux/amd64` and `linux/arm64`; Docker pulls the right one
 automatically. Both are built natively (no emulation) and smoke-tested on their own architecture before anything is
 tagged; for releases the VPN kill-switch test and the full end-to-end suite also run on arm64
-([releasing.md](releasing.md)). So a 64-bit ARM Linux host works the same as an x86-64 one: for example a Raspberry
-Pi 4/5 or other ARM board with a **64-bit** OS, or an Ampere / Graviton cloud server. Kernel WireGuard (Linux 5.6+) is
-still required for the VPN; `./setup.sh doctor` checks it. 32-bit ARM (`armv7`) is not built. Docker Desktop on Apple
-Silicon pulls the arm64 images too, but Docker Desktop is not a supported host for a deployment (the VPN needs the
-host kernel's WireGuard and nftables) and is not tested.
+([releasing.md](releasing.md)). What CI proves is GitHub's arm64 runner: Ubuntu 24.04 on an Azure arm64 VM (`ubuntu-24.04-arm`).
+Other 64-bit ARM Linux hosts, such as a Raspberry Pi 4/5 or another board with a **64-bit** OS, or an
+Ampere / Graviton cloud server, are expected to work the same way but are not tested. They need a kernel with WireGuard
+(Linux 5.6+, built in or as a module) and nftables; `./setup.sh doctor` checks for WireGuard. 32-bit ARM (`armv7`) is
+not built. Docker Desktop on Apple Silicon can pull the arm64 images, but it is not a supported or tested deployment
+host (the VPN needs the host kernel's WireGuard and nftables).
 
 `./setup.sh` pins `SEEDBOX_VERSION` in `deploy/.env` to the newest release (as its exact `X.Y.Z`) when it installs.
 While no release is published yet it uses `edge` instead and says so; if `edge` is not in the registry either (or

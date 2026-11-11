@@ -435,6 +435,10 @@ resolve_images() { # decide pull-vs-build for install; pins SEEDBOX_VERSION in .
   if [ "$ver" = local ]; then BUILD=1; return 0; fi
   if [ -z "$ver" ]; then
     if [ "$NO_START" = 1 ]; then return 0; fi
+    # :latest exists once anything was released: then the lookup failed (offline, rate-limited), not "no release yet".
+    if [ -z "$VERSION_IN" ] && image_exists latest; then
+      die "Could not look up the newest release (GitHub API unreachable or rate-limited). Re-run later, or pin one: --version X.Y.Z (https://github.com/${SEEDBOX_REPO:-ma-04/docker-seedbox}/releases)."
+    fi
     if [ -z "$VERSION_IN" ] && image_exists edge; then
       warn "No stable release published yet: using the 'edge' images (the head of main, built and tested by CI). Move to a release later with: ./setup.sh update --version latest"
       env_put SEEDBOX_VERSION edge

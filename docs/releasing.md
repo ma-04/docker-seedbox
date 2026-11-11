@@ -16,7 +16,7 @@ there is no QEMU emulation anywhere. The two builds are then merged into one man
 | tag `vX.Y.Z-rc.N` (any `-suffix`) | `X.Y.Z-rc.N` only: a pre-release never moves anything, and gets no GitHub Release |
 | push to `main` | `sha-<7-char commit>` (immutable) and `edge` (moves only while that commit is still the head of `main`) |
 | `workflow_dispatch` on a tag (`gh workflow run release.yml --ref vX.Y.Z`) | the same as pushing that tag (to re-publish after a fix in the pipeline itself) |
-| `workflow_dispatch` with `dry-run: true`, or a pull request that changes the pipeline | a **dry run**: everything below except the GitHub Release, under the throw-away tag `dryrun-<run id>` / `pr-<N>-test` (and a test move to `<that>-moved`), deleted at the end |
+| `workflow_dispatch` with `dry-run: true`, or a pull request that changes the pipeline | a **dry run**: everything below except the GitHub Release, under the throw-away tag `dryrun-<run id>` / `pr-<N>-test` (and a test move to `<that>-moved`); every package version it pushed is deleted at the end. `gh workflow run release.yml --ref <branch> -f dry-run=true -f arm64-suites=false` skips the arm64 suites, i.e. runs the job graph of a `main` build. Fork and Dependabot PRs build and smoke-test only |
 | any other pull request | CI only (`ci.yml`, which also builds and smoke-tests both architectures); nothing is published |
 
 "Highest" is computed from the repository's `v*` tags at the moment the tags move
@@ -98,5 +98,5 @@ GitHub Actions and Go modules. Actions are pinned to commit SHAs and base images
 index (so the same pin serves amd64 and arm64); review those PRs like any other change: CI builds and smoke-tests
 both architectures on them.
 
-Every `main` push and dry run leaves untagged per-architecture versions in the GHCR packages (the children of
+Every `main` push leaves untagged per-architecture versions in the GHCR packages (the children of
 superseded indexes); prune them occasionally in the package settings if storage matters.
