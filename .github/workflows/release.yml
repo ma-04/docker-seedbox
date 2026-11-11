@@ -52,7 +52,7 @@ jobs:
               echo "::error::tag '$REF_NAME' is not vMAJOR.MINOR.PATCH[-prerelease]"; exit 1
             fi
             # A release must be a commit that is on main (it has gone through review and CI there).
-            git fetch --no-tags origin main
+            # fetch-depth: 0 above already fetched every branch, so origin/main exists (no credentials needed here).
             if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
               echo "::error::tag '$REF_NAME' points at a commit that is not on main"; exit 1
             fi

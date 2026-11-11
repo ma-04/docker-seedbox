@@ -826,6 +826,12 @@ cmd_restore() {
   fi
   confirm "Restore now?" n || die "Aborted."
 
+  # Stop the CURRENT stack first, with the CURRENT .env: the backup may belong to another compose project name,
+  # which would leave this one running.
+  if [ -f "$ENV_FILE" ]; then
+    step "Stopping the current stack"
+    dc down --remove-orphans >/dev/null 2>&1 || true
+  fi
   step "Restoring configuration"
   if [ -f "$ENV_FILE" ]; then cp -p "$ENV_FILE" "$ENV_FILE.pre-restore-$ts"; fi
   cp "$bk/env" "$ENV_FILE"; chmod 600 "$ENV_FILE"
@@ -836,8 +842,6 @@ cmd_restore() {
     chmod 600 "$USERS_FILE" 2>/dev/null || true
   fi
 
-  step "Stopping the stack"
-  dc down --remove-orphans >/dev/null 2>&1 || true
   project=$(project_name)
   restore_volume() { # restore_volume NAME TARFILE
     local name=$1 file=$2 vol

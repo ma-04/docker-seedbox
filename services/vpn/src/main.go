@@ -423,7 +423,9 @@ func (s *Server) handler() http.Handler {
 		}
 		if err := s.connect(in.Name, cfg); err != nil {
 			code, msg := publicError(err)
-			logf("connect %q failed (%d: %s)", in.Name, code, msg)
+			// The log gets the real cause (ip/nft output; wgSetConf already reduced wg failures to a generic error);
+			// the HTTP body only the public message.
+			logf("connect %q failed (%d: %s): %v", in.Name, code, msg, err)
 			fail(w, code, msg)
 			return
 		}

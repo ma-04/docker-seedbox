@@ -182,7 +182,7 @@ POST /mode        { mode: "off" | "required" }
 ```
 
 `/connect`, `/disconnect` and `/mode` return the new status. `/connect` is refused with 409 while the mode is `off` (no tunnel is wanted then, and a connect racing
-an admin's switch to off must not win). Error bodies carry fixed messages only: output of `wg`/`ip`/`nft`, which can echo configuration, stays out of them and out of the logs.
+an admin's switch to off must not win). Error bodies carry fixed messages only: command output never reaches an HTTP body, and `wg`'s output, which can echo configuration, stays out of the logs too (`ip`/`nft` failures are logged in full).
 `/mode off` also tears the tunnel down;
 `/mode` with the current mode changes nothing. If swapping the routes to a new tunnel fails midway, the
 routes already moved are restored so the old tunnel keeps working.

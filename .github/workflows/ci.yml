@@ -131,3 +131,4 @@ jobs:
           path: e2e/.out
           retention-days: 7
           if-no-files-found: ignore
+          include-hidden-files: true   # e2e/.out is a hidden directory: without this nothing was uploaded

@@ -332,7 +332,7 @@ POST /mode        { mode: "off" | "required" }
 
 `/connect` is refused with **409** while the mode is `off` (checked under the same lock as `/mode`, before anything is touched), so a worker that raced an admin's
 switch to off cannot bring a tunnel up; the worker only connects in `required` mode, the admin "connect" action has to be handled as a 409. Keys must match
-`^[A-Za-z0-9+/]{43}=$`; command output (`wg`, `ip`, `nft`) is never put into HTTP bodies (400/409/502 carry fixed messages, other failures "internal error") or logs.
+`^[A-Za-z0-9+/]{43}=$`; command output is never put into HTTP bodies (400/409/502 carry fixed messages, other failures "internal error"); `wg`'s output, which can echo configuration, is also kept out of the logs (generic category only), while `ip`/`nft` failures are logged in full for the operator.
 `/connect` takes raw wg-quick text, rejects `PreUp/PostUp/PreDown/PostDown/SaveConfig` (400),
 executes nothing from it, strips IPv6 `Address`/`DNS`/`AllowedIPs` (`::/0`), waits for a handshake
 (`502` if none; the previous tunnel is kept) and is make-before-break: the old tunnel carries

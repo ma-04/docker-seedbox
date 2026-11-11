@@ -1,10 +1,11 @@
 # Third-party licenses
 
 docker-seedbox is AGPL-3.0-only (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). The container images it publishes
-contain the third-party software below. Each keeps its own license; the full license texts are inside the images
-(for Alpine and Debian packages under `/usr/share/licenses` or `/usr/share/doc/<package>/copyright`) and at the
-source links. Package-level detail for every image is in its SBOM, which the release workflow attaches to the image
-(`docker buildx imagetools inspect ghcr.io/<owner>/docker-seedbox-<name>:<tag> --format '{{ json .SBOM }}'`).
+contain the third-party software below. Each keeps its own license; the license texts are at the source links. Debian
+packages (the api image) ship theirs as `/usr/share/doc/<package>/copyright` inside the image; for Alpine packages the
+license identifier is in the package metadata (`apk info -a <package>` inside the image) and the text in the package's
+source. Package-level detail for every image, with licenses, is in its SBOM, which the release workflow attaches to the
+image (`docker buildx imagetools inspect ghcr.io/<owner>/docker-seedbox-<name>:<tag> --format '{{ json .SBOM }}'`).
 
 "Source" below is where the corresponding source of the exact version can be obtained. For distribution packages
 that is the distribution's source package (`apk fetch -s <pkg>` on Alpine, `apt-get source <pkg>` on Debian).
