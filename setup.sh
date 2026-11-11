@@ -44,10 +44,12 @@ Commands:
   doctor              diagnose DNS, containers, the WireGuard kernel module, disk space, APP_SECRET and version
 
 Install options (each also readable from the environment as SEEDBOX_<NAME>, e.g. SEEDBOX_DOMAIN):
-  --domain DOMAIN        app host, e.g. seedbox.example.com (auth./files. subdomains are derived)
-  --auth-host HOST       override the login host      (default auth.<domain>)
-  --files-host HOST      override the downloads host  (default files.<domain>)
-  --cookie-domain DOMAIN parent domain for the login cookie (default: the app domain)
+  --domain DOMAIN        the one hostname, e.g. seedbox.example.com: app, login page (/auth/) and downloads (/dl/)
+  --files-host HOST      serve downloads from this separate host instead of <domain>/dl/ (isolates downloaded
+                         files from the app's origin; see SECURITY.md). Asked on an interactive first install.
+  --auth-host HOST       serve the login portal from this separate host instead of <domain>/auth/
+  --single-domain        move an existing install with separate login/download hosts back to the one domain
+  --cookie-domain DOMAIN domain of the login cookie (default: <domain>; with --auth-host, a parent of both hosts)
   --admin-user NAME      first admin login            (default admin; letters, digits . _ -)
   --admin-password PW    its password                 (default: generated and printed once)
   --admin-email MAIL     its e-mail address
@@ -77,7 +79,7 @@ EOF
 # --- argument parsing ------------------------------------------------------------------------
 CMD=install
 DOMAIN=${SEEDBOX_DOMAIN:-}; AUTH_HOST_IN=${SEEDBOX_AUTH_HOST:-}; FILES_HOST_IN=${SEEDBOX_FILES_HOST:-}
-COOKIE_IN=${SEEDBOX_COOKIE_DOMAIN:-}
+COOKIE_IN=${SEEDBOX_COOKIE_DOMAIN:-}; SINGLE_DOMAIN=${SEEDBOX_SINGLE_DOMAIN:-0}
 ADMIN_USER=${SEEDBOX_ADMIN_USER:-}; ADMIN_PASSWORD=${SEEDBOX_ADMIN_PASSWORD:-}; ADMIN_EMAIL=${SEEDBOX_ADMIN_EMAIL:-}
 PROXY=${SEEDBOX_PROXY:-}; PROXY_NETWORK_IN=${SEEDBOX_PROXY_NETWORK:-}; ACME_EMAIL_IN=${SEEDBOX_ACME_EMAIL:-}
 AUTH_MODE_IN=${SEEDBOX_AUTH_MODE:-}; VERSION_IN=${SEEDBOX_VERSION_OVERRIDE:-}
@@ -94,6 +96,7 @@ while [ $# -gt 0 ]; do
     --auth-host) AUTH_HOST_IN=${2:?}; shift 2 ;;
     --files-host) FILES_HOST_IN=${2:?}; shift 2 ;;
     --cookie-domain) COOKIE_IN=${2:?}; shift 2 ;;
+    --single-domain) SINGLE_DOMAIN=1; shift ;;
     --admin-user) ADMIN_USER=${2:?}; shift 2 ;;
     --admin-password) ADMIN_PASSWORD=${2:?}; shift 2 ;;
     --admin-email) ADMIN_EMAIL=${2:?}; shift 2 ;;
@@ -155,6 +158,7 @@ reject_ctl "--version" "$VERSION_IN"; reject_ctl "--out" "$BACKUP_OUT"; reject_c
 valid_group "$USER_GROUP" || die "Invalid group name '$USER_GROUP' (lowercase letters, digits, '_' or '-')."
 [ -z "$VERSION_IN" ] || valid_version "$VERSION_IN" || die "Invalid --version '$VERSION_IN' (use X.Y.Z, latest, edge or local)."
 case "$AUTH_MODE_IN" in ""|authelia|external) ;; *) die "--auth-mode must be authelia or external." ;; esac
+case "$SINGLE_DOMAIN" in 0|1) ;; *) die "SEEDBOX_SINGLE_DOMAIN must be 0 or 1." ;; esac
 
 # --- small utilities ---------------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -495,29 +499,65 @@ or continue with --accept-new-secret if you want a new secret and will re-enter 
   fi
   chmod 600 "$ENV_FILE"
 
+  # Hosts layout. Default: ONE domain - the app, the login portal (APP_HOST/auth/) and local downloads (APP_HOST/dl/).
+  # Optional, independently: a separate login host (AUTH_HOST) and/or a separate download host (FILES_HOST). Empty
+  # AUTH_HOST / FILES_HOST in .env mean "on APP_HOST". Re-runs keep whatever layout .env already has (an existing
+  # three-host install stays exactly as it is) unless flags change it.
   local cur_app cur_auth cur_files cur_cookie
   cur_app=$(env_get APP_HOST); cur_auth=$(env_get AUTH_HOST); cur_files=$(env_get FILES_HOST); cur_cookie=$(env_get COOKIE_DOMAIN)
   if [ "$fresh" = 1 ]; then cur_app=""; cur_auth=""; cur_files=""; cur_cookie=""; fi   # .env.example values are placeholders
+  cur_app=$(lower "$cur_app"); cur_auth=$(lower "$cur_auth"); cur_files=$(lower "$cur_files"); cur_cookie=$(lower "$cur_cookie")
+  [ "$cur_auth" != "$cur_app" ] || cur_auth=""     # equal to APP_HOST = the single-domain layout
+  [ "$cur_files" != "$cur_app" ] || cur_files=""
 
   if [ -z "$DOMAIN" ] && [ -n "$cur_app" ]; then DOMAIN=$cur_app; fi
-  ask DOMAIN "App domain (e.g. seedbox.example.com)" ""
+  ask DOMAIN "Domain (e.g. seedbox.example.com)" ""
   reject_ctl "domain" "$DOMAIN"
   DOMAIN=$(lower "$DOMAIN")
-  [ -n "$DOMAIN" ] || die "An app domain is required: ./setup.sh --domain seedbox.example.com"
+  [ -n "$DOMAIN" ] || die "A domain is required: ./setup.sh --domain seedbox.example.com"
   valid_host "$DOMAIN" || die "'$DOMAIN' is not a valid fully-qualified domain name (hostnames only, no https://)."
-  # Changing the domain on a re-run re-derives the other hosts unless they are given explicitly.
-  if [ -n "$cur_app" ] && [ "$cur_app" != "$DOMAIN" ]; then cur_auth=""; cur_files=""; cur_cookie=""; fi
-  local app_host=$DOMAIN
-  local auth_host=${AUTH_HOST_IN:-${cur_auth:-auth.$DOMAIN}}
-  local files_host=${FILES_HOST_IN:-${cur_files:-files.$DOMAIN}}
-  local cookie_domain=${COOKIE_IN:-${cur_cookie:-$DOMAIN}}
-  auth_host=$(lower "$auth_host"); files_host=$(lower "$files_host"); cookie_domain=$(lower "$cookie_domain")
+  # Changing the domain on a re-run keeps the layout: separate hosts are re-derived from the new domain.
+  if [ -n "$cur_app" ] && [ "$cur_app" != "$DOMAIN" ]; then
+    [ -z "$cur_auth" ] || cur_auth="auth.$DOMAIN"
+    [ -z "$cur_files" ] || cur_files="files.$DOMAIN"
+    cur_cookie=""
+  fi
+  local app_host=$DOMAIN auth_host files_host
+  if [ "$SINGLE_DOMAIN" = 1 ]; then
+    { [ -z "$AUTH_HOST_IN" ] && [ -z "$FILES_HOST_IN" ]; } || die "--single-domain cannot be combined with --auth-host / --files-host."
+    cur_auth=""; cur_files=""; cur_cookie=""
+  fi
+  auth_host=$(lower "${AUTH_HOST_IN:-$cur_auth}")
+  files_host=$(lower "${FILES_HOST_IN:-$cur_files}")
+  if [ "$fresh" = 1 ] && [ "$INTERACTIVE" = 1 ] && [ "$SINGLE_DOMAIN" = 0 ]; then
+    say "Everything is served from $DOMAIN: the app, the login page ($DOMAIN/auth/) and downloads ($DOMAIN/dl/)."
+    if [ -z "$FILES_HOST_IN" ] && confirm "Serve downloads from a separate domain? (isolates downloaded files from the app's origin; one more DNS record)" n; then
+      FILES_HOST_IN=""
+      ask FILES_HOST_IN "Download hostname" "files.$DOMAIN"
+      files_host=$(lower "$FILES_HOST_IN")
+    fi
+    if [ -z "$AUTH_HOST_IN" ] && confirm "Serve the login page from a separate hostname instead of $DOMAIN/auth/? (rarely needed; one more DNS record)" n; then
+      AUTH_HOST_IN=""
+      ask AUTH_HOST_IN "Login hostname" "auth.$DOMAIN"
+      auth_host=$(lower "$AUTH_HOST_IN")
+    fi
+  fi
+  reject_ctl "login host" "$auth_host"; reject_ctl "download host" "$files_host"
+  [ "$auth_host" != "$app_host" ] || auth_host=""
+  [ "$files_host" != "$app_host" ] || files_host=""
   local h
-  for h in "$auth_host" "$files_host" "$cookie_domain"; do valid_host "$h" || die "'$h' is not a valid hostname."; done
+  for h in "$auth_host" "$files_host"; do [ -z "$h" ] || valid_host "$h" || die "'$h' is not a valid hostname."; done
+  if [ -n "$auth_host" ] && [ "$auth_host" = "$files_host" ]; then die "The login host and the download host must be different hostnames."; fi
+  # Authelia's session cookie: by default scoped to APP_HOST itself (with the portal on APP_HOST nothing else needs
+  # it); a separate login host needs a parent domain of both (--cookie-domain).
+  local cookie_domain
+  cookie_domain=$(lower "${COOKIE_IN:-${cur_cookie:-$DOMAIN}}")
+  reject_ctl "cookie domain" "$cookie_domain"
+  valid_host "$cookie_domain" || die "'$cookie_domain' is not a valid hostname."
   case "$app_host" in *".$cookie_domain"|"$cookie_domain") ;; *) die "APP_HOST ($app_host) must be inside the cookie domain ($cookie_domain). Use --cookie-domain." ;; esac
-  case "$auth_host" in *".$cookie_domain"|"$cookie_domain") ;; *) die "AUTH_HOST ($auth_host) must be inside the cookie domain ($cookie_domain). Use --cookie-domain." ;; esac
-  [ "$app_host" != "$auth_host" ] && [ "$app_host" != "$files_host" ] && [ "$auth_host" != "$files_host" ] \
-    || die "APP_HOST, AUTH_HOST and FILES_HOST must be three different hostnames."
+  if [ -n "$auth_host" ]; then
+    case "$auth_host" in *".$cookie_domain"|"$cookie_domain") ;; *) die "AUTH_HOST ($auth_host) must be inside the cookie domain ($cookie_domain). Use --cookie-domain." ;; esac
+  fi
 
   # ---- proxy mode ---------------------------------------------------------------------------------
   local cur_files_compose detected det_name det_net
@@ -575,8 +615,8 @@ or continue with --accept-new-secret if you want a new secret and will re-enter 
 
   # ---- write .env -------------------------------------------------------------------------------------
   env_put APP_HOST "$app_host"
-  env_put AUTH_HOST "$auth_host"
-  env_put FILES_HOST "$files_host"
+  env_put AUTH_HOST "$auth_host"      # empty = login portal at APP_HOST/auth/
+  env_put FILES_HOST "$files_host"    # empty = downloads at APP_HOST/dl/
   env_put COOKIE_DOMAIN "$cookie_domain"
   env_put COMPOSE_FILE "compose.yaml:compose.proxy-$PROXY.yaml"
   [ -z "$proxy_network" ] || env_put PROXY_NETWORK "$proxy_network"
@@ -675,23 +715,39 @@ ensure_images() { # pull the pinned version, or build from this clone
   fi
 }
 
+sep_host() { # sep_host KEY : AUTH_HOST / FILES_HOST from .env if it is a separate host (empty or = APP_HOST -> nothing)
+  local v app
+  v=$(lower "$(env_get "$1")"); app=$(lower "$(env_get APP_HOST)")
+  [ "$v" = "$app" ] || printf '%s' "$v"
+}
+hosts_in_use() { # the public hostnames this install answers on, one per line: APP_HOST, then any separate ones
+  local h
+  lower "$(env_get APP_HOST)"; printf '\n'
+  for h in "$(sep_host AUTH_HOST)" "$(sep_host FILES_HOST)"; do [ -z "$h" ] || printf '%s\n' "$h"; done
+}
+
 print_summary() {
-  local gen_pw=${1:-} proxy scheme app auth files
-  app=$(env_get APP_HOST); auth=$(env_get AUTH_HOST); files=$(env_get FILES_HOST)
+  local gen_pw=${1:-} proxy scheme app auth files n
+  app=$(lower "$(env_get APP_HOST)"); auth=$(sep_host AUTH_HOST); files=$(sep_host FILES_HOST)
   scheme=$(env_get PUBLIC_SCHEME); scheme=${scheme:-https}
   case "$(env_get COMPOSE_FILE)" in *proxy-bundled*) proxy=bundled ;; *proxy-external*) proxy=external ;; *) proxy=none ;; esac
   step "Done"
-  say "Open:   ${B}$scheme://$app${N}"
-  say "Login:  $scheme://$auth  (you are redirected there automatically)"
+  say "Open:       ${B}$scheme://$app${N}"
+  if [ "$(env_get AUTH_MODE)" = authelia ]; then
+    say "Login:      $scheme://${auth:-$app/auth}/  (you are redirected there automatically)"
+  fi
+  say "Downloads:  $scheme://${files:-$app}/dl/...  (signed links shown in the app)"
   [ -z "$gen_pw" ] || say "Admin password (shown once, change it later): ${B}$gen_pw${N}"
   say ""
-  say "DNS records you need (all pointing at this server's public IP):"
-  say "    $app     A/AAAA  <server-ip>"
-  say "    $auth    A/AAAA  <server-ip>"
-  say "    $files   A/AAAA  <server-ip>"
+  n=$(hosts_in_use | wc -l | tr -d ' ')
+  if [ "$n" = 1 ]; then say "DNS record you need (pointing at this server's public IP):"
+  else say "DNS records you need (all pointing at this server's public IP):"; fi
+  local h
+  while IFS= read -r h; do say "    $h    A/AAAA  <server-ip>"; done < <(hosts_in_use)
   case "$proxy" in
     bundled) say "Ports 80 and 443 must be reachable from the internet (Let's Encrypt validates over port 80)." ;;
-    external) say "Your reverse proxy must forward all three hosts to the gateway (nginx-proxy does this automatically)." ;;
+    external) if [ "$n" = 1 ]; then say "Your reverse proxy must forward $app to the gateway (nginx-proxy does this automatically)."
+              else say "Your reverse proxy must forward all $n hosts to the gateway (nginx-proxy does this automatically)."; fi ;;
     none) say "Gateway is published on $(env_get HTTP_BIND):$(env_get HTTP_PORT). Terminate TLS in front of it and send"
           say "X-Forwarded-Proto: https - Authelia's login cookie only works over https (see docs/deployment.md)." ;;
   esac
@@ -949,12 +1005,20 @@ cmd_doctor() {
     bad "APP_SECRET in deploy/.env is NOT the one the database was created with: stored credentials are unreadable. Restore the original .env (or ./setup.sh restore FILE)"
   fi
 
+  say ""; say "Hosts"
+  local h ips app_l sep_a sep_f
+  app_l=$(lower "$(env_get APP_HOST)"); sep_a=$(sep_host AUTH_HOST); sep_f=$(sep_host FILES_HOST)
+  if [ -z "$sep_a" ] && [ -z "$sep_f" ]; then ok "single domain: $app_l (login $app_l/auth/, downloads $app_l/dl/)"
+  else ok "app $app_l, login ${sep_a:-$app_l/auth/}, downloads ${sep_f:-$app_l/dl/}"; fi
+  for h in AUTH_HOST FILES_HOST; do
+    if [ -n "$(env_get "$h")" ] && [ -z "$(sep_host "$h")" ]; then meh "$h equals APP_HOST: leave it empty instead (same layout; avoids duplicate names in VIRTUAL_HOST/LETSENCRYPT_HOST)"; fi
+  done
+
   say ""; say "DNS"
-  local h ips
-  for h in "$(env_get APP_HOST)" "$(env_get AUTH_HOST)" "$(env_get FILES_HOST)"; do
+  while IFS= read -r h; do
     ips=$(resolve_host "$h" || true)
     if [ -n "$ips" ]; then ok "$h -> $ips"; else bad "$h does not resolve (add an A/AAAA record)"; fi
-  done
+  done < <(hosts_in_use)
 
   say ""; say "Containers"
   if dc ps -a >/dev/null 2>&1; then
@@ -974,10 +1038,14 @@ cmd_doctor() {
   if have curl; then
     local scheme code
     scheme=$(env_get PUBLIC_SCHEME); scheme=${scheme:-https}
-    for h in "$(env_get APP_HOST)" "$(env_get AUTH_HOST)" "$(env_get FILES_HOST)"; do
+    while IFS= read -r h; do
       code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$scheme://$h/healthz" 2>/dev/null || true)
       if [ "$code" = 200 ]; then ok "$scheme://$h/healthz -> 200"; else bad "$scheme://$h/healthz -> ${code:-no response} (DNS, firewall, certificate or proxy mapping?)"; fi
-    done
+    done < <(hosts_in_use)
+    if [ "$(env_get AUTH_MODE)" = authelia ] && [ -z "$(sep_host AUTH_HOST)" ]; then
+      code=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "$scheme://$app_l/auth/api/health" 2>/dev/null || true)
+      if [ "$code" = 200 ]; then ok "$scheme://$app_l/auth/api/health -> 200 (login portal)"; else bad "$scheme://$app_l/auth/api/health -> ${code:-no response} (is the authelia container up?)"; fi
+    fi
   else
     meh "curl not installed; skipping HTTPS checks"
   fi
