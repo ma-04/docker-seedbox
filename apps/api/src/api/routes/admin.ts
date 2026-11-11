@@ -104,7 +104,7 @@ export function registerAdmin(app: FastifyInstance, ctx: Ctx): void {
       await connectVpn(db, config, vpn, b.configId);
     } catch (e) {
       if (String((e as Error).message).startsWith('No enabled VPN config')) throw conflict('No enabled VPN config available');
-      if (isVpnConflict(e)) throw conflict('The VPN mode is off; switch it to required first');
+      if (isVpnConflict(e)) throw conflict('Set VPN mode to required first');
       throw new ApiError(502, 'internal', 'VPN connection failed; see the config\'s last error');
     } finally { releaseVpnLock(db, token); }
     const active = getSetting(db, 'vpn.activeConfigId');

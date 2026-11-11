@@ -67,7 +67,7 @@ describe('admin vpn', () => {
     await off.call(root, 'POST', '/api/admin/vpn/configs', { name: 'one', config: WG });
     const r = await off.call(root, 'POST', '/api/admin/vpn/rotate', {});
     expect(r.statusCode).toBe(409);
-    expect(r.json().error.message).toMatch(/mode is off/);
+    expect(r.json().error.message).toBe('Set VPN mode to required first');
     expect(off.db.prepare("SELECT 1 FROM settings WHERE key = 'vpn.lock'").get()).toBeUndefined();
   });
 
