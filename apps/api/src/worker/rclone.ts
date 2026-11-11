@@ -22,7 +22,7 @@ export interface RcloneCommand {
  * it becomes rclone's `root_folder_id` and the target is `DST:`.
  * `opts.egress`: proxy environment (HTTPS_PROXY/HTTP_PROXY/NO_PROXY=) for user-owned destinations; see worker/egress-proxy.ts.
  */
-export function buildRcloneCommand(config: DestinationConfig, src: string, remotePath: string, opts: { gdriveFolderId?: string; egress?: { env: NodeJS.ProcessEnv; secrets: string[] } } = {}): RcloneCommand {
+export function buildRcloneCommand(config: DestinationConfig, src: string, remotePath: string, opts: { gdriveFolderId?: string; egress?: { env: NodeJS.ProcessEnv; secrets: string[] }; filesFrom?: string } = {}): RcloneCommand {
   const env: NodeJS.ProcessEnv = {};
   const secrets: string[] = [];
   const set = (k: string, v: string, secret = false) => {
@@ -53,6 +53,8 @@ export function buildRcloneCommand(config: DestinationConfig, src: string, remot
   } else {
     throw new Error(`rclone is not used for ${config.type} destinations`);
   }
+  // Exactly this vetted list of relative paths (raw: no comment syntax), never rclone's own directory walk.
+  if (opts.filesFrom) extra.push('--files-from-raw', opts.filesFrom);
   if (opts.egress) { Object.assign(env, opts.egress.env); secrets.push(...opts.egress.secrets); }
   return { args: rcloneArgs(src, target, extra), env, secrets: secrets.filter(Boolean) };
 }

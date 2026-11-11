@@ -131,8 +131,8 @@ check "off: the public (TEST-NET) 'internet' is reachable from uid 1000 while ev
 section "1a2. qbittorrent container hardening (read-only rootfs, reduced capabilities, no root write access to /config)"
 QC=$($DC ps -q qbittorrent)
 check "qbittorrent: root filesystem is read-only" test "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$QC")" = true
-check "qbittorrent: capabilities added = CHOWN SETUID SETGID KILL only (no DAC_OVERRIDE, no FOWNER)" test "$(docker inspect -f '{{range .HostConfig.CapAdd}}{{.}} {{end}}' "$QC" | tr ' ' '\n' | sort | tr '\n' ' ')" = "CHOWN KILL SETGID SETUID "
-check "qbittorrent: capabilities dropped = ALL" test "$(docker inspect -f '{{range .HostConfig.CapDrop}}{{.}} {{end}}' "$QC" | tr -d ' ')" = ALL
+check "qbittorrent: capabilities added = CHOWN SETUID SETGID KILL only (no DAC_OVERRIDE, no FOWNER)" test "$(docker inspect -f '{{range .HostConfig.CapAdd}}{{.}} {{end}}' "$QC" | sed 's/CAP_//g' | tr ' ' '\n' | sort | tr '\n' ' ')" = "CHOWN KILL SETGID SETUID "
+check "qbittorrent: capabilities dropped = ALL" test "$(docker inspect -f '{{range .HostConfig.CapDrop}}{{.}} {{end}}' "$QC" | sed 's/CAP_//g' | tr -d ' ')" = ALL
 checkno "qbittorrent: /entrypoint.sh is not writable (even as root)" $DC exec -T -u 0 qbittorrent sh -c 'echo pwned >> /entrypoint.sh'
 checkno "qbittorrent: /seed-config.sh is not writable (even as root)" $DC exec -T -u 0 qbittorrent sh -c 'echo pwned >> /seed-config.sh'
 checkno "qbittorrent: /conf-edit.sh is not writable (even as root)" $DC exec -T -u 0 qbittorrent sh -c 'echo pwned >> /conf-edit.sh'
@@ -140,8 +140,10 @@ checkno "qbittorrent: nothing new can be created in / (even as root)" $DC exec -
 checkno "qbittorrent: uid 1000 cannot replace /entrypoint.sh" $DC exec -T -u 1000 qbittorrent sh -c 'echo pwned > /entrypoint.sh'
 check "qbittorrent: /tmp (tmpfs) is writable for uid 1000" $DC exec -T -u 1000 qbittorrent sh -c 'touch /tmp/x && rm /tmp/x'
 checkno "qbittorrent: root WITHOUT DAC_OVERRIDE cannot write into uid 1000's config" $DC exec -T -u 0 qbittorrent sh -c 'echo x >> /config/qBittorrent/config/qBittorrent.conf'
-check "qbittorrent: nothing in /config is owned by root (all written by uid 1000)" test -z "$($DC exec -T qbittorrent find /config ! -user qbtUser 2>/dev/null)"
-check "qbittorrent: SSRF mitigation re-asserted in the config" $DC exec -T qbittorrent grep -q 'Session.SSRFMitigation=true' /config/qBittorrent/config/qBittorrent.conf
+check "qbittorrent: the config is NOT readable by root without DAC_OVERRIDE (so root cannot be tricked into reading/writing through it)" bash -c "! $DC exec -T -u 0 qbittorrent cat /config/qBittorrent/config/qBittorrent.conf"
+check "qbittorrent: the engine reports ssrf_mitigation=true" bash -c "$DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/preferences | jq -e .ssrf_mitigation"
+check "qbittorrent: nothing in /config is owned by root (all written by uid 1000)" test -z "$($DC exec -T -u 1000 qbittorrent find /config ! -user qbtUser 2>&1)"
+check "qbittorrent: SSRF mitigation re-asserted in the config" $DC exec -T -u 1000 qbittorrent grep -q 'Session.SSRFMitigation=true' /config/qBittorrent/config/qBittorrent.conf
 EP_SUM() { $DC exec -T -u 0 qbittorrent sh -c 'sha256sum /entrypoint.sh /seed-config.sh /conf-edit.sh | cut -d" " -f1 | tr "\n" " "'; }
 SUM_BEFORE=$(EP_SUM)
 # The attack: as the qBittorrent user, plant symlinks in /config that an old, root-run entrypoint would write through.
@@ -151,7 +153,7 @@ for i in $(seq 1 40); do $DC exec -T lan-client curl -fsS -m 3 http://vpn:8080/a
 check "symlink attack: qbittorrent restarted and the WebUI is healthy again" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
 check "symlink attack: /entrypoint.sh, /seed-config.sh, /conf-edit.sh are byte-identical after the restart" test "$(EP_SUM)" = "$SUM_BEFORE"
 check "symlink attack: the plant did not turn the entrypoint into a shell script of the attacker's" sh_ "! $DC exec -T qbittorrent grep -q 'pwned' /entrypoint.sh"
-check "qbittorrent: no root-owned files appeared in /config" test -z "$($DC exec -T qbittorrent find /config ! -user qbtUser 2>/dev/null)"
+check "qbittorrent: no root-owned files appeared in /config" test -z "$($DC exec -T -u 1000 qbittorrent find /config ! -user qbtUser 2>&1)"
 
 section "1b. /connect is refused (409) in off mode"
 OUT=$(connect A A); echo "$OUT" | head -1

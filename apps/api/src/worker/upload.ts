@@ -1,8 +1,8 @@
 /** Deliver a downloaded torrent's files to a job's destination (rclone for gdrive/s3, filesystem for local). */
 import type { Logger } from 'pino';
-import { createReadStream, createWriteStream } from 'node:fs';
-import { copyFile, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { createWriteStream } from 'node:fs';
+import { mkdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { Config } from '../lib/config.js';
 import type { Db } from '../lib/db.js';
@@ -11,6 +11,7 @@ import * as gdriveLib from '../lib/gdrive.js';
 import { getSetting } from '../lib/settings.js';
 import { now, type DestinationConfig, type GDriveConfig, type JobRow, type TorrentRow, type UserRow } from '../lib/types.js';
 import type { Downloader } from '../downloaders/types.js';
+import { openVetted, realInside, realInsideLoose, vetTree, type SourceFile, type VettedTree } from './safefs.js';
 import { assertPublicEndpoint } from '../lib/netguard.js';
 import type { EgressProxy } from './egress-proxy.js';
 import { buildRcloneCommand, redact, runRclone, RcloneAborted, RcloneError, S3_AUTH_ERROR, s3ProbeCommand, type RcloneCommand, type RcloneProc, type SpawnFn } from './rclone.js';
@@ -51,43 +52,32 @@ export interface UploadDeps {
   onProc?: (jobId: number, proc: RcloneProc) => void;
 }
 
-export interface SourceFile { path: string; size: number }
-
-/** Recursively list files under `root` (or the single file itself) as '/'-separated paths relative to it. */
-export async function walkSource(src: string): Promise<{ isDir: boolean; files: SourceFile[] }> {
-  const st = await stat(src);
-  if (!st.isDirectory()) return { isDir: false, files: [{ path: basename(src), size: st.size }] };
-  const files: SourceFile[] = [];
-  const rec = async (dir: string): Promise<void> => {
-    for (const e of await readdir(dir, { withFileTypes: true })) {
-      const p = join(dir, e.name);
-      if (e.isDirectory()) await rec(p);
-      else if (e.isFile()) files.push({ path: relative(src, p).split(sep).join('/'), size: (await stat(p)).size });
-    }
-  };
-  await rec(src);
-  files.sort((a, b) => (a.path < b.path ? -1 : 1));
-  return { isDir: true, files };
-}
+export type { SourceFile };
 
 const exists = (p: string): Promise<boolean> => stat(p).then(() => true, () => false);
 
 /**
- * Where the torrent's content lives on disk. Every candidate must stay inside `incomplete/<infohash>` (a hostile
- * torrent name such as `../../library` must not make the worker upload or move something else); the library copy
- * recorded by an earlier local job that moved the data is the last resort.
+ * Where the torrent's content lives on disk, as a REAL path. Every candidate is resolved with realpath and must lie inside
+ * the real `incomplete/<infohash>` (a hostile torrent name such as `../../library`, or a symlink planted by a compromised
+ * qBittorrent, must not make the worker upload, copy or move something else); the library copy recorded by an earlier
+ * local job that moved the data is the last resort (also resolved).
  */
 async function resolveSource(deps: UploadDeps, torrent: TorrentRow): Promise<string> {
   const st = await deps.downloader.status(torrent.infohash).catch(() => null);
   const root = resolve(deps.config.downloadsDir, 'incomplete', torrent.infohash);
-  const inside = (p: string): boolean => { const r = resolve(p); return r === root || r.startsWith(root + sep); };
   const candidates = [
     st?.contentPath,
     join(torrent.save_path ?? root, torrent.name ?? ''),
-  ].filter((p): p is string => !!p && p !== '' && inside(p));
-  for (const c of candidates) if (await exists(c)) return c;
+  ].filter((p): p is string => !!p && p !== '');
+  for (const c of candidates) {
+    const r = await realInside(c, root);
+    if (r) return r;
+  }
   const lib = resolve(deps.config.downloadsDir, 'library');
-  if (torrent.library_path && resolve(torrent.library_path).startsWith(lib + sep) && (await exists(torrent.library_path))) return torrent.library_path;
+  if (torrent.library_path && resolve(torrent.library_path).startsWith(lib + sep)) {
+    const r = await realInsideLoose(torrent.library_path, lib);
+    if (r) return r;
+  }
   throw new Error('Downloaded files not found on disk');
 }
 
@@ -154,21 +144,28 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
       const prior = dest.config.type === 'local' && torrent.name
         ? resolve(deps.config.downloadsDir, 'library', fullRemotePath(dest.config, jobRemoteDir(dest.row, user, torrent.infohash, torrent.name)))
         : null;
-      if (!prior || !(await exists(prior))) throw e;
-      source = prior;
+      const priorReal = prior ? await realInsideLoose(prior, resolve(deps.config.downloadsDir, 'library')) : null;
+      if (!priorReal) throw e;
+      source = priorReal;
       delivered = true;
     }
     const remotePath = jobRemoteDir(dest.row, user, torrent.infohash, torrent.name ?? basename(source));
     const userOwned = dest.row.owner_user_id !== null;
-    const fromLibrary = !!torrent.library_path && resolve(source) === resolve(torrent.library_path);
+    const libReal = torrent.library_path ? await realpath(torrent.library_path).catch(() => null) : null;
+    const fromLibrary = libReal !== null && source === libReal;
     db.prepare('UPDATE jobs SET remote_path = ?, upload_progress = 0, upload_speed = 0, folder_url = NULL, error = NULL, updated_at = ? WHERE id = ?')
       .run(remotePath, now(), jobId);
 
-    const { files } = await walkSource(source);
+    // Only regular files and directories are ever delivered: symlinks, FIFOs, sockets, devices and hardlinked files planted
+    // in the content tree (by a compromised qBittorrent) are skipped, never followed.
+    const vet = await vetTree(source, { allowHardlinks: fromLibrary || delivered });
+    if (vet.skipped.length) log.warn({ jobId, skipped: vet.skipped.length }, 'skipped non-regular entries (symlinks, FIFOs, sockets, devices, hardlinks) in the torrent content');
+    const files = vet.files;
     let folderUrl: string | null = null;
+    let listFile: string | undefined;
 
     if (dest.config.type === 'local') {
-      if (!delivered) await uploadLocal(deps, job, torrent, source, fullRemotePath(dest.config, remotePath), signal, fromLibrary);
+      if (!delivered) await uploadLocal(deps, job, torrent, source, fullRemotePath(dest.config, remotePath), signal, fromLibrary, vet);
     } else {
       let gdrive: { userFolder: string | null; jobFolder: string } | undefined;
       if (dest.config.type === 's3') {
@@ -177,7 +174,15 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
         gdrive = await resolveGDriveFolders(deps, dest.config, dest.row.id, userOwned, remotePath, user);
       }
       const egress = userOwned && deps.egress ? await deps.egress.env() : undefined;
-      const cmd = buildRcloneCommand(dest.config, source, remotePath, { gdriveFolderId: gdrive?.jobFolder, egress });
+      // rclone gets exactly the vetted file list (never a directory walk of its own), so planted entries cannot be picked up.
+      if (vet.isDir) {
+        const names = files.map((f) => f.path).filter((n) => !/[\r\n]/.test(n));
+        const dir = stagingDir(deps.config.downloadsDir, jobId);
+        await mkdir(dir, { recursive: true });
+        listFile = join(dir, 'files.txt');
+        await writeFile(listFile, names.join('\n') + '\n', { mode: 0o600 });
+      }
+      const cmd = buildRcloneCommand(dest.config, source, remotePath, { gdriveFolderId: gdrive?.jobFolder, egress, filesFrom: listFile });
       secrets = cmd.secrets;
       cmdForProbe = cmd;
       if (dest.config.type === 's3') s3Config = dest.config;
@@ -217,28 +222,33 @@ export async function runUpload(deps: UploadDeps, jobId: number, signal: AbortSi
     }
     log.warn({ jobId, err: msg }, 'upload failed');
     failJob(deps, jobId, msg);
+  } finally {
+    // the file list of a remote upload lives in the job's staging dir (local jobs use it for the copy and clean it themselves)
+    await rm(join(stagingDir(deps.config.downloadsDir, jobId), 'files.txt'), { force: true }).catch(() => undefined);
   }
 }
 
-async function uploadLocal(deps: UploadDeps, job: JobRow, torrent: TorrentRow, source: string, relTarget: string, signal: AbortSignal, fromLibrary: boolean): Promise<void> {
+async function uploadLocal(deps: UploadDeps, job: JobRow, torrent: TorrentRow, source: string, relTarget: string, signal: AbortSignal, fromLibrary: boolean, vet: VettedTree): Promise<void> {
   const { db, config } = deps;
   const root = resolve(config.downloadsDir, 'library');
   const target = resolve(root, relTarget);
   if (target === root || !target.startsWith(root + sep)) throw new Error('Refusing to write outside the library folder');
-  const isDir = (await stat(source)).isDirectory();
+  const isDir = vet.isDir;
   const dstPath = isDir ? target : join(target, basename(source)); // single files land inside <target>/
   if (signal.aborted) throw new RcloneAborted();
   // The data already sits exactly where this job wants it (crash after the rename, or the same user re-added the
   // same torrent): copying a file onto itself would truncate it.
-  if (resolve(source) === dstPath) return;
+  if (resolve(source) === dstPath || (await sameFile(source, dstPath))) return;
 
   const targetExisted = await exists(target);
   const existed = await exists(dstPath);
   await mkdir(isDir ? dirname(target) : target, { recursive: true });
+  const staging = stagingDir(config.downloadsDir, job.id);
 
   // Move (rename) only when this job is the last one that needs the data and nothing seeds it. The decision is one
   // conditional UPDATE that also records where the data went, so a job added meanwhile copies from there instead of
-  // finding the data gone.
+  // finding the data gone. The content is first renamed into the worker-only staging dir (qBittorrent cannot see it, so
+  // nothing can be planted any more), re-vetted there and only then published into the library.
   if (!fromLibrary && !existed && getSetting(db, 'seeding.ratio') <= 0) {
     let release!: () => void;
     moving.set(torrent.id, new Promise<void>((r) => { release = r; }));
@@ -249,7 +259,25 @@ async function uploadLocal(deps: UploadDeps, job: JobRow, torrent: TorrentRow, s
            AND NOT EXISTS (SELECT 1 FROM jobs WHERE torrent_id = ? AND id != ? AND state IN ('queued','downloading','uploading'))`,
       ).run(dstPath, torrent.id, torrent.id, job.id).changes === 1;
       if (claimed) {
-        try { await renameInto(source, dstPath); moved = true; return; } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e; }
+        await rm(staging, { recursive: true, force: true });
+        await mkdir(staging, { recursive: true });
+        const parked = join(staging, 'move');
+        let parkedOk = false;
+        try { await rename(source, parked); parkedOk = true; } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e; }
+        if (parkedOk) {
+          try {
+            const again = await vetTree(parked); // regular files and directories only: drop whatever was planted meanwhile
+            for (const rel of again.skipped) await rm(join(parked, ...rel.split('/')), { recursive: true, force: true });
+            await renameInto(parked, dstPath);
+            moved = true;
+            return;
+          } catch (e) {
+            await rename(parked, source).catch(() => undefined); // put the data back where qBittorrent expects it
+            throw e;
+          } finally {
+            await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+          }
+        }
       }
     } finally {
       if (!moved) db.prepare('UPDATE torrents SET library_path = NULL WHERE id = ? AND library_path = ?').run(torrent.id, dstPath);
@@ -260,12 +288,11 @@ async function uploadLocal(deps: UploadDeps, job: JobRow, torrent: TorrentRow, s
 
   // Copy into a staging dir on the same volume and rename into place only when everything is written, so a crash or
   // cancel can never leave a partial target that crash recovery would mistake for a delivered job.
-  const staging = stagingDir(config.downloadsDir, job.id);
   await rm(staging, { recursive: true, force: true });
   await mkdir(staging, { recursive: true });
   const staged = join(staging, 'item');
   try {
-    await copyTree(source, staged, signal);
+    await copyVetted(source, staged, vet, signal, fromLibrary);
     if (signal.aborted) throw new RcloneAborted();
     if (existed) { // an earlier copy by the same user: swap it out, never merge
       await rename(dstPath, join(staging, 'old'));
@@ -278,6 +305,11 @@ async function uploadLocal(deps: UploadDeps, job: JobRow, torrent: TorrentRow, s
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/** Both paths exist and are the same real file/directory. */
+async function sameFile(a: string, b: string): Promise<boolean> {
+  try { return (await realpath(a)) === (await realpath(b)); } catch { return false; }
 }
 
 /**
@@ -294,24 +326,29 @@ async function renameInto(from: string, to: string): Promise<void> {
 
 export const stagingDir = (downloadsDir: string, jobId: number): string => resolve(downloadsDir, 'library', '.staging', String(jobId));
 
-/** Recursive copy that stops promptly when `signal` aborts (also in the middle of a large file). */
-async function copyTree(src: string, dst: string, signal: AbortSignal): Promise<void> {
+/**
+ * Copy exactly the vetted entries of `src` (a real path) to `dst`. Every file is opened with O_NOFOLLOW and checked on
+ * the descriptor (regular, not hardlinked, real path as vetted), so a link swapped in after vetting is refused. Stops
+ * promptly when `signal` aborts (also in the middle of a large file).
+ */
+async function copyVetted(src: string, dst: string, vet: VettedTree, signal: AbortSignal, allowHardlinks: boolean): Promise<void> {
   if (signal.aborted) throw new RcloneAborted();
-  const st = await stat(src);
-  if (st.isDirectory()) {
-    await mkdir(dst, { recursive: true });
-    for (const e of await readdir(src, { withFileTypes: true })) {
-      if (e.isDirectory() || e.isFile()) await copyTree(join(src, e.name), join(dst, e.name), signal);
-    }
-    return;
-  }
-  try {
-    if (st.size < 1024 * 1024) await copyFile(src, dst);
-    else await pipeline(createReadStream(src), createWriteStream(dst), { signal });
-  } catch (e) {
+  const one = async (from: string, to: string): Promise<void> => {
     if (signal.aborted) throw new RcloneAborted();
-    throw e;
-  }
+    const fh = await openVetted(from, { allowHardlinks });
+    try {
+      await pipeline(fh.createReadStream({ autoClose: false }), createWriteStream(to, { flags: 'wx', mode: 0o644 }), { signal });
+    } catch (e) {
+      if (signal.aborted) throw new RcloneAborted();
+      throw e;
+    } finally {
+      await fh.close().catch(() => undefined);
+    }
+  };
+  if (!vet.isDir) { await mkdir(dirname(dst), { recursive: true }); return one(src, dst); }
+  await mkdir(dst, { recursive: true });
+  for (const d of vet.dirs) await mkdir(join(dst, ...d.split('/')), { recursive: true });
+  for (const f of vet.files) await one(join(src, ...f.path.split('/')), join(dst, ...f.path.split('/')));
 }
 
 /**

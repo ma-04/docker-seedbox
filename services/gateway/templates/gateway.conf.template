@@ -171,6 +171,10 @@ server {
   location /_protected/ {
     internal;
     alias /downloads/library/;
+    # Never serve through a symbolic link, at any component of the path (nginx answers 403): the library holds only
+    # regular files the worker wrote, so a link there can only be an attack (defence in depth behind the worker's own
+    # lstat/realpath vetting). Needs openat()/fstatat(), i.e. Linux. `on` (not `if_not_owner`): no link is legitimate.
+    disable_symlinks on;
     autoindex off;
     sendfile on;
     log_not_found off;   # a missing file must not put the signed request URI in the error log
