@@ -1,11 +1,11 @@
 import type {
   DestinationCreateDto, DestinationDto, DestinationUpdateDto, EngineSettingsDto, EngineSettingsUpdateDto, JobDto, JobFilesDto, MeDto, SettingsDto,
-  TestResultDto, UserDto, UserUpdateDto, VpnConfigCreateDto, VpnConfigDto, VpnConfigUpdateDto, VpnStatusDto,
+  TestResultDto, TrackersDto, TrackersUpdateDto, TrackerListStatusDto, UserDto, UserUpdateDto, VpnConfigCreateDto, VpnConfigDto, VpnConfigUpdateDto, VpnStatusDto,
 } from '../../../api/src/lib/dto';
 
 export type {
   DestinationCreateDto, DestinationDto, DestinationUpdateDto, EngineSettingsDto, EngineSettingsUpdateDto, JobDto, JobFilesDto, MeDto, SettingsDto,
-  TestResultDto, UserDto, UserUpdateDto, VpnConfigCreateDto, VpnConfigDto, VpnConfigUpdateDto, VpnStatusDto,
+  TestResultDto, TrackersDto, TrackersUpdateDto, TrackerListStatusDto, UserDto, UserUpdateDto, VpnConfigCreateDto, VpnConfigDto, VpnConfigUpdateDto, VpnStatusDto,
 };
 
 export class ApiError extends Error {
@@ -87,6 +87,9 @@ export const endpoints = {
     updateSettings: (b: Partial<SettingsDto>) => api<SettingsDto>('/admin/settings', { method: 'PUT', body: b }),
     engineSettings: () => api<EngineSettingsDto>('/admin/engine/settings'),
     updateEngineSettings: (b: EngineSettingsUpdateDto) => api<EngineSettingsDto>('/admin/engine/settings', { method: 'PUT', body: b }),
+    trackers: () => api<TrackersDto>('/admin/trackers'),
+    updateTrackers: (b: TrackersUpdateDto) => api<TrackersDto>('/admin/trackers', { method: 'PUT', body: b }),
+    refreshTrackers: () => api<TrackersDto>('/admin/trackers/refresh', { method: 'POST' }),
     users: () => api<UserDto[]>('/admin/users'),
     updateUser: (id: number, b: UserUpdateDto) => api<UserDto>(`/admin/users/${id}`, { method: 'PATCH', body: b }),
     jobs: () => api<JobDto[]>('/admin/jobs'),

@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { Button, Check, ErrorNote, Field, PageHeader, Spinner, useToast } from '../../components/ui';
 import { ApiError, endpoints, type EngineSettingsDto } from '../../lib/api';
+import { formatAge } from '../../lib/format';
+import { addUrlLine, NGOSANG_ALL, trackersPatch, trackersToForm, validateTrackersForm, type TrackersForm } from '../../lib/trackersForm';
 import { enginePatch, engineToForm, ENGINE_NUM_KEYS as NUM_KEYS, limitsPatch, limitsToForm, type EngineForm, type LimitsForm } from '../../lib/settingsForm';
 
 export default function AdminSettings() {
@@ -55,8 +57,100 @@ export default function AdminSettings() {
           <Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? 'Saving...' : 'Save settings'}</Button>
         </form>
       )}
+      <TrackerLists />
       <EngineSettings />
     </>
+  );
+}
+
+/** Extra trackers fetched from public lists (the app downloads and filters them; the worker hands them to the torrent engine). */
+function TrackerLists() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [pollUntil, setPollUntil] = useState(0);
+  const q = useQuery({
+    queryKey: ['admin-trackers'], queryFn: endpoints.admin.trackers,
+    refetchInterval: (query) => (query.state.data?.refreshRequestedAt || Date.now() < pollUntil ? 2000 : false),
+  });
+  const [f, setF] = useState<TrackersForm>({ urls: '', refreshHours: '24', maxTrackers: '200' });
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => { if (q.data && !dirty) setF(trackersToForm(q.data)); }, [q.data, dirty]);
+  const problem = validateTrackersForm(f);
+  const edit = (patch: Partial<TrackersForm>) => { setDirty(true); setF((s) => ({ ...s, ...patch })); };
+
+  const save = useMutation({
+    mutationFn: () => {
+      const patch = trackersPatch(q.data!, f);
+      return Object.keys(patch).length ? endpoints.admin.updateTrackers(patch) : Promise.resolve(q.data!);
+    },
+    onSuccess: (d) => { qc.setQueryData(['admin-trackers'], d); setF(trackersToForm(d)); setDirty(false); setPollUntil(Date.now() + 30_000); toast('ok', 'Tracker lists saved'); },
+  });
+  const refresh = useMutation({
+    mutationFn: endpoints.admin.refreshTrackers,
+    onSuccess: (d) => { qc.setQueryData(['admin-trackers'], d); setPollUntil(Date.now() + 30_000); toast('ok', 'Refresh requested'); },
+  });
+  const d = q.data;
+  return (
+    <section data-testid="tracker-lists" className="card mt-6 max-w-2xl space-y-4" aria-label="Tracker lists">
+      <h2 className="text-sm font-semibold">Tracker lists</h2>
+      <ErrorNote error={q.error} />
+      {d && (
+        <>
+          <p className="text-sm text-gray-600 dark:text-gray-300">
+            Load extra BitTorrent trackers from plain-text lists (one tracker per line) and add them to new downloads. Only public https list hosts and
+            public trackers are accepted. Trackers learn the VPN exit IP and the infohash of every download, so a third-party list widens who learns what you download.
+          </p>
+          {!d.enabled && <p role="status" className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">Extra trackers are switched off (Advanced: torrent engine, "Add extra trackers to new torrents"). Lists are not fetched.</p>}
+          <form className="space-y-4" aria-label="Tracker list settings" onSubmit={(e) => { e.preventDefault(); if (!problem) save.mutate(); }}>
+            <Field label="List URLs (one per line, https, at most 5)">
+              {(id) => <textarea id={id} rows={3} className="input font-mono" spellCheck={false} value={f.urls} onChange={(e) => edit({ urls: e.target.value })} />}
+            </Field>
+            <Button type="button" size="sm" onClick={() => edit({ urls: addUrlLine(f.urls, NGOSANG_ALL) })}>Use ngosang/trackerslist (all)</Button>
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="Refresh every (hours, 1-720)">
+                {(id) => <input id={id} type="number" min={1} max={720} step={1} className="input" value={f.refreshHours} onChange={(e) => edit({ refreshHours: e.target.value })} />}
+              </Field>
+              <Field label="Max trackers from lists (1-1000)">
+                {(id) => <input id={id} type="number" min={1} max={1000} step={1} className="input" value={f.maxTrackers} onChange={(e) => edit({ maxTrackers: e.target.value })} />}
+              </Field>
+            </div>
+            {problem && <p role="alert" className="text-sm text-red-700 dark:text-red-400">{problem}</p>}
+            <ErrorNote error={save.error} />
+            <div className="flex flex-wrap gap-2">
+              <Button type="submit" variant="primary" data-testid="tracker-lists-save" disabled={save.isPending || !!problem || !dirty}>{save.isPending ? 'Saving...' : 'Save tracker lists'}</Button>
+              <Button type="button" data-testid="tracker-lists-refresh" disabled={refresh.isPending || dirty || !d.enabled || d.urls.length === 0 || !!d.refreshRequestedAt} onClick={() => refresh.mutate()}>
+                {d.refreshRequestedAt ? 'Refreshing...' : 'Refresh now'}
+              </Button>
+            </div>
+            <ErrorNote error={refresh.error} />
+          </form>
+          {d.lists.length > 0 && (
+            <table className="w-full text-left text-sm">
+              <thead><tr><th className="pb-1 pr-2">List</th><th className="pb-1 pr-2">Trackers</th><th className="pb-1 pr-2">Updated</th><th className="pb-1">Status</th></tr></thead>
+              <tbody>
+                {d.lists.map((l) => (
+                  <tr key={l.url} data-testid="tracker-list-row" className="align-top">
+                    <td className="break-all py-1 pr-2 font-mono text-xs">{l.url}</td>
+                    <td className="py-1 pr-2">{l.trackerCount}</td>
+                    <td className="py-1 pr-2">{l.lastFetchedAt ? formatAge(l.lastFetchedAt) : l.lastAttemptAt ? 'never' : 'pending'}</td>
+                    <td className={l.error ? 'py-1 text-red-700 dark:text-red-400' : 'py-1 text-green-700 dark:text-green-400'}>
+                      {l.error ? `${l.error}${l.trackerCount ? ' (keeping the previous list)' : ''}` : l.lastAttemptAt ? 'OK' : 'Waiting for the worker'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p data-testid="tracker-lists-total" className="text-sm">
+            Trackers given to the torrent engine: <strong>{d.effectiveCount}</strong> ({d.manualCount} manual, the rest from the lists).
+          </p>
+          <p className="hint">
+            Applies to torrents added after the list is applied; running downloads are not changed. Private torrents never get these trackers: the engine skips them
+            for .torrent files, and for magnet links the worker removes them again as soon as the engine knows the torrent is private.
+          </p>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -140,7 +234,7 @@ function EngineSettings() {
             </fieldset>
             <fieldset className="space-y-3"><legend className={legend}>Trackers</legend>
               {chk('addTrackersEnabled', 'Add extra trackers to new torrents')}
-              <Field label="Extra trackers (one URL per line, max 50)" hint="http, https, udp, ws or wss URLs.">
+              <Field label="Manual extra trackers (one URL per line, max 100)" hint="http, https, udp, ws or wss URLs. Always added first; trackers from the lists above come after them.">
                 {(id) => <textarea id={id} rows={4} className="input font-mono" value={String(f.addTrackers)} onChange={(e) => { setSaved(false); setF((s) => ({ ...s!, addTrackers: e.target.value })); }} />}
               </Field>
             </fieldset>
