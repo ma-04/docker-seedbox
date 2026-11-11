@@ -15,7 +15,7 @@ services:
       LETSENCRYPT_EMAIL: ${ACME_EMAIL:-}
 
   nginx-proxy:
-    image: nginxproxy/nginx-proxy:1.11.6-alpine
+    image: nginxproxy/nginx-proxy:1.11.6-alpine@sha256:99376e95c8754547213d411222a2c4dca046d974e753ae2a1c9aef09b2c03364
     container_name: ${COMPOSE_PROJECT_NAME:-seedbox}-nginx-proxy
     restart: unless-stopped
     ports:
@@ -32,9 +32,13 @@ services:
     environment:
       TRUST_DOWNSTREAM_PROXY: "false"
     security_opt: ["no-new-privileges:true"]
+    # nginx master (root) binds 80/443, chowns its cache dirs and drops its workers to the nginx user; docker-gen
+    # (root) writes the generated config. Nothing else is needed. (acme-companion keeps its default capabilities.)
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER]
 
   acme-companion:
-    image: nginxproxy/acme-companion:2.8
+    image: nginxproxy/acme-companion:2.8@sha256:e3c5fb08bf623ae93dbc945d78fe50040c1fa107ddf59f7ee04ba6a61f34cbc1
     restart: unless-stopped
     depends_on: [nginx-proxy]
     environment:
