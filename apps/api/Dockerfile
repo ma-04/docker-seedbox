@@ -3,9 +3,9 @@
 #   docker build -f apps/api/Dockerfile .
 # The worker overrides CMD with `node dist/worker.js`.
 
-ARG NODE_IMAGE=node:22-bookworm-slim
+ARG NODE_IMAGE=node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 # Pinned: a floating tag would change the uploader (and its flags) under a running deployment.
-ARG RCLONE_IMAGE=rclone/rclone:1.74.4
+ARG RCLONE_IMAGE=rclone/rclone:1.74.4@sha256:c61954aaa32328a5486715dd063a81c7879f5195ad3505cd362deddd509dc4a1
 
 # --- Build tools for native modules (better-sqlite3 falls back to node-gyp if no prebuilt binary matches).
 FROM ${NODE_IMAGE} AS build-base
