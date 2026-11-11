@@ -54,8 +54,7 @@ Users are auto-provisioned on first request, keyed by `Remote-User`. Admin =
 member of group `ADMIN_GROUP` (default `admins`).
 
 Routes that need no login: `GET /api/health` and `GET /dl/*` (on `FILES_HOST`, signed
-URL only; the gateway still adds `X-Gateway-Secret`). Every other route, including
-`GET /api/oauth/google/callback`, requires the user headers.
+URL only; the gateway still adds `X-Gateway-Secret`). Every other route requires the user headers.
 
 **Authorisation follows the matched route, never the URL string.** `apps/api/src/api/app.ts`
 registers authenticated routes in an encapsulated plugin whose `onRequest` hook is `requireUser`,
@@ -136,7 +135,8 @@ Authoritative schema: `apps/api/migrations/001_init.sql`. Timestamps are unix se
   files of deleted jobs/destinations the worker still has to remove (see "Deleting jobs").
 - `vpn_configs(id, name UNIQUE, config_enc, endpoint_host, enabled, last_used_at, last_error, created_at)`
 - `settings(key PRIMARY KEY, value_json)`
-- `oauth_states(state PRIMARY KEY, user_id, payload_json, expires_at)`
+- `oauth_states(state PRIMARY KEY, user_id, payload_json, expires_at)` — reserved for per-user
+  Google Drive connect (not implemented yet; the table is unused)
 
 Job states: `queued → downloading → uploading → completed`, plus `failed`, `cancelled`.
 Torrent states: `pending → downloading → downloaded`, plus `error`, `removed`.
@@ -219,8 +219,6 @@ GET    /destinations                         -> shared (enabled) + own; secrets 
 POST   /destinations                         -> create own (s3 only; gdrive comes from OAuth)
 PATCH  /destinations/:id   DELETE /destinations/:id      (own only)
 POST   /destinations/:id/test                -> { ok, message }
-GET    /oauth/google/start?name=             -> 302 to Google (scope drive.file, offline, consent)
-GET    /oauth/google/callback                -> creates user-owned gdrive destination, 302 /storage
 GET    /jobs?state=                          -> own jobs (with torrent progress)
 POST   /jobs       JSON { magnet, destinationId } | multipart { torrent, destinationId }
 GET    /jobs/:id   DELETE /jobs/:id (cancel; or remove a finished job and, see below, its files)   POST /jobs/:id/retry
@@ -242,8 +240,9 @@ config exists), `vpn.rotation` (`"manual"` | `"interval"` | `"on-failure"`),
 `vpn.rotationMinutes` (360), `limits.maxActiveJobsPerUser` (5),
 `limits.maxTorrentBytes` (0 = unlimited), `limits.minFreeDiskBytes` (2 GiB),
 `limits.metadataTimeoutMinutes` (30; 0 = never), `cleanup.failedGraceMinutes` (60), `cleanup.deleteRemoteOnJobDelete` (false; S3 only),
-`seeding.ratio` (0 = stop when complete), `seeding.maxMinutes` (0 = no cap; with `seeding.ratio` > 0, stop seeding after this long), `google.oauthClientId`,
-`google.oauthClientSecret` (encrypted; used for user "Connect Google Drive").
+`seeding.ratio` (0 = stop when complete), `seeding.maxMinutes` (0 = no cap; with `seeding.ratio` > 0, stop seeding after this long).
+`google.oauthClientId` / `google.oauthClientSecret` exist as reserved keys only: per-user
+"Connect Google Drive" is not implemented, and the admin API neither returns nor accepts them.
 
 **Deleting jobs.** Cancelling an active job never touches files. Deleting a finished job (user `DELETE /jobs/:id` or admin
 `DELETE /admin/jobs/:id`) or a destination removes the rows and, in the same transaction, queues the delivered files in
@@ -270,10 +269,10 @@ Infohashes are stored lowercase hex (v1, 40 chars); base32 magnets are converted
 the UNIQUE check. A user re-adding a torrent they already have for the same
 destination gets the existing job back (200), not a duplicate.
 
-User-owned Google Drive: scope `drive.file` cannot see pre-existing folders, so the
-OAuth callback creates a folder named `Seedbox` in the user's Drive and stores its id
-as `rootFolderId`. Google endpoints are overridable for tests:
-`GOOGLE_OAUTH_AUTH_URL`, `GOOGLE_OAUTH_TOKEN_URL`, `GOOGLE_API_BASE_URL`.
+Google Drive destinations are admin-configured (shared) only; per-user "Connect Google
+Drive" is on the roadmap. A token with scope `drive.file` can only see folders the same
+OAuth client created, so `rootFolderId` must be such a folder. The token and API endpoints
+are overridable for tests: `GOOGLE_OAUTH_TOKEN_URL`, `GOOGLE_API_BASE_URL`.
 
 Engine settings: `GET|PUT /admin/engine/settings` (admin only; `EngineSettingsDto` /
 partial `EngineSettingsUpdateDto`) let admins tune a fixed whitelist of qBittorrent
