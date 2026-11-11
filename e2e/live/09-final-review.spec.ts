@@ -4,7 +4,7 @@ import { api, fetchHash, inQbt, jobRow, login, mask, note, serverEgressIp, sh, s
 
 test.describe.configure({ mode: 'serial' });
 
-/** A command inside the qbittorrent container as the engine's own uid (1000): the LAN policy exempts uid 0 (the sidecar; `docker exec` defaults to root). */
+/** A command inside the qbittorrent container as the engine's own uid (1000): root is no longer exempt from the LAN policy either (the two-uid test below probes both). */
 const asEngine = (cmd: string) => sh(`sudo docker exec -u 1000 seedbox-qbittorrent-1 sh -c '${cmd.replace(/'/g, "'\\''")}'`);
 
 // Checks added with the final review fixes: footer, magnet hardening, /add prefill, MTU, kill-switch LAN policy and
@@ -89,6 +89,73 @@ test.describe('9. final review fixes on the live deployment', () => {
     expect(t.out.trim()).not.toBe(own);
     expect(t.out.trim()).toBe(status.publicIp);
     note(ti, 'lan-policy', `gateway ${mask(gw)} -> ${g}; sibling ${mask(sibling)} -> ${s}; tunnel egress ${mask(t.out.trim())} (server ${mask(own)})`);
+  });
+
+  test('qbittorrent namespace as uid 1000 AND root: bridge gateway, sibling, 172.17.0.1 and 169.254.169.254 unreachable; DNS and tunnel egress work', async ({}, ti) => {
+    const net = await sh(`sudo docker inspect seedbox-vpn-1 --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{$v.Gateway}}{{"\\n"}}{{end}}'`);
+    const api2 = await sh(`sudo docker inspect seedbox-api-1 --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{$v.IPAddress}}{{"\\n"}}{{end}}'`);
+    const nets = new Map(net.out.trim().split('\n').map((l) => l.split(' ') as [string, string]));
+    const [, sibling] = api2.out.trim().split('\n').map((l) => l.split(' ') as [string, string]).find(([n]) => nets.has(n))!;
+    const gw = nets.get([...nets.keys()].find((n) => api2.out.includes(`${n} `))!)!;
+    const targets = [`http://${gw}:80/`, `http://${sibling}:3000/api/health`, 'http://172.17.0.1/', 'http://169.254.169.254/'];
+    const own = await serverEgressIp();
+    const lines: string[] = []; const codes: string[] = [];
+    // controls: every target answers from the host (172.17.0.1 / the metadata address may legitimately refuse or time out there: logged only)
+    for (const u of targets.slice(0, 2)) expect((await sh(`curl -sS -m 5 -o /dev/null -w '%{http_code}' ${u}; echo " exit=$?"`)).out, `control ${u}`).toMatch(/exit=0/);
+    for (const [who, uid] of [['uid1000', '1000'], ['root', '0']] as const) {
+      const run = (cmd: string) => sh(`sudo docker exec -u ${uid} seedbox-qbittorrent-1 sh -c '${cmd.replace(/'/g, "'\\''")}'`);
+      for (const u of targets) {
+        const r = await run(`curl -sS -m 5 -o /dev/null -w '%{http_code}' ${u}; echo " exit=$?"`);
+        expect(`${r.out.trim()}`, `${who} -> ${mask(u.replace(/^http:\/\/|[:/].*$/g, ''))} must be unreachable`).toMatch(/000 exit=[1-9]/);
+        codes.push(`${who}:${u.replace(/^http:\/\/|[:/].*$/g, '').split('.').slice(0, 2).join('.')}=${/exit=(\d+)/.exec(r.out)?.[1]}`);
+      }
+      const rs = await run("awk '/^nameserver/{print $2}' /etc/resolv.conf");
+      lines.push(`${who} resolver ${rs.out.trim().split(/\s+/).map(mask).join(',')}`);
+      const d = await run('getent hosts releases.ubuntu.com || nslookup releases.ubuntu.com');
+      expect(d.out, `${who}: DNS through the tunnel (${d.err})`).toMatch(/\d+\.\d+\.\d+\.\d+|[0-9a-f:]{6,}/);
+      const t = await run('curl -4 -sS -m 15 https://api.ipify.org');
+      expect(t.code, t.err).toBe(0);
+      expect(t.out.trim()).not.toBe(own);
+      lines.push(`${who}: 4 targets unreachable, DNS ok, egress ${mask(t.out.trim())}`);
+    }
+    note(ti, 'lan-policy-both-uids', `curl exit codes (28 = dropped, 7 = refused) ${codes.join(' ')}; ${lines.join(' | ')} (server ${mask(own)})`);
+  });
+
+  test('crafted .torrent files (two info keys; unsorted keys inside info) are rejected with 400 through the real API', async ({ page }, ti) => {
+    await login(page, 'admin');
+    const dests = (await api(page, 'GET', '/api/destinations')).json as { id: number; name: string }[];
+    const dest = dests.find((d) => d.name === 'live-local')!.id;
+    const b = (s: string) => Buffer.from(s, 'latin1');
+    const str = (s: string | Buffer) => Buffer.concat([b(`${Buffer.byteLength(s)}:`), Buffer.isBuffer(s) ? s : b(s)]);
+    const int = (n: number) => b(`i${n}e`);
+    const dict = (...kv: Buffer[]) => Buffer.concat([b('d'), ...kv, b('e')]);
+    const pieces = crypto.randomBytes(20);
+    const sortedInfo = dict(str('length'), int(5), str('name'), str('crafted.bin'), str('piece length'), int(16384), str('pieces'), str(pieces));
+    const unsortedInfo = dict(str('name'), str('crafted.bin'), str('length'), int(5), str('piece length'), int(16384), str('pieces'), str(pieces));
+    const otherInfo = dict(str('length'), int(6), str('name'), str('other.bin'), str('piece length'), int(16384), str('pieces'), str(crypto.randomBytes(20)));
+    const cases: Record<string, Buffer> = {
+      'two-info-keys': dict(str('info'), sortedInfo, str('info'), otherInfo),
+      'unsorted-info': dict(str('info'), unsortedInfo),
+    };
+    const before = ((await api(page, 'GET', '/api/jobs')).json as unknown[]).length;
+    const res: string[] = [];
+    for (const [name, buf] of Object.entries(cases)) {
+      const r = await page.request.post('/api/jobs', {
+        headers: { 'X-Requested-With': 'seedbox' },
+        multipart: { torrent: { name: `${name}.torrent`, mimeType: 'application/x-bittorrent', buffer: buf }, destinationId: String(dest) },
+      });
+      expect(r.status(), `${name}: ${await r.text()}`).toBe(400);
+      res.push(`${name}=${r.status()} (${(await r.text()).slice(0, 120).replace(/\s+/g, ' ')})`);
+    }
+    expect(((await api(page, 'GET', '/api/jobs')).json as unknown[]).length).toBe(before);
+    // control: the same torrent with sorted keys and a single info is accepted (so the 400s above are about the structure), then removed again
+    const ok = await page.request.post('/api/jobs', { headers: { 'X-Requested-With': 'seedbox' },
+      multipart: { torrent: { name: 'control.torrent', mimeType: 'application/x-bittorrent', buffer: dict(str('info'), sortedInfo) }, destinationId: String(dest) } });
+    const okText = await ok.text();
+    expect(ok.status(), okText).toBe(201);
+    expect((await api(page, 'DELETE', `/api/jobs/${JSON.parse(okText).id}`)).status).toBeLessThan(300);
+    res.push(`control(sorted, one info)=${ok.status()}`);
+    note(ti, 'crafted-torrents', res.join(', '));
   });
 
   test('deleting the Local job removes its files from the library and its signed link answers 404', async ({ browser }, ti) => {
