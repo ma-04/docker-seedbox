@@ -15,19 +15,22 @@ import (
 // while switching tunnels. Docker's own iptables rules (embedded DNS DNAT) are not
 // touched.
 //
-// required: OUTPUT policy drop; allowed = loopback, wg interfaces, the UDP endpoint(s) of the tunnel being
+// required: OUTPUT policy drop; allowed = loopback (the lo device only), wg interfaces, the UDP endpoint(s) of the tunnel
 //
-//	brought up / currently up (only for packets carrying wgFwmark, WireGuard's own), and towards
-//	LAN_CIDRS only replies (ct established/related) and uid 0 (this sidecar); see buildRuleset.
-//	IPv6 (except loopback) is dropped. Docker's embedded resolver (127.0.0.11,
-//	which forwards from the host side) is usable by root only (this process,
-//	to resolve a WireGuard endpoint hostname) and never by qBittorrent.
+//	being brought up / currently up (only for packets carrying wgFwmark, WireGuard's own), replies to connections the
+//	LAN opened (ct established/related) and nothing else towards LAN_CIDRS. IPv6 (except loopback) is dropped.
+//	Docker's embedded resolver (127.0.0.11, reached over lo) is usable by root only (this process, to resolve a
+//	WireGuard endpoint hostname) and never by qBittorrent.
 //
-// off:      OUTPUT policy accept, except the same LAN restriction as in required (internet-direct stays allowed).
-// both:     INPUT from the tunnel to the control/WebUI ports is dropped, so other
+// off:      OUTPUT policy accept (internet-direct), but the same private-range rules as in required.
+// both:     every uid (root included: there is no uid exemption) is dropped towards LAN_CIDRS and towards every private /
 //
-//	customers of the VPN provider cannot reach them via the tunnel address; INPUT from the LAN is
-//	limited to the WebUI and control ports.
+//	loopback-adjacent / link-local / CGNAT / multicast / reserved IPv4 range (blockedV4: other Docker bridges and the
+//	host at 172.17.0.1, RFC1918, 169.254.169.254 cloud metadata, ...), on every interface except the lo device and,
+//	via wg*, the tunnel's own DNS servers (port 53). Exceptions are only the fwmarked endpoint packets, replies to
+//	LAN-initiated connections and the test-only VPN_LAN_ALLOW_OUT list. All IPv6 leaving lo is dropped.
+//	INPUT from the tunnel to the control/WebUI ports is dropped, so other customers of the VPN provider cannot
+//	reach them via the tunnel address; INPUT from the LAN is limited to the WebUI and control ports.
 //
 // wgFwmark is set on every WireGuard interface (`FwMark` in the wg conf). The kernel stamps it on the OUTER
 // (encrypted) UDP packets of the tunnel, and only those: they are kernel-originated, carry no socket owner (so
@@ -35,6 +38,23 @@ import (
 // SO_MARK. The endpoint exception below matches this mark, so a torrent peer/tracker/DHT node that happens to
 // share the endpoint's IP:port gets no direct, cleartext path from the real address.
 const wgFwmark = "0x5b76"
+
+// blockedV4 is every IPv4 range an untrusted process (qBittorrent, or any URL it is made to fetch) must not reach.
+// The lo device is accepted before this list, so 127/8 here only matters for packets leaving through a real interface.
+// RFC 5737 documentation ranges are deliberately NOT listed: the hermetic test stacks use them as their fake internet.
+var blockedV4 = []string{
+	"0.0.0.0/8",      // "this network"
+	"10.0.0.0/8",     // RFC 1918
+	"100.64.0.0/10",  // CGNAT (RFC 6598)
+	"127.0.0.0/8",    // loopback
+	"169.254.0.0/16", // link-local, cloud metadata (169.254.169.254)
+	"172.16.0.0/12",  // RFC 1918: also every other Docker bridge and the Docker host (172.17.0.1)
+	"192.0.0.0/24",   // IETF protocol assignments
+	"192.168.0.0/16", // RFC 1918
+	"198.18.0.0/15",  // benchmarking
+	"224.0.0.0/4",    // multicast
+	"240.0.0.0/4",    // reserved + limited broadcast
+}
 
 // allowOut is one VPN_LAN_ALLOW_OUT entry: a LAN address qBittorrent (any uid) may initiate connections to,
 // optionally restricted to one port (tcp and udp). Test fixtures only; see parseAllowOut.
@@ -49,7 +69,7 @@ type fwPolicy struct {
 	webPort     string       // qBittorrent WebUI port (open to the whole LAN)
 	controlPort string       // control API port
 	controlFrom []netip.Addr // sources allowed to reach the control API; empty = the whole LAN (the token is still required)
-	allowOut    []allowOut   // test-only LAN exceptions for non-root uids
+	allowOut    []allowOut   // test-only LAN exceptions
 }
 
 func prefixList(lan []netip.Prefix) string {
@@ -102,17 +122,22 @@ func parseControlTrusted(v string) ([]netip.Addr, error) {
 	return out, nil
 }
 
-// buildRuleset renders the nftables ruleset for a mode.
+// buildRuleset renders the nftables ruleset for a mode. `dns` are the tunnel's DNS servers (reached through wg*).
 //
-// LAN policy (identical in both modes, so `off` is not a way around it): nothing running as a non-root uid
-// (qBittorrent, and any URL a user can make it fetch) may open a connection to LAN_CIDRS (the Docker bridge
-// gateway = the host, and every sibling container). Only replies to connections the LAN opened (api/worker ->
-// WebUI :8080 / control :8000) and traffic of uid 0 (this sidecar) leave towards the LAN.
+// Policy (identical in both modes, so `off` is not a way around it): nothing may open a connection to LAN_CIDRS (the
+// Docker bridge gateway = the host, and every sibling container) or to any other private/reserved IPv4 range, whatever
+// uid it runs as. The only exceptions are, in this order: loopback, fwmarked WireGuard endpoint packets (required),
+// replies to connections the LAN opened (api/worker -> WebUI :8080 / control :8000), the test-only allow-list, and the
+// tunnel's own DNS servers on port 53 through a wg interface. Docker's embedded resolver (127.0.0.11) is on the lo
+// device, so the sidecar's own endpoint-hostname lookups need no LAN access at all.
 //
-// It is written as "accept the allowed, then drop the rest of the LAN" on purpose: a packet without a socket
-// (no `meta skuid`) must fall into the drop, not into `off` mode's accept policy. The established accept is scoped
-// to LAN destinations: an unscoped one would let connections opened in `off` mode survive a switch to `required`.
-func buildRuleset(mode string, p fwPolicy, endpoints []netip.AddrPort) string {
+// It is written as "accept the allowed, then drop the rest" on purpose: a packet without a socket (no `meta skuid`)
+// must fall into the drop, not into `off` mode's accept policy. The established accept is scoped to LAN destinations:
+// an unscoped one would let connections opened in `off` mode survive a switch to `required`.
+//
+// Private destinations through the tunnel are dropped too (except the DNS servers): the provider's internal network
+// is not something a torrent client should probe, and a DNS server is all the sidecar and qBittorrent need there.
+func buildRuleset(mode string, p fwPolicy, endpoints []netip.AddrPort, dns []netip.Addr) string {
 	var b strings.Builder
 	lan := prefixList(p.lan)
 	b.WriteString("add table inet sbvpn\ndelete table inet sbvpn\ntable inet sbvpn {\n")
@@ -144,11 +169,11 @@ func buildRuleset(mode string, p fwPolicy, endpoints []netip.AddrPort) string {
 	fmt.Fprintf(&b, "  chain output {\n    type filter hook output priority -10; policy %s;\n", policy)
 	if mode == "required" {
 		b.WriteString("    ip daddr 127.0.0.11 meta skuid != 0 drop\n")
-		b.WriteString("    meta nfproto ipv6 oifname != \"lo\" drop\n")
 	}
+	b.WriteString("    meta nfproto ipv6 oifname != \"lo\" drop\n") // IPv6 is disabled in the namespace; nothing may use it
 	b.WriteString("    oifname \"lo\" accept\n")
 	if mode == "required" {
-		// WireGuard's own (kernel-originated, fwmarked) packets have no socket owner: accept them before the LAN drop.
+		// WireGuard's own (kernel-originated, fwmarked) packets have no socket owner: accept them before the drops.
 		for _, e := range endpoints {
 			fmt.Fprintf(&b, "    ip daddr %s udp dport %d meta mark %s accept\n", e.Addr(), e.Port(), wgFwmark)
 		}
@@ -162,9 +187,12 @@ func buildRuleset(mode string, p fwPolicy, endpoints []netip.AddrPort) string {
 				fmt.Fprintf(&b, "    ip daddr %s meta l4proto { tcp, udp } th dport %d accept\n", a.addr, a.port)
 			}
 		}
-		fmt.Fprintf(&b, "    ip daddr { %s } meta skuid 0 accept\n", lan)
 		fmt.Fprintf(&b, "    ip daddr { %s } drop\n", lan)
 	}
+	if mode == "required" && len(dns) > 0 {
+		fmt.Fprintf(&b, "    oifname \"wg*\" ip daddr { %s } meta l4proto { tcp, udp } th dport 53 accept\n", addrList(dns))
+	}
+	fmt.Fprintf(&b, "    ip daddr { %s } drop\n", strings.Join(blockedV4, ", "))
 	if mode == "required" {
 		b.WriteString("    oifname \"wg*\" accept\n")
 	}

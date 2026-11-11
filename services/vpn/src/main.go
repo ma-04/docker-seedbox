@@ -37,6 +37,7 @@ type Server struct {
 	name     string
 	since    int64
 	endpoint netip.AddrPort
+	dns      []netip.Addr // DNS servers of the tunnel that is up (the only private addresses reachable through wg*)
 	mtu      int
 	gen      int
 	pubIP    string
@@ -81,8 +82,23 @@ var (
 	errModeOff = errors.New("vpn mode is off")
 )
 
+// rules renders the ruleset for the tunnel that is currently up (its DNS servers are the only private addresses reachable via wg*).
 func (s *Server) rules(mode string, eps ...netip.AddrPort) string {
-	return buildRuleset(mode, s.fw, eps)
+	s.mu.Lock()
+	dns := s.dns
+	s.mu.Unlock()
+	return buildRuleset(mode, s.fw, eps, dns)
+}
+
+// tunnelDNS: the resolvers /etc/resolv.conf will point at for cfg (its DNS= servers, else VPN_FALLBACK_DNS).
+func (s *Server) tunnelDNS(cfg *WGConfig) []netip.Addr {
+	if len(cfg.DNS) > 0 {
+		return cfg.DNS
+	}
+	if a, err := netip.ParseAddr(s.fallbackDNS); err == nil && a.Is4() {
+		return []netip.Addr{a}
+	}
+	return nil
 }
 
 func (s *Server) failClosedDNS() { writeResolv("# vpn: no tunnel up, DNS disabled (kill switch)\n") }
@@ -119,8 +135,13 @@ func (s *Server) connect(name string, cfg *WGConfig) (err error) {
 		eps = append(eps, oldEp)
 	}
 	// Allow the new endpoint before anything else; the old tunnel keeps working until the new one has a handshake.
+	newDNS := s.tunnelDNS(cfg)
 	if mode == "required" {
-		if err := applyRuleset(s.rules("required", eps...)); err != nil {
+		// The new tunnel's DNS servers are reachable before resolv.conf is switched; the old ones until the old tunnel is gone.
+		s.mu.Lock()
+		both := append(append([]netip.Addr{}, s.dns...), newDNS...)
+		s.mu.Unlock()
+		if err := applyRuleset(buildRuleset("required", s.fw, eps, both)); err != nil {
 			return err
 		}
 	}
@@ -193,6 +214,7 @@ func (s *Server) connect(name string, cfg *WGConfig) (err error) {
 	}
 	s.mu.Lock()
 	s.iface, s.name, s.since, s.endpoint, s.mtu = newIf, name, time.Now().Unix(), ep, mtu
+	s.dns = newDNS
 	s.gen++
 	s.pubIP = ""
 	s.mu.Unlock()
@@ -274,6 +296,7 @@ func (s *Server) teardown() {
 	s.mu.Lock()
 	iface, ep := s.iface, s.endpoint
 	s.iface, s.name, s.since, s.pubIP, s.mtu = "", "", 0, "", 0
+	s.dns = nil
 	s.gen++
 	s.mu.Unlock()
 	if iface != "" {

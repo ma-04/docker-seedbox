@@ -4,8 +4,8 @@ import { getManifest, probe, qbtTorrents, wgConfig } from '../lib/infra';
 
 test.describe.configure({ mode: 'serial' });
 
-const DIRECT = 'http://172.31.251.20/';    // "the internet": reachable only outside the tunnel
-const BEHIND = 'http://172.31.252.20/';    // reachable only through a WireGuard server
+const DIRECT = 'http://198.51.100.20/';    // "the internet": reachable only outside the tunnel
+const BEHIND = 'http://203.0.113.20/';    // reachable only through a WireGuard server
 const TRACKER = 'http://172.31.250.30:6969/healthz';   // on the LAN (LAN_CIDRS)
 
 test.describe('8. VPN', () => {

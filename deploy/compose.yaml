@@ -234,9 +234,15 @@ services:
         target: /downloads/incomplete
         volume: { subpath: incomplete }
     security_opt: ["no-new-privileges:true"]
-    # The entrypoint starts as root only to fix ownership and then drops to PUID/PGID (1000).
+    # The entrypoint starts as root only to chown the /config volume's top directory (non-recursively) and then drops to
+    # PUID/PGID (1000): seeding qBittorrent.conf and qBittorrent itself run unprivileged, so a symlink planted in /config
+    # by a compromised qBittorrent cannot be followed by root. No DAC_OVERRIDE/FOWNER: root cannot write inside /config.
+    # read_only: the entrypoint and the rest of the rootfs cannot be replaced; qBittorrent writes only /config, the
+    # incomplete/ subpath and /tmp.
+    read_only: true
+    tmpfs: ["/tmp"]
     cap_drop: [ALL]
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL]   # KILL: tini (root) must be able to forward SIGTERM to qbittorrent (uid 1000) so it saves resume data on stop
+    cap_add: [CHOWN, SETUID, SETGID, KILL]   # KILL: tini (root) must be able to forward SIGTERM to qbittorrent (uid 1000) so it saves resume data on stop
     depends_on:
       init: { condition: service_completed_successfully }
       vpn:

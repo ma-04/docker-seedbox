@@ -65,7 +65,7 @@ test.describe('11. hardening', () => {
 
   test('after the vpn sidecar restarts (before the worker reconciles) the qBittorrent namespace is still fail-closed in required mode', async ({ browser }, testInfo) => {
     test.setTimeout(240_000);
-    const DIRECT = 'http://172.31.251.20/';
+    const DIRECT = 'http://198.51.100.20/';
     const TRACKER = 'http://172.31.250.30:6969/healthz';
     const { page, close } = await userPage(browser, testInfo, 'admin');
     const status = () => api(page, 'GET', '/api/admin/vpn/status').then((r) => r.json);
@@ -90,7 +90,7 @@ test.describe('11. hardening', () => {
       expect(s.connected).toBe(false);
       const direct = await probe(DIRECT);
       expect(direct.reachable, JSON.stringify(direct)).toBe(false);
-      expect((await probe('http://172.31.252.20/')).reachable).toBe(false);
+      expect((await probe('http://203.0.113.20/')).reachable).toBe(false);
     } finally {
       await startWorker();
     }

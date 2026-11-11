@@ -46,16 +46,18 @@ func indexOf(ls []string, want string) int {
 func TestLANOutputIsRestrictedInEveryMode(t *testing.T) {
 	ep := netip.MustParseAddrPort("203.0.113.5:51820")
 	for _, mode := range []string{"required", "off"} {
-		r := buildRuleset(mode, testPolicy(), []netip.AddrPort{ep})
+		r := buildRuleset(mode, testPolicy(), []netip.AddrPort{ep}, nil)
 		out := ruleLines(chain(t, r, "output"))
 		est := indexOf(out, "ip daddr { 172.31.250.0/24 } ct state established,related accept")
-		root := indexOf(out, "ip daddr { 172.31.250.0/24 } meta skuid 0 accept")
 		drop := indexOf(out, "ip daddr { 172.31.250.0/24 } drop")
-		if est < 0 || root < 0 || drop < 0 || !(est < root && root < drop) {
-			t.Fatalf("%s: want established, uid 0, then LAN drop (in that order); got %v", mode, out)
+		if est < 0 || drop < 0 || est > drop {
+			t.Fatalf("%s: want established, then LAN drop (in that order); got %v", mode, out)
 		}
 		for _, l := range out {
-			if strings.Contains(l, "172.31.250.0/24") && strings.HasSuffix(l, " accept") && l != out[est] && l != out[root] {
+			if strings.Contains(l, "skuid 0") && !strings.Contains(l, "127.0.0.11") {
+				t.Errorf("%s: uid 0 must not be exempted from any rule except the Docker resolver drop: %s", mode, l)
+			}
+			if strings.Contains(l, "172.31.250.0/24") && strings.HasSuffix(l, " accept") && l != out[est] {
 				t.Errorf("%s: unexpected LAN accept: %s", mode, l)
 			}
 			if l == "ct state established,related accept" {
@@ -83,7 +85,7 @@ func TestLANOutputIsRestrictedInEveryMode(t *testing.T) {
 
 func TestLANInputOnlyWebUIAndControl(t *testing.T) {
 	p := testPolicy()
-	in := ruleLines(chain(t, buildRuleset("required", p, nil), "input"))
+	in := ruleLines(chain(t, buildRuleset("required", p, nil, nil), "input"))
 	want := []string{
 		`iifname "wg*" tcp dport { 8000, 8080 } drop`,
 		`iifname "lo" accept`,
@@ -96,14 +98,14 @@ func TestLANInputOnlyWebUIAndControl(t *testing.T) {
 		t.Errorf("input chain:\n got %v\nwant %v", in, want)
 	}
 	p.controlFrom = []netip.Addr{netip.MustParseAddr("172.31.250.3"), netip.MustParseAddr("172.31.250.4")}
-	in = ruleLines(chain(t, buildRuleset("off", p, nil), "input"))
+	in = ruleLines(chain(t, buildRuleset("off", p, nil, nil), "input"))
 	if indexOf(in, "ip saddr { 172.31.250.3, 172.31.250.4 } tcp dport 8000 accept") < 0 || indexOf(in, "ip saddr { 172.31.250.0/24 } tcp dport 8000 accept") >= 0 {
 		t.Errorf("control port must be limited to CONTROL_TRUSTED_IPS: %v", in)
 	}
 }
 
 func TestAllowOutIsExplicitAndScoped(t *testing.T) {
-	r := buildRuleset("required", testPolicy(), nil)
+	r := buildRuleset("required", testPolicy(), nil, nil)
 	if strings.Contains(r, "th dport") {
 		t.Error("no allow-out rules expected by default")
 	}
@@ -113,7 +115,7 @@ func TestAllowOutIsExplicitAndScoped(t *testing.T) {
 	}
 	p := testPolicy()
 	p.allowOut = ao
-	r = buildRuleset("required", p, nil)
+	r = buildRuleset("required", p, nil, nil)
 	out := ruleLines(chain(t, r, "output"))
 	a := indexOf(out, "ip daddr 172.31.250.30 meta l4proto { tcp, udp } th dport 6969 accept")
 	b := indexOf(out, "ip daddr 172.31.250.31 accept")
@@ -238,5 +240,119 @@ func TestKeyValidationIsStrict(t *testing.T) {
 	}
 	if _, err := ParseWGConfig(fmt.Sprintf(base, good, good) + "PresharedKey = " + good + "\n"); err != nil {
 		t.Errorf("valid config rejected: %v", err)
+	}
+}
+
+// There is no uid exemption any more: root inside the qbittorrent container (same namespace) must not be able to reach
+// the LAN either, so a root compromise there is not a way past the firewall.
+func TestNoUidExemptionForTheLAN(t *testing.T) {
+	for _, mode := range []string{"required", "off"} {
+		r := buildRuleset(mode, testPolicy(), nil, nil)
+		if strings.Contains(r, "skuid 0 accept") {
+			t.Errorf("%s: root exempted from a drop:\n%s", mode, r)
+		}
+	}
+}
+
+func TestPrivateRangesAreDroppedInEveryMode(t *testing.T) {
+	want := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8", "224.0.0.0/4", "240.0.0.0/4"}
+	dnsAddr := netip.MustParseAddr("10.2.0.1")
+	for _, mode := range []string{"required", "off"} {
+		r := buildRuleset(mode, testPolicy(), nil, []netip.Addr{dnsAddr})
+		out := ruleLines(chain(t, r, "output"))
+		var drop string
+		for _, l := range out {
+			if strings.HasPrefix(l, "ip daddr { 0.0.0.0/8") && strings.HasSuffix(l, " drop") {
+				drop = l
+			}
+		}
+		if drop == "" {
+			t.Fatalf("%s: no private-range drop in %v", mode, out)
+		}
+		for _, w := range want {
+			if !strings.Contains(drop, w) {
+				t.Errorf("%s: %s missing from the drop set", mode, w)
+			}
+		}
+		// the drop is not keyed on an interface or uid: root and qBittorrent, via any non-lo interface
+		if strings.Contains(drop, "oifname") || strings.Contains(drop, "skuid") {
+			t.Errorf("%s: private drop must not be interface/uid scoped: %s", mode, drop)
+		}
+		di, lo := indexOf(out, drop), indexOf(out, `oifname "lo" accept`)
+		if lo < 0 || lo > di {
+			t.Errorf("%s: only the lo device may be accepted before the private drop", mode)
+		}
+		// IPv6 is dropped in both modes
+		if indexOf(out, `meta nfproto ipv6 oifname != "lo" drop`) < 0 {
+			t.Errorf("%s: IPv6 must be dropped", mode)
+		}
+		// the tunnel DNS exception exists only in required mode, only through wg*, only for port 53, before the drop
+		dnsRule := `oifname "wg*" ip daddr { 10.2.0.1 } meta l4proto { tcp, udp } th dport 53 accept`
+		if mode == "required" {
+			if i := indexOf(out, dnsRule); i < 0 || i > di {
+				t.Errorf("required: DNS exception missing or after the drop: %v", out)
+			}
+			if !(indexOf(out, `oifname "wg*" accept`) > di) {
+				t.Error("required: the blanket wg accept must come after the private drop (private destinations via wg are dropped)")
+			}
+		} else {
+			if strings.Contains(r, "10.2.0.1") {
+				t.Error("off: no tunnel DNS rule expected")
+			}
+			if !strings.Contains(chain(t, r, "output"), "policy accept") {
+				t.Error("off: public internet stays reachable")
+			}
+		}
+	}
+}
+
+func TestEndpointAndEstablishedComeBeforeThePrivateDrop(t *testing.T) {
+	// a VPN endpoint on a private address (lab setups) and the api/worker replies must still work
+	ep := netip.MustParseAddrPort("10.9.9.9:51820")
+	out := ruleLines(chain(t, buildRuleset("required", testPolicy(), []netip.AddrPort{ep}, nil), "output"))
+	drop := indexOf(out, "ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 } drop")
+	e := indexOf(out, "ip daddr 10.9.9.9 udp dport 51820 meta mark "+wgFwmark+" accept")
+	est := indexOf(out, "ip daddr { 172.31.250.0/24 } ct state established,related accept")
+	if drop < 0 || e < 0 || est < 0 || e > drop || est > drop {
+		t.Errorf("order wrong: %v", out)
+	}
+}
+
+// Documentation ranges are the fake internet of the hermetic test stacks; they must stay reachable.
+func TestDocumentationRangesAreNotBlocked(t *testing.T) {
+	for _, p := range []string{"192.0.2.", "198.51.100.", "203.0.113."} {
+		if strings.Contains(strings.Join(blockedV4, " "), p) {
+			t.Errorf("%s* must not be blocked", p)
+		}
+	}
+	for _, p := range blockedV4 {
+		if _, err := netip.ParsePrefix(p); err != nil {
+			t.Errorf("bad prefix %q", p)
+		}
+	}
+}
+
+func TestTunnelDNSSelection(t *testing.T) {
+	s := &Server{fallbackDNS: "1.1.1.1"}
+	cfg := &WGConfig{DNS: []netip.Addr{netip.MustParseAddr("10.2.0.1")}}
+	if got := s.tunnelDNS(cfg); len(got) != 1 || got[0].String() != "10.2.0.1" {
+		t.Errorf("got %v", got)
+	}
+	if got := s.tunnelDNS(&WGConfig{}); len(got) != 1 || got[0].String() != "1.1.1.1" {
+		t.Errorf("fallback: got %v", got)
+	}
+	if got := (&Server{fallbackDNS: "dns.example"}).tunnelDNS(&WGConfig{}); got != nil {
+		t.Errorf("hostname fallback must not produce rules: %v", got)
+	}
+}
+
+func TestRulesUseTheDNSOfTheTunnelThatIsUp(t *testing.T) {
+	s := &Server{fw: testPolicy()}
+	if strings.Contains(s.rules("required"), "th dport 53") {
+		t.Error("no tunnel, no DNS exception")
+	}
+	s.dns = []netip.Addr{netip.MustParseAddr("10.99.1.1")}
+	if !strings.Contains(s.rules("required"), "{ 10.99.1.1 } meta l4proto { tcp, udp } th dport 53 accept") {
+		t.Error("DNS of the tunnel that is up must be reachable via wg*")
 	}
 }
