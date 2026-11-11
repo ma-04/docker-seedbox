@@ -300,6 +300,10 @@ jobs:
           subject-name: ${{ steps.index.outputs.name }}
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: ${{ needs.guard.outputs.kind != 'dryrun' }}
+          # v4 also writes a storage record to GitHub's artifact-metadata store, which needs
+          # artifact-metadata: write. Nothing here reads it (verification uses the attestation),
+          # so it stays off, and a change on GitHub's side can't fail a release.
+          create-storage-record: false
 
   publish:
     name: Move the tags (all five images)
