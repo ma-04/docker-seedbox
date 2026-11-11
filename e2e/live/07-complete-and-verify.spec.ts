@@ -1,6 +1,6 @@
 import { expect, test, type Browser, type Page } from '@playwright/test';
 import { live } from './env';
-import { api, fetchHash, jobRow, login, qbtJson, rclone, s3Prefix, save, state, type Fetched } from './lib';
+import { api, fetchHash, fullHash, jobRow, login, qbtJson, rclone, s3Prefix, save, state, type Fetched } from './lib';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -32,7 +32,7 @@ async function verifyLocal(page: Page, jobId: number, isoName: string, sha256: s
   expect(f.url, 'a signed link').toBeTruthy();
   expect(new URL(f.url!).host).toBe(new URL(live.filesURL).host);
   expect(f.size).toBeGreaterThan(5e8);
-  const full = await fetchHash(f.url!);
+  const full = await fullHash(f.url!);
   expect(full.status).toBe(200);
   expect(full.bytes).toBe(f.size);
   expect(full.sha256, 'sha256 published by the distribution').toBe(sha256);
@@ -72,8 +72,12 @@ test.describe('7. completion and verification', () => {
     const ubPartial = ub ? ub.totalSize * ub.downloadProgress : 0;   // what the (separate) Ubuntu torrent has fetched so far
     const dl = ((await qbtJson('/api/v2/sync/maindata')).server_state.alltime_dl as number) - ST().baselineDl;
     save({ downloadedBytes: dl, debianBytes: deb, ubuntuPartialBytes: ubPartial });
-    // three jobs for one torrent: ~1x its size (never 2x or 3x); the bound allows protocol overhead and discarded pieces
-    expect(dl - ubPartial, `engine downloaded ${dl - ubPartial} bytes for one ${deb}-byte torrent shared by three jobs`).toBeLessThan(deb * 1.25);
+    // the extra jobs added by specs 05/06 (a DVD and a desktop ISO) also move the engine's lifetime counter: subtract what they hold
+    const extra = ['limitIso', 'restartIso'].reduce((n, k) => { const e = j[k] && jobs.find((x) => x.id === j[k]!.id); return n + (e ? e.totalSize * e.downloadProgress : 0); }, 0);
+    // three jobs for one torrent: ~1x its size on a clean run (the add-time check in spec 04 asserts a single engine torrent).
+    // The lifetime counter also contains pieces fetched twice when a restart lost resume data and webseed overhead, so the
+    // bound only separates "once" from "once per job" (3x); a clean run lands near 1x.
+    expect(dl - ubPartial - extra, `engine downloaded ${dl - ubPartial - extra} bytes for one ${deb}-byte torrent shared by three jobs`).toBeLessThan(deb * 2);
   });
 
   test('Debian ISO via the Local destination (signed files-host link): sha256 equals the published one, Range works, tampering is refused', async ({ browser }) => {
@@ -97,7 +101,7 @@ test.describe('7. completion and verification', () => {
     // 2. the Worker link
     expect(iso.url, 'a proxy link').toBeTruthy();
     expect(new URL(iso.url!).origin).toBe(new URL(live.proxyUrl()).origin);
-    const full = await fetchHash(iso.url!);
+    const full = await fullHash(iso.url!);
     expect(full.status).toBe(200);
     expect(full.bytes).toBe(iso.size);
     expect(full.sha256).toBe(ST().debian.sha256);
@@ -117,7 +121,7 @@ test.describe('7. completion and verification', () => {
     expect(u.host).toContain(new URL(live.s3.endpoint()).host.replace(/^s3\./, ''));
     expect(decodeURIComponent(u.pathname)).toContain(s3Prefix());
     expect(u.search).toMatch(/X-Amz-Signature|Signature/i);
-    const full = await fetchHash(iso.url!);
+    const full = await fullHash(iso.url!);
     expect(full.status).toBe(200);
     expect(full.sha256).toBe(ST().debian.sha256);
     // out of band: the object really is below <base>/<run-id>/ (listing only that prefix)

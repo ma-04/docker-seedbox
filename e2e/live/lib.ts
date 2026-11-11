@@ -108,6 +108,27 @@ async function getRetry(url: string): Promise<Response> {
   }
   throw last;
 }
+/**
+ * Full-file download + sha256 for the multi-GB checks. With LIVE_HASH_SSH_TARGET (+ optional LIVE_HASH_SSH_KEY) the download
+ * happens on that well-connected host (curl piped to sha256sum, nothing written to disk, the signed URL goes over ssh
+ * stdin only: never in argv, history or logs); otherwise it is fetched locally.
+ */
+export async function fullHash(url: string): Promise<{ status: number; bytes: number; sha256: string }> {
+  const target = process.env.LIVE_HASH_SSH_TARGET;
+  if (!target) { const r = await fetchHash(url); return { status: r.status, bytes: r.bytes, sha256: r.sha256 }; }
+  const key = process.env.LIVE_HASH_SSH_KEY?.replace(/^~/, process.env.HOME ?? '');
+  const args = [...(key ? ['-i', key, '-o', 'IdentitiesOnly=yes'] : []), '-o', 'BatchMode=yes', target,
+    `read -r u; curl -sSL -w '%{stderr}code=%{http_code} bytes=%{size_download}\\n' "$u" | sha256sum`];
+  return new Promise((resolve, reject) => {
+    const p = execFile('ssh', args, { timeout: 40 * 60_000, maxBuffer: 1 << 20 }, (e, out, err) => {
+      const m = /code=(\d+) bytes=(\d+)/.exec(String(err));
+      const h = /^([0-9a-f]{64})/.exec(String(out))?.[1];
+      if (!m || !h) return reject(new Error(`remote hash failed: ${e?.message ?? ''} ${String(err).replace(/https?:\/\/\S+/g, '<url>').slice(0, 200)}`));
+      resolve({ status: Number(m[1]), bytes: Number(m[2]), sha256: h });
+    });
+    p.stdin?.end(`${url}\n`);
+  });
+}
 export async function getText(url: string): Promise<string> { return (await getRetry(url)).text(); }
 export async function getBuffer(url: string): Promise<Buffer> { return Buffer.from(await (await getRetry(url)).arrayBuffer()); }
 

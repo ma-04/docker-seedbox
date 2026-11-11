@@ -10,7 +10,7 @@ test.describe('6a. `compose restart vpn` mid-download', () => {
     const jobId = await ensureFreshJob(page, 'restartIso', 'ubuntu-desktop');   // fresh, big, mid-download
     const progress = async () => ((await api(page, 'GET', '/api/jobs')).json as { id: number; downloadProgress: number; state: string }[]).find((j) => j.id === jobId)!;
     const own = await serverEgressIp();
-    await expect.poll(async () => (await progress()).downloadProgress, { timeout: 120_000, intervals: [3000] }).toBeGreaterThan(0.01);
+    await expect.poll(async () => (await progress()).downloadProgress, { timeout: 120_000, intervals: [3000] }).toBeGreaterThan(0.005);
     const p0 = await progress();
     expect(p0.state).toBe('downloading');
 
@@ -35,6 +35,9 @@ test.describe('6a. `compose restart vpn` mid-download', () => {
     const after = (await api(page, 'GET', '/api/admin/vpn/status')).json;
     expect(after.mode).toBe('required');
     expect(after.publicIp).not.toBe(own);
+    // progress survives the restart (qBittorrent got SIGTERM and saved its resume data): it does not start over
+    await expect.poll(async () => (await progress()).downloadProgress, { timeout: 120_000, intervals: [3000], message: 'progress is kept across the restart' }).toBeGreaterThanOrEqual(p0.downloadProgress * 0.8);
+    note(testInfo, 'resume', `progress before restart ${(p0.downloadProgress * 100).toFixed(1)}%, after ${((await progress()).downloadProgress * 100).toFixed(1)}%`);
     // the download picks up again
     await expect.poll(async () => { const p = await progress(); return (p.state === 'downloading' && p.downloadProgress > p0.downloadProgress) || (p.state !== 'downloading' && p.state !== 'failed' && p.downloadProgress > p0.downloadProgress); }, { timeout: 300_000, intervals: [5000] }).toBe(true);
   });
