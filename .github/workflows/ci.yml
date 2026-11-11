@@ -1,24 +1,31 @@
 name: CI
 
+# Runs on pull requests, and as a reusable workflow: release.yml calls it and publishes only if every job here is green
+# for the exact commit being released (a push to main goes through release.yml, so it is tested exactly once).
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # github.workflow is the CALLER's name inside a reusable workflow, so a release run and a PR run never share a group.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     name: Typecheck and unit tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -29,10 +36,14 @@ jobs:
   compose:
     name: Validate compose files and scripts
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Shellcheck
-        run: shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh
+        run: shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh services/qbittorrent/seed-config.sh
       - name: docker compose config (every proxy mode)
         working-directory: deploy
         env:
@@ -58,10 +69,13 @@ jobs:
             --proxy none --yes --no-start
           test -s deploy/authelia/users/users_database.yml
           test "$(stat -c %a deploy/.env)" = 600
+          test "$(stat -c %a deploy/authelia/users/users_database.yml)" = 600
 
   images:
     name: Build ${{ matrix.image }} image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -72,9 +86,11 @@ jobs:
           - { image: vpn, context: services/vpn, file: services/vpn/Dockerfile }
           - { image: qbittorrent, context: services/qbittorrent, file: services/qbittorrent/Dockerfile }
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
@@ -82,17 +98,34 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
 
+  vpn-sidecar:
+    name: VPN sidecar kill-switch test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Hermetic WireGuard stack (kill switch, rotation, LAN policy, qBittorrent seeding)
+        run: services/vpn/test/run.sh
+
   e2e:
     name: End-to-end (Playwright)
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Hermetic stack + Playwright suite
         run: e2e/run.sh
       - name: Upload report, traces and container logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-output
           path: e2e/.out
