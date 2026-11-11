@@ -89,7 +89,9 @@ nothing moved; re-run the failed jobs (`gh run rerun <id> --failed`): every step
   `./setup.sh update --version X.Y.Z --allow-downgrade` after restoring a backup.
 - *Several runs at once:* runs do not queue (GitHub keeps only one pending run per group and would cancel the
   others); only the tag-moving `publish` job is serialized. A third run arriving while one `publish` job waits cancels
-  the waiting one; re-run it.
+  the waiting one; re-run it. One exception: the CI gate (`ci.yml`) keeps its own per-ref group, so for quick
+  successive pushes to `main` the middle run's gate can be cancelled while it waits. That commit then gets no
+  `sha-<short>` tag, and `:edge` is moved by the newer run (each tag has its own ref, so releases are not affected).
 
 ## Housekeeping
 

@@ -436,7 +436,8 @@ resolve_images() { # decide pull-vs-build for install; pins SEEDBOX_VERSION in .
   if [ -z "$ver" ]; then
     if [ "$NO_START" = 1 ]; then return 0; fi
     # :latest exists once anything was released: then the lookup failed (offline, rate-limited), not "no release yet".
-    if [ -z "$VERSION_IN" ] && image_exists latest; then
+    # (Only where the lookup applies: for another registry latest_release never asks GitHub.)
+    if [ -z "$VERSION_IN" ] && [[ $(registry) == ghcr.io/* ]] && image_exists latest; then
       die "Could not look up the newest release (GitHub API unreachable or rate-limited). Re-run later, or pin one: --version X.Y.Z (https://github.com/${SEEDBOX_REPO:-ma-04/docker-seedbox}/releases)."
     fi
     if [ -z "$VERSION_IN" ] && image_exists edge; then
