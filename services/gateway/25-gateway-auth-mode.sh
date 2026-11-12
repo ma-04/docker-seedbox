@@ -49,8 +49,8 @@ case "$mode" in
   authelia)
     cp "$snip/auth-authelia-page.conf" "$out/auth-page.conf"
     cp "$snip/auth-authelia-api.conf" "$out/auth-api.conf"
-    # A page (browser login redirect) served by the API (/jackett/): the page snippet already sets X-Gateway-Secret.
-    cp "$snip/auth-authelia-page.conf" "$out/auth-page-to-api.conf"
+    # A page (browser login redirect) served by the API (/jackett/): page auth + the gateway secret, exactly once.
+    cat "$snip/auth-authelia-page.conf" "$snip/to-api.conf" > "$out/auth-page-to-api.conf"
     ;;
   external)
     echo "gateway: AUTH_MODE=external - trusting Remote-* headers from the upstream proxy." >&2

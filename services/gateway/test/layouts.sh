@@ -37,7 +37,7 @@ jk() { awk '/location \^~ \/jackett\/ \{/{f=1} f{print} f&&/^  \}/{exit}' "$T/$1
 has "$(jk single)" "include /tmp/gateway/auth-page-to-api.conf;" "/jackett/ goes through the page login"
 # shellcheck disable=SC2016  # a literal nginx variable
 has "$(jk single)" 'proxy_pass $api_upstream;' "/jackett/ is proxied to the api (never to Jackett directly)"
-hasnt "$(jk single)" "to-api.conf;" "/jackett/ does not add a second gateway secret"
+hasnt "$(jk single)" "snippets/to-api.conf;" "/jackett/ does not add a second gateway secret"
 n=$(section single /tmp/gateway/auth-page-to-api.conf | grep -c 'X-Gateway-Secret')
 if [ "$n" = 1 ]; then ok "authelia: the /jackett/ snippet sets X-Gateway-Secret exactly once"; else bad "authelia: X-Gateway-Secret set $n times"; fi
 hasnt "$(cat "$T/single.conf")" "vpn:9117" "the gateway never addresses Jackett"

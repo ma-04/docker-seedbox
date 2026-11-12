@@ -120,7 +120,7 @@ server {
   }
   location ^~ /jackett/ {
     include /etc/nginx/snippets/proxy-common.conf;
-    include /tmp/gateway/auth-page-to-api.conf;   # page login (redirect to the portal) + exactly one X-Gateway-Secret
+    include /tmp/gateway/auth-page-to-api.conf;   # page login (redirect to the portal) + X-Gateway-Secret, once
     include /etc/nginx/snippets/security-headers.conf;
     client_max_body_size 1m;
     set $api_upstream http://api:3000;
