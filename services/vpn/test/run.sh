@@ -94,7 +94,9 @@ export DC WORK
 
 section "build + keys"
 $DC build tools-build vpn qbittorrent >/dev/null || { echo "build failed"; exit 2; }
-$DC pull -q jackett flaresolverr >/dev/null || { echo "pull of the search companions failed"; exit 2; }
+# Registries rate-limit (toomanyrequests) and flake: 4 attempts with growing pauses (5, 20, 45 s), like .github/scripts/smoke.sh.
+pull_companions() { local i; for i in 1 2 3 4; do $DC pull -q jackett flaresolverr >/dev/null && return 0; [ "$i" -lt 4 ] && { echo "pull of the search companions failed (attempt $i), retrying in $((i * i * 5)) s"; sleep $((i * i * 5)); }; done; return 1; }
+pull_companions || { echo "pull of the search companions failed (4 attempts)"; exit 2; }
 gen() { docker run --rm sbvpn-tools sh -c 'k=$(wg genkey); echo $k; echo $k | wg pubkey' | paste -sd' ' -; }
 read -r C_PRIV C_PUB < <(gen)
 read -r S1_PRIV S1_PUB < <(gen)
