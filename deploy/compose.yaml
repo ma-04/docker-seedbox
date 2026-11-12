@@ -263,9 +263,9 @@ services:
         condition: service_healthy
         restart: true                 # re-attach to the new namespace when vpn is recreated/restarted
     healthcheck:
-      # WebUI up (403: loopback clients must log in too, LocalHostAuth=true) AND still in the live vpn namespace (a non-lo
-      # interface is visible; after a plain `docker restart vpn` only lo is). No connection to anything but its own port.
-      test: ["CMD-SHELL", "c=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v2/app/version); { [ \"$$c\" = 403 ] || [ \"$$c\" = 200 ]; } && awk 'NR>2 && $$1 != \"lo:\" {f=1} END {exit !f}' /proc/net/dev"]
+      # WebUI up (403: loopback clients must log in too, LocalHostAuth=true) AND still in the live vpn namespace (a Docker
+      # interface eth* is visible; after a plain `docker restart vpn` only lo and the sidecar's wg* remain). No other connection.
+      test: ["CMD-SHELL", "c=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v2/app/version); { [ \"$$c\" = 403 ] || [ \"$$c\" = 200 ]; } && awk 'NR>2 && $$1 ~ /^eth[0-9]+:/ {f=1} END {exit !f}' /proc/net/dev"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -320,11 +320,12 @@ services:
       vpn:
         condition: service_healthy
         restart: true                 # re-attach to the new namespace when vpn is recreated/restarted
-    # Healthy = Jackett answers AND it still shares the vpn container's live namespace (a non-lo interface is visible). After
-    # a plain `docker restart vpn` (not through compose) it would sit in the dead old namespace (only lo), unreachable but
+    # Healthy = Jackett answers AND it still shares the vpn container's live namespace (a Docker interface eth* is visible).
+    # After a plain `docker restart vpn` (not through compose) it would sit in the dead old namespace (only lo and the
+    # sidecar's wg*: Docker removes only its own interfaces), unreachable but
     # answering its own loopback; this makes that state "unhealthy" (`./setup.sh doctor`; fix: docker compose up -d).
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login && awk 'NR>2 && $$1 != \"lo:\" {f=1} END {exit !f}' /proc/net/dev"]
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login && awk 'NR>2 && $$1 ~ /^eth[0-9]+:/ {f=1} END {exit !f}' /proc/net/dev"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -355,7 +356,7 @@ services:
         restart: true
     healthcheck:
       # listening on 127.0.0.1:8191 (read from /proc: the kill switch lets only Jackett and root connect) + live namespace
-      test: ["CMD-SHELL", "grep -q '0100007F:1FFF 00000000:0000 0A' /proc/net/tcp && awk 'NR>2 && $$1 != \"lo:\" {f=1} END {exit !f}' /proc/net/dev"]
+      test: ["CMD-SHELL", "grep -q '0100007F:1FFF 00000000:0000 0A' /proc/net/tcp && awk 'NR>2 && $$1 ~ /^eth[0-9]+:/ {f=1} END {exit !f}' /proc/net/dev"]
       interval: 30s
       timeout: 10s
       retries: 3

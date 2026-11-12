@@ -151,9 +151,9 @@ says `searchEnabled: false`, the UI hides it, every `/api/search*` route and `/j
   `FlareSolverrUrl` (set from `JACKETT_FLARESOLVERR_URL`, cleared again when that is empty and the value is our loopback
   URL). Indexers, Jackett's own admin password and everything else belong to the admin. `jackett-init` (root, `CHOWN` only)
   gives the volume to uid 1001; Jackett mounts it with `nocopy`. Healthcheck: Jackett answers AND the container still shares
-  a live namespace (a non-`lo` interface is listed in `/proc/net/dev`). After a plain `docker restart vpn` (outside compose;
-  `depends_on: restart: true` only covers compose operations) a companion sits in the dead old namespace: only `lo`,
-  unreachable, but answering its own loopback. FlareSolverr's healthcheck (listening on `127.0.0.1:8191`, read from
+  a live namespace (one of Docker's interfaces, `eth*`, is listed in `/proc/net/dev`). After a plain `docker restart vpn`
+  (outside compose; `depends_on: restart: true` only covers compose operations) a companion sits in the dead old namespace:
+  Docker removed its `eth*`, only `lo` and the sidecar's `wg*` are left; unreachable, but answering its own loopback. FlareSolverr's healthcheck (listening on `127.0.0.1:8191`, read from
   `/proc/net/tcp`) and qBittorrent's (WebUI answers 403/200) have the same second condition.
 - **Kill switch:** the sidecar's INPUT chain accepts new connections to `SEARCH_PORT` (9117) only from `SEARCH_TRUSTED_IPS`
   (compose: `API_IP`) and never from a `wg*` interface; `SEARCH_PORT` and `LOCAL_ONLY_PORTS` (8191, FlareSolverr) are then

@@ -64,9 +64,11 @@ lan_policy() { # mode-label
 # Search companions (Jackett, FlareSolverr) run in the same namespace; their own egress is what the kill switch must stop.
 jk_rc() { $DC exec -T jackett curl -sS -m 4 -o /dev/null "$@" >/dev/null 2>&1; echo $?; }        # as Jackett (uid 1000)
 fs_rc() { $DC exec -T flaresolverr curl -sS -m 4 -o /dev/null "$@" >/dev/null 2>&1; echo $?; }   # as FlareSolverr
-fs_fetch() { # FlareSolverr's own headless browser fetching $1 (asked by Jackett, its only client): "ok" only when it got the page
+fs_fetch() { # fs_fetch URL MARKER: FlareSolverr's own headless browser (asked by Jackett, its only client) fetching URL;
+  # "ok" only when the page it got contains MARKER. FlareSolverr reports solution.status 200 for EVERYTHING (also an error
+  # page or a refused port), so the content is the only evidence of what the browser actually received.
   $DC exec -T jackett curl -sS -m 40 -H 'Content-Type: application/json' -d "{\"cmd\":\"request.get\",\"url\":\"$1\",\"maxTimeout\":20000}" http://127.0.0.1:8191/v1 2>/dev/null \
-    | jq -r 'if .status == "ok" and .solution.status == 200 then "ok" else "failed" end' 2>/dev/null || echo failed
+    | jq -r --arg m "$2" 'if .status == "ok" and ((.solution.response // "") | contains($m)) then "ok" else "failed" end' 2>/dev/null || echo failed
 }
 lan_code() { $DC exec -T "$1" curl -s -m 4 -o /dev/null -w '%{http_code}' "$2"; }
 lo_code() { # lo_code CONTAINER UID URL [curl args]: HTTP code over loopback as that uid; 000 = no connection (dropped)
@@ -189,8 +191,9 @@ check "Jackett (1001) -> control API :8000 over loopback: dropped" test "$(lo_co
 check "FlareSolverr (1000) -> Jackett :9117 over loopback: dropped" test "$(lo_code flaresolverr 1000 http://127.0.0.1:9117/jackett/UI/Login)" = 000
 check "FlareSolverr (1000) -> control API :8000 over loopback: dropped" test "$(lo_code flaresolverr 1000 http://127.0.0.1:8000/status)" = 000
 check "FlareSolverr (1000) -> qBittorrent setPreferences over loopback -> 403 (login required)" test "$(lo_code flaresolverr 1000 http://127.0.0.1:8080/api/v2/app/setPreferences "${SETPREF[@]}")" = 403
-check "a page in FlareSolverr's browser cannot load Jackett's UI over loopback" test "$(fs_fetch http://127.0.0.1:9117/jackett/UI/Login)" = failed
-check "a page in FlareSolverr's browser cannot use qBittorrent's API over loopback (403)" test "$(fs_fetch http://127.0.0.1:8080/api/v2/app/preferences)" = failed
+check "a page in FlareSolverr's browser cannot load Jackett's UI over loopback" test "$(fs_fetch http://127.0.0.1:9117/jackett/UI/Login Jackett)" = failed
+check "a page in FlareSolverr's browser reaches qBittorrent's API over loopback only to be refused (Forbidden)" test "$(fs_fetch http://127.0.0.1:8080/api/v2/app/preferences Forbidden)" = ok
+check "a page in FlareSolverr's browser cannot read qBittorrent's preferences over loopback" test "$(fs_fetch http://127.0.0.1:8080/api/v2/app/preferences autorun_enabled)" = failed
 check "qBittorrent's autorun is still off after all of the above" bash -c "$DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/preferences | jq -e '(.autorun_enabled|not)'"
 check "trusted LAN client -> FlareSolverr :8191 times out (loopback only)" test "$(lan_code lan-client http://vpn:8191/health)" = 000
 check "untrusted sibling -> FlareSolverr :8191 times out" test "$(lan_code lan-intruder http://vpn:8191/health)" = 000
@@ -257,7 +260,7 @@ checkno "required: root cannot reach the internet-direct echo either (no tunnel)
 section "2b. search companions in required mode, tunnel down: no egress at all"
 check "required, no tunnel: Jackett -> internet-direct echo times out" test "$(jk_rc http://198.51.100.20/)" = 28
 check "required, no tunnel: FlareSolverr -> internet-direct echo times out" test "$(fs_rc http://198.51.100.20/)" = 28
-check "required, no tunnel: FlareSolverr's headless browser cannot fetch the internet-direct echo" test "$(fs_fetch http://198.51.100.20/)" = failed
+check "required, no tunnel: FlareSolverr's headless browser cannot fetch the internet-direct echo" test "$(fs_fetch http://198.51.100.20/ direct)" = failed
 checkno "required, no tunnel: Jackett cannot resolve names (no nameserver)" $DC exec -T jackett sh -c 'getent hosts example.com'
 check "required, no tunnel: Jackett still answers the api (LAN input is independent of the tunnel)" test "$(lan_code lan-client http://vpn:9117/jackett/UI/Login)" = 302
 
@@ -288,7 +291,7 @@ check "status.publicIp = 203.0.113.11 (PUBLIC_IP_URL via tunnel)" test "$(status
 check "WebUI still reachable from LAN client with tunnel up" $DC exec -T lan-client curl -fsS -m 5 http://vpn:8080/api/v2/app/version
 checkno "WebUI/control not reachable via the tunnel address (input drop)" $DC exec -T wg1 curl -sS -m 3 http://10.99.1.2:8000/status
 check "tunnel up: Jackett's traffic leaves through WG1 (echo-behind sees 203.0.113.11)" retry 10 sh_ "$DC exec -T jackett curl -sS -m 5 http://203.0.113.20/ | grep -q '^behind 203.0.113.11$'"
-check "tunnel up: FlareSolverr's headless browser fetches through the tunnel" retry 3 sh_ '[ "$(fs_fetch http://203.0.113.20/)" = ok ]'
+check "tunnel up: FlareSolverr's headless browser fetches through the tunnel" retry 3 sh_ '[ "$(fs_fetch http://203.0.113.20/ behind)" = ok ]'
 check "tunnel up: Jackett still cannot reach the internet-direct echo" test "$(jk_rc http://198.51.100.20/)" = 28
 checkno "Jackett/FlareSolverr ports not reachable via the tunnel address" $DC exec -T wg1 sh -c 'curl -sS -m 3 http://10.99.1.2:9117/ || curl -sS -m 3 http://10.99.1.2:8191/health'
 checkno "no leak so far" probe test -s /tmp/leaks
@@ -405,7 +408,8 @@ check "baseline: FlareSolverr's healthcheck passes" retry 90 hc flaresolverr
 docker restart -t 1 sbvpn-vpn-1 >/dev/null
 for i in $(seq 1 20); do [ "$(docker inspect -f '{{.State.Health.Status}}' sbvpn-vpn-1)" = healthy ] && break; sleep 1; done
 # A plain `docker restart` of vpn (not through compose) leaves the companions in the old, dead namespace: unreachable, but
-# their own loopback still answers. The configured healthchecks must notice (only lo is visible in that namespace).
+# their own loopback still answers. The configured healthchecks must notice: no Docker interface (eth*) is left in that
+# namespace, only lo and, with a tunnel up as here, the sidecar's wg* (which an "any non-lo interface" check mistook for live).
 checkno "detached by a plain vpn restart: Jackett's healthcheck fails" hc jackett
 checkno "detached by a plain vpn restart: FlareSolverr's healthcheck fails" hc flaresolverr
 check "re-attach: docker restart of Jackett and FlareSolverr joins the restarted vpn's namespace" docker restart -t 3 sbvpn-jackett-1 sbvpn-flaresolverr-1
