@@ -6,6 +6,8 @@ import AdminJobs from './pages/admin/AdminJobs';
 import AdminSettings from './pages/admin/AdminSettings';
 import AdminUsers from './pages/admin/AdminUsers';
 import AdminVpn from './pages/admin/AdminVpn';
+import AdminSearch from './pages/admin/AdminSearch';
+import Search from './pages/Search';
 import Downloads from './pages/Downloads';
 import AddHandler from './pages/AddHandler';
 import Storage from './pages/Storage';
@@ -25,6 +27,7 @@ function Layout({ me }: { me: MeDto }) {
         </div>
         <nav aria-label="Main" className="flex gap-1 overflow-x-auto px-2 pb-2 md:block md:space-y-1 md:pb-4">
           <NavLink to="/" end className={navCls}>Downloads</NavLink>
+          {me.searchEnabled && <NavLink to="/search" className={navCls}>Search</NavLink>}
           <NavLink to="/storage" className={navCls}>Storage</NavLink>
           {me.isAdmin && (
             <>
@@ -32,6 +35,7 @@ function Layout({ me }: { me: MeDto }) {
               <NavLink to="/admin/destinations" className={navCls}>Destinations</NavLink>
               <NavLink to="/admin/vpn" className={navCls}>VPN</NavLink>
               <NavLink to="/admin/settings" className={navCls}>Settings</NavLink>
+              <NavLink to="/admin/search" className={navCls}>Search</NavLink>
               <NavLink to="/admin/users" className={navCls}>Users</NavLink>
               <NavLink to="/admin/jobs" className={navCls}>All jobs</NavLink>
             </>
@@ -71,11 +75,13 @@ export default function App() {
         <Route index element={<Downloads />} />
         <Route path="add" element={<AddHandler />} />
         <Route path="storage" element={<Storage />} />
+        <Route path="search" element={me.data.searchEnabled ? <Search /> : <Navigate to="/" replace />} />
         <Route path="admin">
           <Route index element={<Navigate to={isAdmin ? 'destinations' : '/'} replace />} />
           <Route path="destinations" element={isAdmin ? <AdminDestinations /> : <Navigate to="/" replace />} />
           <Route path="vpn" element={isAdmin ? <AdminVpn /> : <Navigate to="/" replace />} />
           <Route path="settings" element={isAdmin ? <AdminSettings /> : <Navigate to="/" replace />} />
+          <Route path="search" element={isAdmin ? <AdminSearch /> : <Navigate to="/" replace />} />
           <Route path="users" element={isAdmin ? <AdminUsers /> : <Navigate to="/" replace />} />
           <Route path="jobs" element={isAdmin ? <AdminJobs /> : <Navigate to="/" replace />} />
         </Route>
