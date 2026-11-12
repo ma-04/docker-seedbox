@@ -165,21 +165,23 @@ How it is contained and what is checked: [SECURITY.md](../SECURITY.md) ("Torrent
 API key are kept for later). Category mapping (Torznab standard ids): Movies 2000, TV 5000, Music 3000, Audiobooks 3030,
 Books 7000, Software/PC 4000, Games 1000 + 4050, Anime 5070, Other 8000, XXX 6000; "All" = every enabled category.
 
-**FlareSolverr (optional, off by default)**
+**FlareSolverr (on by default with search)**
 
-Some indexers sit behind Cloudflare's browser challenge, which Jackett cannot pass on its own. `./setup.sh --flaresolverr`
-(needs search) adds FlareSolverr, a headless Chromium that solves these challenges, and points Jackett at it
+Some indexers sit behind Cloudflare's browser challenge, which Jackett cannot pass on its own. Switching search on
+(`./setup.sh --search`) also adds FlareSolverr, a headless Chromium that solves these challenges, and points Jackett at it
 (`FlareSolverrUrl = http://127.0.0.1:8191`, re-applied at start). Admin -> Search shows whether it is reachable. Trade-offs:
 
 - **RAM:** expect 200-400 MB idle and up to the 1 GB cap while solving (plus 256 MB shared memory).
 - **Unreliable by nature:** solving breaks whenever Cloudflare changes its challenge, until FlareSolverr catches up; some
   challenges (interactive ones, Turnstile in some modes) are never solved. Expect failed searches on those indexers.
-- **Only helps indexers behind Cloudflare.** Everything else works without it; leave it off unless an indexer's test in
-  Jackett fails with a Cloudflare error.
+- **Only helps indexers behind Cloudflare.** Everything else works without it; on a small server, switch it off
+  (`--search --no-flaresolverr`, or `--no-flaresolverr` later) if none of your indexers needs it.
 - It runs in the VPN namespace too and is reachable only by Jackett (loopback); it is never exposed through the gateway.
   It cannot run with a read-only root filesystem (it patches its browser driver at start).
 
-`./setup.sh --no-flaresolverr` switches it off (Jackett's FlareSolverr URL is cleared at its next start).
+`./setup.sh --no-flaresolverr` switches it off (Jackett's FlareSolverr URL is cleared at its next start) and re-runs keep
+it off; `./setup.sh --flaresolverr` switches it back on. An install that already had search before this default keeps
+its FlareSolverr setting.
 
 ## Browser integration
 

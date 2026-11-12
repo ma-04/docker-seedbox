@@ -18,7 +18,7 @@ This file is the contract between components. Change it before changing an inter
 | `vpn` | `services/vpn` | WireGuard client + kill switch + control API. Owns the network namespace used by `qbittorrent`. | none |
 | `qbittorrent` | `qbittorrentofficial/qbittorrent-nox` | Torrent engine, `network_mode: service:vpn`. | none |
 | `jackett` (+ one-shot `jackett-init`) | `linuxserver/jackett` (upstream, pinned) | Optional torrent search (profile `search`), `network_mode: service:vpn`. Only the api may connect. | none |
-| `flaresolverr` | `flaresolverr/flaresolverr` (upstream, pinned) | Optional Cloudflare solver for Jackett (profile `search-flaresolverr`), `network_mode: service:vpn`, loopback only. | none |
+| `flaresolverr` | `flaresolverr/flaresolverr` (upstream, pinned) | Cloudflare solver for Jackett (profile `search-flaresolverr`; on by default with search, `--no-flaresolverr` turns it off), `network_mode: service:vpn`, loopback only. | none |
 | `apps/drive-proxy` | Cloudflare Worker (not in compose) | Signed-URL download proxy for the shared Google Drive. | — |
 
 Volumes: `data` (SQLite, api+worker), `downloads` (worker: whole volume rw; qbittorrent: only the `incomplete/` subpath rw; gateway: only the `library/` subpath, read-only; api: only the `library/` subpath, for the local-destination test probe),

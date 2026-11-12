@@ -59,8 +59,9 @@ Install options (each also readable from the environment as SEEDBOX_<NAME>, e.g.
   --acme-email MAIL      e-mail for Let's Encrypt (bundled / nginx-proxy + acme-companion)
   --search               enable torrent search: Jackett in the VPN namespace (compose profile "search"); generates its
                          API key. Asked on an interactive first install. --no-search switches it off (the key is kept)
-  --flaresolverr         also run FlareSolverr for indexers behind Cloudflare (profile "search-flaresolverr"; needs
-                         --search; about 1 GB RAM; see docs/configuration.md). --no-flaresolverr switches it off
+  --flaresolverr         run FlareSolverr for indexers behind Cloudflare (profile "search-flaresolverr"; needs --search;
+                         up to 1 GB RAM; see docs/configuration.md). On by default when search is switched on;
+                         --no-flaresolverr switches it off (kept off on re-runs)
   --version VERSION      image version to run: X.Y.Z, latest (= the newest release, pinned as its X.Y.Z), edge (the
                          head of main, CI-tested, not for production) or local (default: the newest release; with none
                          published yet, edge; with neither in the registry, the images are built from this clone)
@@ -666,9 +667,13 @@ or continue with --accept-new-secret if you want a new secret and will re-enter 
     [ "$(env_get FLARESOLVERR_ENABLED)" != 1 ] || fsolver=1
   fi
   if [ "$fresh" = 1 ] && [ "$INTERACTIVE" = 1 ] && [ -z "$SEARCH_IN" ]; then
-    if confirm "Enable torrent search? (Jackett; its tracker traffic goes through the VPN; admins add indexers in its own UI)" n; then search=1; fi
+    if confirm "Enable torrent search? (Jackett + FlareSolverr; their tracker traffic goes through the VPN; admins add indexers in Jackett's own UI)" n; then search=1; fi
   fi
+  local search_before=$search
   case "$SEARCH_IN" in 1) search=1 ;; 0) search=0 ;; "") ;; *) die "SEEDBOX_SEARCH must be 1 or 0" ;; esac
+  # FlareSolverr comes with search by default: when search is switched on (first install or off -> on), it is enabled
+  # too unless --no-flaresolverr says otherwise. An install that already has search keeps its FlareSolverr choice.
+  if [ "$search" = 1 ] && [ "$search_before" = 0 ]; then fsolver=1; fi
   case "$FS_IN" in 1) fsolver=1 ;; 0) fsolver=0 ;; "") ;; *) die "SEEDBOX_FLARESOLVERR must be 1 or 0" ;; esac
   if [ "$fsolver" = 1 ] && [ "$search" = 0 ]; then
     if [ "$FS_IN" = 1 ]; then die "--flaresolverr needs torrent search: add --search"; fi
