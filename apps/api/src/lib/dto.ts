@@ -18,6 +18,8 @@ export interface MeDto {
   googleConnectAvailable: boolean;
   /** Authelia logout URL (or null in external auth mode). */
   logoutUrl: string | null;
+  /** Torrent search is configured (SEARCH_BACKEND); false = the UI hides it and /api/search* answers 404. */
+  searchEnabled: boolean;
 }
 
 export interface DestinationDto {
@@ -84,7 +86,46 @@ export interface VpnStatusDto extends VpnStatus { reachable: boolean; activeConf
 export interface VpnRotateDto { configId?: number }
 
 /** GET/PUT /admin/settings. `google.oauthClientSecret` is masked on read; PUT accepts a partial object. */
-export type SettingsDto = Omit<Settings, Extract<keyof Settings, `trackers.${string}`>>;
+export type SettingsDto = Omit<Settings, Extract<keyof Settings, `trackers.${string}` | `search.${string}`>>;
+
+// ---- torrent search (docs/architecture.md § Torrent search) ----
+export type SearchCategoryId = 'movies' | 'tv' | 'music' | 'audiobooks' | 'books' | 'software' | 'games' | 'anime' | 'other' | 'xxx';
+/** GET /search/meta: what the search form may offer (enabled categories only). */
+export interface SearchMetaDto {
+  categories: { id: SearchCategoryId; label: string }[];
+  indexers: { id: string; name: string }[];
+  /** false when the indexer list could not be loaded (the filter is then hidden; searching may still work). */
+  indexersOk: boolean;
+}
+/** One result of GET /search?q=&cat=&indexer=. `token` is opaque: pass it to POST /search/add as is (expires after 30 min). */
+export interface SearchResultDto {
+  token: string;
+  title: string;
+  size: number;
+  seeders: number;
+  leechers: number;
+  indexer: { id: string | null; name: string | null };
+  category: SearchCategoryId;
+  publishedAt: number | null;
+}
+export interface SearchResponseDto { results: SearchResultDto[]; cached: boolean }
+/** POST /search/add. Answers like POST /jobs (201 new job, 200 existing one). */
+export interface SearchAddDto { token: string; destinationId: number }
+/** GET/PUT /admin/search. */
+export interface SearchAdminDto {
+  enabled: boolean;
+  backend: 'jackett' | null;
+  /** Where the backend's own admin UI is proxied for admins (e.g. "/jackett/"), or null. */
+  uiPath: string | null;
+  reachable: boolean;
+  indexerCount: number | null;
+  /** Short, fixed text when the backend is not reachable / refused. */
+  error: string | null;
+  /** FlareSolverr companion: not enabled, or whether the VPN sidecar can reach it on loopback. */
+  flaresolverr: 'disabled' | 'ok' | 'unreachable';
+  categories: { id: SearchCategoryId; label: string; enabled: boolean }[];
+}
+export interface SearchAdminUpdateDto { disabledCategories: SearchCategoryId[] }
 
 /** GET/PUT /admin/trackers. See docs/architecture.md § Tracker lists. */
 export interface TrackerListStatusDto {

@@ -4,6 +4,7 @@ import type { GuardOptions } from '../lib/netguard.js';
 import type { EngineClient } from './engine.js';
 import type { VpnClient } from '../lib/vpn.js';
 import type { RateLimiter } from './ratelimit.js';
+import type { SearchService } from '../lib/search/service.js';
 
 export interface Ctx {
   db: Db; config: Config; vpn: VpnClient; engine: EngineClient; fetchImpl: typeof fetch;
@@ -13,4 +14,6 @@ export interface Ctx {
   vpnLockWaitMs: number;
   /** DNS resolver override for the SSRF guard (tests). */
   lookup?: GuardOptions['lookup'];
+  /** Torrent search; null = switched off (no SEARCH_BACKEND). */
+  search: SearchService | null;
 }

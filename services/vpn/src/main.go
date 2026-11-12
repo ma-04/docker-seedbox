@@ -28,6 +28,7 @@ type Server struct {
 	envMTU                     int // VPN_MTU, 0 = unset
 	handshakeTimeout           time.Duration
 	origNS, origResolv         string
+	flaresolverrURL            string // fixed loopback health URL of the optional FlareSolverr companion
 
 	opMu sync.Mutex // serialises mutating operations
 
@@ -409,6 +410,21 @@ func publicError(err error) (int, string) {
 	return 500, "internal error (see the vpn container log)"
 }
 
+// probeLocal reports whether a loopback health URL answers 200 within 2 s. Only ever called with the fixed URL built at
+// start (FLARESOLVERR_PORT), never with request input. The body is discarded.
+func (s *Server) probeLocal(url string) bool {
+	if !strings.HasPrefix(url, "http://127.0.0.1:") {
+		return false
+	}
+	resp, err := (&http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Get(url)
+	if err != nil {
+		return false
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -454,6 +470,11 @@ func (s *Server) handler() http.Handler {
 		}
 		logf("connect %q ok", in.Name)
 		writeJSON(w, 200, s.status())
+	})
+	// Companion services in this namespace that nothing outside it may reach (the firewall keeps their ports lo-only):
+	// the sidecar probes a FIXED loopback URL for the admin status card. No parameters, no proxying.
+	mux.HandleFunc("GET /companions", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]bool{"flaresolverr": s.probeLocal(s.flaresolverrURL)})
 	})
 	mux.HandleFunc("POST /disconnect", func(w http.ResponseWriter, r *http.Request) {
 		s.disconnect()
@@ -540,7 +561,26 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s.fw = fwPolicy{lan: s.lan, webPort: webPort, controlPort: controlPort, controlFrom: controlFrom, allowOut: allowOuts}
+	// Torrent search (Jackett, optional): its port is closed to everything but SEARCH_TRUSTED_IPS (compose: API_IP);
+	// LOCAL_ONLY_PORTS (FlareSolverr) are reachable over lo only. Both are closed even when the services do not run.
+	searchPorts, err := parsePorts("SEARCH_PORT", env("SEARCH_PORT", "9117"))
+	if err != nil || len(searchPorts) != 1 {
+		log.Fatalf("invalid SEARCH_PORT %q", os.Getenv("SEARCH_PORT"))
+	}
+	searchFrom, err := parseControlTrusted(os.Getenv("SEARCH_TRUSTED_IPS"))
+	if err != nil {
+		log.Fatal(strings.ReplaceAll(err.Error(), "CONTROL_TRUSTED_IPS", "SEARCH_TRUSTED_IPS"))
+	}
+	localOnly, err := parsePorts("LOCAL_ONLY_PORTS", env("LOCAL_ONLY_PORTS", "8191"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	s.flaresolverrURL = "http://127.0.0.1:" + env("FLARESOLVERR_PORT", "8191") + "/health"
+	if _, err := parsePorts("FLARESOLVERR_PORT", env("FLARESOLVERR_PORT", "8191")); err != nil {
+		log.Fatal(err)
+	}
+	s.fw = fwPolicy{lan: s.lan, webPort: webPort, controlPort: controlPort, controlFrom: controlFrom, allowOut: allowOuts,
+		searchPort: searchPorts[0], searchFrom: searchFrom, localOnly: localOnly}
 	if len(allowOuts) > 0 {
 		logf("WARNING: VPN_LAN_ALLOW_OUT is set (%d entries): qBittorrent may reach those LAN addresses. Test setups only.", len(allowOuts))
 	}

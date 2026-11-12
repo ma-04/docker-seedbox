@@ -16,6 +16,8 @@ export interface VpnClient {
   connect(name: string, wgConfig: string): Promise<VpnStatus>;
   disconnect(): Promise<void>;
   setMode(mode: 'off' | 'required'): Promise<void>;
+  /** Companion services the sidecar probes on loopback (they are unreachable from outside its namespace). */
+  companions?(): Promise<{ flaresolverr: boolean }>;
 }
 
 export function vpnClient(config: Pick<Config, 'vpnUrl' | 'vpnControlToken'>, fetchImpl: typeof fetch = fetch): VpnClient {
@@ -34,6 +36,7 @@ export function vpnClient(config: Pick<Config, 'vpnUrl' | 'vpnControlToken'>, fe
     connect: (name, wgConfig) => call('POST', '/connect', { name, config: wgConfig }),
     disconnect: async () => { await call('POST', '/disconnect'); },
     setMode: async (mode) => { await call('POST', '/mode', { mode }); },
+    companions: () => call('GET', '/companions'),
   };
 }
 

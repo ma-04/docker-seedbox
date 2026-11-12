@@ -50,3 +50,22 @@ describe('hosts layout', () => {
     expect(loadConfig({ ...base }).appHost).toBe('localhost');
   });
 });
+
+describe('searchConfig (SEARCH_BACKEND / JACKETT_*)', () => {
+  const key = 'a'.repeat(32);
+  it('is off unless SEARCH_BACKEND says jackett', async () => {
+    const { searchConfig } = await import('./config.js');
+    for (const v of [undefined, '', ' ', 'off', 'none']) expect(searchConfig({ SEARCH_BACKEND: v })).toBeNull();
+    expect(searchConfig({ SEARCH_BACKEND: 'jackett', JACKETT_API_KEY: key })).toEqual({ backend: 'jackett', jackettUrl: 'http://vpn:9117', jackettApiKey: key, flaresolverr: false });
+    expect(searchConfig({ SEARCH_BACKEND: 'Jackett', JACKETT_API_KEY: key, JACKETT_URL: 'http://jackett.internal:9117/', FLARESOLVERR_ENABLED: '1' }))
+      .toMatchObject({ jackettUrl: 'http://jackett.internal:9117', flaresolverr: true });
+  });
+  it('refuses a half-configured or unsafe backend', async () => {
+    const { searchConfig } = await import('./config.js');
+    expect(() => searchConfig({ SEARCH_BACKEND: 'prowlarr', JACKETT_API_KEY: key })).toThrow(/SEARCH_BACKEND/);
+    for (const k of [undefined, '', 'short', `${key}x\ny`, 'a b'.repeat(10)]) expect(() => searchConfig({ SEARCH_BACKEND: 'jackett', JACKETT_API_KEY: k })).toThrow(/JACKETT_API_KEY/);
+    for (const u of ['ftp://vpn:9117', 'http://u:p@vpn:9117', 'http://vpn:9117/jackett', 'http://vpn:9117/?x=1', 'not a url']) {
+      expect(() => searchConfig({ SEARCH_BACKEND: 'jackett', JACKETT_API_KEY: key, JACKETT_URL: u }), u).toThrow(/JACKETT_URL/);
+    }
+  });
+});

@@ -25,6 +25,8 @@ export const SETTING_DEFAULTS = {
   'trackers.maxTrackers': 200, // cap on trackers taken from the lists (manual ones are not counted)
   'trackers.refreshRequestedAt': 0, // unix s; the API sets it, the worker refreshes when it is newer than refreshDoneAt
   'trackers.refreshDoneAt': 0,
+  // Torrent search (docs/architecture.md § Torrent search). Edited through /admin/search, never /admin/settings.
+  'search.disabledCategories': ['xxx'] as string[],
 };
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
 export type Settings = typeof SETTING_DEFAULTS;

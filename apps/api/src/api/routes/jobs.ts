@@ -51,6 +51,52 @@ export function mergeSource(secret: string, existingEnc: string, parsed: ParsedS
   return magnet === existing.magnet ? null : encryptJson(secret, { magnet });
 }
 
+/**
+ * The ONE way a validated source becomes a job (POST /jobs and POST /search/add): destination access, the size limit,
+ * per-user capacity, cross-user dedup by infohash with tracker merge, and "same torrent + destination = the existing job".
+ * `parsed` must come from parseMagnet / parseTorrentFile (canonical magnet / strictly rebuilt .torrent).
+ */
+export function createJob(ctx: Ctx, user: UserRow, parsed: ParsedSource, destinationId: number): { created: boolean; job: ReturnType<typeof jobDto> } {
+  const { db, config } = ctx;
+  const maxActive = (u: UserRow): number => u.max_active_jobs ?? getSetting(db, 'limits.maxActiveJobsPerUser');
+  function assertCapacity(u: UserRow): void {
+    const n = (db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND state IN ${ACTIVE_SQL}`).get(u.id) as { n: number }).n;
+    if (n >= maxActive(u)) throw limitExceeded(`Active job limit reached (${maxActive(u)})`);
+  }
+  const dest = db.prepare('SELECT * FROM destinations WHERE id = ? AND enabled = 1 AND (owner_user_id IS NULL OR owner_user_id = ?)').get(destinationId, user.id) as DestinationRow | undefined;
+  if (!dest) throw notFound('Destination');
+
+  const maxBytes = getSetting(db, 'limits.maxTorrentBytes');
+  if (maxBytes > 0 && parsed.totalSize > maxBytes) throw new ApiError(413, 'limit_exceeded', `Torrent is larger than the allowed ${maxBytes} bytes`);
+
+  const sourceEnc = encryptJson(config.appSecret, parsed.source);
+  const t = now();
+  const result = db.transaction((): { id: number; created: boolean } => {
+    let tor = db.prepare('SELECT * FROM torrents WHERE infohash = ?').get(parsed.infohash) as TorrentRow | undefined;
+    if (!tor) {
+      const info = db.prepare('INSERT INTO torrents (infohash, name, source_enc, total_size, state, added_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(parsed.infohash, parsed.name, sourceEnc, parsed.totalSize, 'pending', t);
+      tor = { id: Number(info.lastInsertRowid) } as TorrentRow;
+    } else if (tor.state === 'error' || tor.state === 'removed') {
+      db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, source_enc = ?, name = COALESCE(?, name), total_size = MAX(total_size, ?) WHERE id = ?")
+        .run(sourceEnc, parsed.name, parsed.totalSize, tor.id);
+    } else {
+      // Torrents are deduplicated by infohash across users: keep the first source but MERGE the (sanitised) trackers
+      // of this submission into it, and re-write a legacy stored magnet in canonical form.
+      const merged = mergeSource(config.appSecret, tor.source_enc, parsed);
+      db.prepare('UPDATE torrents SET name = COALESCE(name, ?), source_enc = COALESCE(?, source_enc) WHERE id = ?').run(parsed.name, merged, tor.id);
+    }
+    const existing = db.prepare("SELECT id FROM jobs WHERE user_id = ? AND torrent_id = ? AND destination_id = ? AND state NOT IN ('failed','cancelled') ORDER BY id DESC LIMIT 1")
+      .get(user.id, tor.id, dest.id) as { id: number } | undefined;
+    if (existing) return { id: existing.id, created: false };
+    assertCapacity(user);
+    const info = db.prepare("INSERT INTO jobs (user_id, torrent_id, destination_id, state, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?)")
+      .run(user.id, tor.id, dest.id, t, t);
+    return { id: Number(info.lastInsertRowid), created: true };
+  }).immediate();
+  return { created: result.created, job: jobDto(getJobJoin(db, result.id)!) };
+}
+
 export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
   const { db, config } = ctx;
 
@@ -114,38 +160,8 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
       parsed = await parseMagnet(body.magnet);
     }
 
-    const dest = db.prepare('SELECT * FROM destinations WHERE id = ? AND enabled = 1 AND (owner_user_id IS NULL OR owner_user_id = ?)').get(destinationId, user.id) as DestinationRow | undefined;
-    if (!dest) throw notFound('Destination');
-
-    const maxBytes = getSetting(db, 'limits.maxTorrentBytes');
-    if (maxBytes > 0 && parsed.totalSize > maxBytes) throw new ApiError(413, 'limit_exceeded', `Torrent is larger than the allowed ${maxBytes} bytes`);
-
-    const sourceEnc = encryptJson(config.appSecret, parsed.source);
-    const t = now();
-    const result = db.transaction((): { id: number; created: boolean } => {
-      let tor = db.prepare('SELECT * FROM torrents WHERE infohash = ?').get(parsed.infohash) as TorrentRow | undefined;
-      if (!tor) {
-        const info = db.prepare('INSERT INTO torrents (infohash, name, source_enc, total_size, state, added_at) VALUES (?, ?, ?, ?, ?, ?)')
-          .run(parsed.infohash, parsed.name, sourceEnc, parsed.totalSize, 'pending', t);
-        tor = { id: Number(info.lastInsertRowid) } as TorrentRow;
-      } else if (tor.state === 'error' || tor.state === 'removed') {
-        db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, source_enc = ?, name = COALESCE(?, name), total_size = MAX(total_size, ?) WHERE id = ?")
-          .run(sourceEnc, parsed.name, parsed.totalSize, tor.id);
-      } else {
-        // Torrents are deduplicated by infohash across users: keep the first source but MERGE the (sanitised) trackers
-        // of this submission into it, and re-write a legacy stored magnet in canonical form.
-        const merged = mergeSource(config.appSecret, tor.source_enc, parsed);
-        db.prepare('UPDATE torrents SET name = COALESCE(name, ?), source_enc = COALESCE(?, source_enc) WHERE id = ?').run(parsed.name, merged, tor.id);
-      }
-      const existing = db.prepare("SELECT id FROM jobs WHERE user_id = ? AND torrent_id = ? AND destination_id = ? AND state NOT IN ('failed','cancelled') ORDER BY id DESC LIMIT 1")
-        .get(user.id, tor.id, dest.id) as { id: number } | undefined;
-      if (existing) return { id: existing.id, created: false };
-      assertCapacity(user);
-      const info = db.prepare("INSERT INTO jobs (user_id, torrent_id, destination_id, state, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?)")
-        .run(user.id, tor.id, dest.id, t, t);
-      return { id: Number(info.lastInsertRowid), created: true };
-    }).immediate();
-    return reply.code(result.created ? 201 : 200).send(jobDto(getJobJoin(db, result.id)!));
+    const r = createJob(ctx, user, parsed, destinationId);
+    return reply.code(r.created ? 201 : 200).send(r.job);
   });
 
   app.delete('/api/jobs/:id', async (req, reply) => {

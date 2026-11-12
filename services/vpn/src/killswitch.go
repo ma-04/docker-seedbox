@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,6 +32,8 @@ import (
 //	LAN-initiated connections and the test-only VPN_LAN_ALLOW_OUT list. All IPv6 leaving lo is dropped.
 //	INPUT from the tunnel to the control/WebUI ports is dropped, so other customers of the VPN provider cannot
 //	reach them via the tunnel address; INPUT from the LAN is limited to the WebUI and control ports.
+//	New connections to the search port (Jackett) are accepted from SEARCH_TRUSTED_IPS only (the api container) and
+//	to the loopback-only ports (FlareSolverr) from nothing but lo, on EVERY interface (LAN, tunnel, any other).
 //
 // wgFwmark is set on every WireGuard interface (`FwMark` in the wg conf). The kernel stamps it on the OUTER
 // (encrypted) UDP packets of the tunnel, and only those: they are kernel-originated, carry no socket owner (so
@@ -70,6 +73,19 @@ type fwPolicy struct {
 	controlPort string       // control API port
 	controlFrom []netip.Addr // sources allowed to reach the control API; empty = the whole LAN (the token is still required)
 	allowOut    []allowOut   // test-only LAN exceptions
+	searchPort  string       // torrent search backend (Jackett) port
+	searchFrom  []netip.Addr // sources allowed to open connections to searchPort; empty = nobody
+	localOnly   []string     // ports reachable over lo only (FlareSolverr: Jackett talks to it on 127.0.0.1)
+}
+
+// closedPorts is every port that must never accept a new connection from outside the namespace, except searchPort
+// from searchFrom.
+func (p fwPolicy) closedPorts() []string {
+	var out []string
+	if p.searchPort != "" {
+		out = append(out, p.searchPort)
+	}
+	return append(out, p.localOnly...)
 }
 
 func prefixList(lan []netip.Prefix) string {
@@ -102,6 +118,22 @@ func parseAllowOut(v string) ([]allowOut, error) {
 		} else {
 			return nil, fmt.Errorf("invalid VPN_LAN_ALLOW_OUT entry %q (want IPv4[:port])", e)
 		}
+	}
+	return out, nil
+}
+
+// parsePorts parses a comma-separated list of TCP ports (LOCAL_ONLY_PORTS); empty = none.
+func parsePorts(name, v string) ([]string, error) {
+	var out []string
+	for _, e := range strings.Split(v, ",") {
+		if e = strings.TrimSpace(e); e == "" {
+			continue
+		}
+		n, err := strconv.Atoi(e)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("invalid %s entry %q (want TCP ports)", name, e)
+		}
+		out = append(out, strconv.Itoa(n))
 	}
 	return out, nil
 }
@@ -143,9 +175,17 @@ func buildRuleset(mode string, p fwPolicy, endpoints []netip.AddrPort, dns []net
 	b.WriteString("add table inet sbvpn\ndelete table inet sbvpn\ntable inet sbvpn {\n")
 	b.WriteString("  chain input {\n    type filter hook input priority -10; policy accept;\n")
 	fmt.Fprintf(&b, "    iifname \"wg*\" tcp dport { %s, %s } drop\n", p.controlPort, p.webPort)
+	b.WriteString("    iifname \"lo\" accept\n")
+	b.WriteString("    ct state established,related accept\n")
+	// The search backend and its helpers: before every LAN accept (allow-listed fixtures included) and on every
+	// interface, so neither a sibling container nor the tunnel side can open a connection to them.
+	if p.searchPort != "" && len(p.searchFrom) > 0 {
+		fmt.Fprintf(&b, "    iifname != \"wg*\" ip saddr { %s } tcp dport %s accept\n", addrList(p.searchFrom), p.searchPort)
+	}
+	if closed := p.closedPorts(); len(closed) > 0 {
+		fmt.Fprintf(&b, "    tcp dport { %s } drop\n", strings.Join(closed, ", "))
+	}
 	if len(p.lan) > 0 {
-		b.WriteString("    iifname \"lo\" accept\n")
-		b.WriteString("    ct state established,related accept\n")
 		fmt.Fprintf(&b, "    ip saddr { %s } tcp dport %s accept\n", lan, p.webPort)
 		if len(p.controlFrom) > 0 {
 			fmt.Fprintf(&b, "    ip saddr { %s } tcp dport %s accept\n", addrList(p.controlFrom), p.controlPort)

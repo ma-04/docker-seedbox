@@ -34,6 +34,11 @@ export interface Config {
   /** TEST ONLY (hermetic e2e): tracker-list URLs may be http and on private addresses. Refused without E2E_HERMETIC=1. */
   trackerListAllowPrivate: boolean;
   google: { authUrl: string; tokenUrl: string; apiBaseUrl: string };
+  /**
+   * Torrent search (optional). null = switched off: the UI hides it and /api/search* answers 404 `search_disabled`.
+   * `jackett`: SEARCH_BACKEND=jackett + JACKETT_API_KEY; JACKETT_URL is the origin of Jackett in the VPN namespace.
+   */
+  search: { backend: 'jackett'; jackettUrl: string; jackettApiKey: string; flaresolverr: boolean } | null;
 }
 
 /** Path of the Authelia portal on APP_HOST in the single-domain layout (Authelia: server.address 'tcp://:9091/auth'). */
@@ -70,6 +75,22 @@ function externalLogoutUrl(raw: string | undefined): string | null {
   return u.toString();
 }
 
+/** SEARCH_BACKEND / JACKETT_* (docs/configuration.md § Torrent search). Throws on a half-configured backend. */
+export function searchConfig(env: NodeJS.ProcessEnv): Config['search'] {
+  const backend = (env.SEARCH_BACKEND ?? '').trim().toLowerCase();
+  if (!backend || backend === 'off' || backend === 'none') return null;
+  if (backend !== 'jackett') throw new Error(`SEARCH_BACKEND must be empty (off) or 'jackett' (got '${backend}')`);
+  const key = (env.JACKETT_API_KEY ?? '').trim();
+  if (!/^[A-Za-z0-9]{16,128}$/.test(key)) throw new Error('JACKETT_API_KEY must be 16-128 letters/digits (./setup.sh --search generates it)');
+  const raw = (env.JACKETT_URL ?? '').trim() || 'http://vpn:9117';
+  let u: URL;
+  try { u = new URL(raw); } catch { throw new Error(`JACKETT_URL must be an http(s) origin such as http://vpn:9117 (got '${raw}')`); }
+  if ((u.protocol !== 'http:' && u.protocol !== 'https:') || u.username || u.password || (u.pathname !== '/' && u.pathname !== '') || u.search || u.hash) {
+    throw new Error(`JACKETT_URL must be an http(s) origin without path or credentials, such as http://vpn:9117 (got '${raw}')`);
+  }
+  return { backend: 'jackett', jackettUrl: u.origin, jackettApiKey: key, flaresolverr: env.FLARESOLVERR_ENABLED === '1' };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const appSecret = env.APP_SECRET ?? req('APP_SECRET');
   if (appSecret.length < 32) throw new Error('APP_SECRET must be at least 32 characters');
@@ -94,6 +115,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     vpnUrl: env.VPN_URL ?? 'http://vpn:8000',
     port: Number(env.PORT ?? 3000),
     logLevel: env.LOG_LEVEL ?? 'info',
+    search: searchConfig(env),
     google: {
       authUrl: env.GOOGLE_OAUTH_AUTH_URL ?? 'https://accounts.google.com/o/oauth2/v2/auth',
       tokenUrl: env.GOOGLE_OAUTH_TOKEN_URL ?? 'https://oauth2.googleapis.com/token',

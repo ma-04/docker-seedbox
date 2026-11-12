@@ -1,0 +1,60 @@
+---
+# TEST ONLY: Cardigann definition of the e2e mock indexer (indexer.mjs). compose.e2e.yaml mounts it into Jackett's
+# custom definitions directory; the address is the mock's address behind the WireGuard servers.
+id: sbmock
+name: SeedboxE2E
+description: "docker-seedbox e2e fixture indexer"
+language: en-US
+type: public
+encoding: UTF-8
+links:
+  - http://203.0.113.40:8080/
+
+caps:
+  categorymappings:
+    - {id: 1, cat: Movies, desc: "Movies"}
+    - {id: 2, cat: TV, desc: "TV"}
+    - {id: 3, cat: XXX, desc: "XXX"}
+    - {id: 4, cat: Audio/Audiobook, desc: "Audiobooks"}
+  modes:
+    search: [q]
+    tv-search: [q, season, ep]
+    movie-search: [q]
+    music-search: [q]
+    book-search: [q]
+
+settings: []
+
+search:
+  paths:
+    - path: api/search
+      response:
+        type: json
+  inputs:
+    q: "{{ .Keywords }}"
+  rows:
+    selector: results
+  fields:
+    category:
+      selector: cat
+    title:
+      selector: title
+    details:
+      selector: details
+    download:
+      selector: download
+    magnet:
+      selector: magnet
+      optional: true
+    size:
+      selector: size
+    seeders:
+      selector: seeders
+    leechers:
+      selector: leechers
+    date:
+      selector: date
+    downloadvolumefactor:
+      text: 1
+    uploadvolumefactor:
+      text: 1
