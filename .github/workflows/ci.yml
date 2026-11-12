@@ -174,9 +174,15 @@ jobs:
           srch() { grep -E '^(COMPOSE_PROFILES|SEARCH_BACKEND|FLARESOLVERR_ENABLED|JACKETT_FLARESOLVERR_URL)=' deploy/.env | tr '\n' ' '; echo; }
           ./setup.sh --auth-mode authelia --yes --no-start >/dev/null 2>&1
           test "$(srch)" = "COMPOSE_PROFILES=authelia SEARCH_BACKEND= FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
+          # switching search on brings FlareSolverr with it (default), re-runs keep both
           ./setup.sh --search --yes --no-start >/dev/null 2>&1
-          test "$(srch)" = "COMPOSE_PROFILES=authelia,search SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
+          test "$(srch)" = "COMPOSE_PROFILES=authelia,search,search-flaresolverr SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED=1 JACKETT_FLARESOLVERR_URL=http://127.0.0.1:8191 "
           key=$(grep '^JACKETT_API_KEY=' deploy/.env); [[ $key =~ ^JACKETT_API_KEY=[0-9a-f]{32}$ ]]
+          ./setup.sh --yes --no-start >/dev/null 2>&1
+          test "$(srch)" = "COMPOSE_PROFILES=authelia,search,search-flaresolverr SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED=1 JACKETT_FLARESOLVERR_URL=http://127.0.0.1:8191 "
+          # an explicit --no-flaresolverr sticks across re-runs; --flaresolverr brings it back
+          ./setup.sh --no-flaresolverr --yes --no-start >/dev/null 2>&1
+          test "$(srch)" = "COMPOSE_PROFILES=authelia,search SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
           ./setup.sh --yes --no-start >/dev/null 2>&1
           test "$(srch)" = "COMPOSE_PROFILES=authelia,search SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
           ./setup.sh --flaresolverr --yes --no-start >/dev/null 2>&1
@@ -184,8 +190,12 @@ jobs:
           ./setup.sh --no-search --yes --no-start >/dev/null 2>&1
           test "$(srch)" = "COMPOSE_PROFILES=authelia SEARCH_BACKEND= FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
           if ./setup.sh --flaresolverr --yes --no-start >/dev/null 2>&1; then echo "--flaresolverr without search must be refused"; exit 1; fi
+          # search on without FlareSolverr in one go
+          ./setup.sh --search --no-flaresolverr --yes --no-start >/dev/null 2>&1
+          test "$(srch)" = "COMPOSE_PROFILES=authelia,search SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
+          ./setup.sh --no-search --yes --no-start >/dev/null 2>&1
           ./setup.sh --search --auth-mode external --yes --no-start >/dev/null 2>&1
-          test "$(srch)" = "COMPOSE_PROFILES=search SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
+          test "$(srch)" = "COMPOSE_PROFILES=search,search-flaresolverr SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED=1 JACKETT_FLARESOLVERR_URL=http://127.0.0.1:8191 "
           test "$(grep '^JACKETT_API_KEY=' deploy/.env)" = "$key"   # kept across off/on
 
   # Every image, natively for linux/amd64 AND linux/arm64 (arm64 on GitHub's arm runner, free for public repositories;

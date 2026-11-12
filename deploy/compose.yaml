@@ -332,7 +332,7 @@ services:
       start_period: 30s
     logging: *logging
 
-  # FlareSolverr (optional, off by default: ./setup.sh --flaresolverr): headless Chromium that solves Cloudflare challenges
+  # FlareSolverr (on by default with search; ./setup.sh --no-flaresolverr switches it off): headless Chromium that solves Cloudflare challenges
   # for Jackett. Same namespace; listens on 127.0.0.1:8191 only and the kill switch keeps that port loopback-only, so only
   # Jackett can use it. Not read-only: it patches its chromedriver binary at start.
   flaresolverr:
