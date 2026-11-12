@@ -29,8 +29,13 @@ const hit = (o: Partial<SearchHit>): SearchHit => ({
 });
 const magnet = (h: string, dn = 'Found') => `magnet:?xt=urn:btih:${h}&dn=${dn}&tr=udp%3A%2F%2Ftracker.example.org%3A1337`;
 
+const vpnRequired = (db: ReturnType<typeof setup>['db']) =>
+  db.prepare(`INSERT INTO settings (key, value_json) VALUES ('vpn.mode', '"required"') ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json`).run();
+/** A search-enabled app with the VPN required (search is paused while it is off; see "VPN off" below). */
 function env(b: FakeBackend | null = new FakeBackend(), vpn = fakeVpn()) {
-  return { ...setup(vpn, undefined, { searchBackend: b }), b: b! };
+  const e = setup(vpn, undefined, { searchBackend: b });
+  vpnRequired(e.db);
+  return { ...e, b: b! };
 }
 
 describe('search switched off', () => {
@@ -220,11 +225,39 @@ describe('POST /api/search/add', () => {
   });
 });
 
+describe('VPN off: search is paused unless an admin opts in', () => {
+  it('search and .torrent adds answer 503 search_vpn_off; magnet adds and meta still work; the opt-in lifts it', async () => {
+    const e = env();
+    const dest = await makeLocalDest(e);
+    e.b.hits = [hit({ title: 'L' }), hit({ title: 'M', magnet: magnet(H1), link: null })];
+    const toks = (await e.call(alice, 'GET', '/api/search?q=abc')).json().results as { title: string; token: string }[];
+    e.db.prepare(`UPDATE settings SET value_json = '"off"' WHERE key = 'vpn.mode'`).run();
+    const r = await e.call(alice, 'GET', '/api/search?q=other');
+    expect(r.statusCode).toBe(503);
+    expect(r.json().error.code).toBe('search_vpn_off');
+    expect(r.json().error.message).toMatch(/VPN is off/);
+    expect(e.b.queries).toHaveLength(1);
+    const viaLink = await e.call(alice, 'POST', '/api/search/add', { token: toks.find((t) => t.title === 'L')!.token, destinationId: dest });
+    expect(viaLink.statusCode).toBe(503);
+    expect(e.b.downloads).toHaveLength(0);
+    expect((await e.call(alice, 'POST', '/api/search/add', { token: toks.find((t) => t.title === 'M')!.token, destinationId: dest })).statusCode).toBe(201);
+    expect((await e.call(alice, 'GET', '/api/search/meta')).statusCode).toBe(200);
+    const admin = (await e.call(root, 'GET', '/api/admin/search')).json();
+    expect(admin).toMatchObject({ vpnMode: 'off', allowWithoutVpn: false });
+    expect((await e.call(alice, 'PUT', '/api/admin/search', { allowWithoutVpn: true })).statusCode).toBe(403);
+    expect((await e.call(root, 'PUT', '/api/admin/search', {})).statusCode).toBe(400);
+    expect((await e.call(root, 'PUT', '/api/admin/search', { allowWithoutVpn: true })).json()).toMatchObject({ allowWithoutVpn: true });
+    expect((await e.call(alice, 'GET', '/api/search?q=other')).statusCode).toBe(200);
+    expect((await e.call(alice, 'POST', '/api/search/add', { token: toks.find((t) => t.title === 'L')!.token, destinationId: dest })).statusCode).toBe(201);
+  });
+});
+
 describe('GET /api/admin/search (status card)', () => {
   it('reports reachability, indexer count and FlareSolverr through the sidecar probe', async () => {
     const b = new FakeBackend();
     const vpn = fakeVpn({ companions: async () => ({ flaresolverr: true }) });
     const e = setup(vpn, undefined, { searchBackend: b });
+    vpnRequired(e.db);
     (e.config as { search: unknown }).search = { backend: 'jackett', jackettUrl: 'http://vpn:9117', jackettApiKey: KEY, flaresolverr: true };
     expect((await e.call(alice, 'GET', '/api/admin/search')).statusCode).toBe(403);
     const ok = (await e.call(root, 'GET', '/api/admin/search')).json();
@@ -304,6 +337,35 @@ describe('Jackett UI passthrough (/jackett/*, admins only)', () => {
     expect((e.calls[0]!.init.headers as Record<string, string>)['content-type']).toBe('application/json');
     const huge = await e.call(root, 'POST', '/jackett/x', 'x'.repeat(1024 * 1024 + 10), { headers: { 'content-type': 'text/plain', origin: 'https://app.example.test' } });
     expect(huge.statusCode).toBe(413);
+  });
+
+  it('the API key never reaches the browser: stripped from text responses and Location, re-added server-side', async () => {
+    const e = ui();
+    e.respond(() => new Response(JSON.stringify({ api_key: KEY, other: `see ${KEY} twice ${KEY}` }), { headers: { 'content-type': 'application/json; charset=utf-8' } }));
+    const cfg = await e.call(root, 'GET', '/jackett/api/v2.0/server/config');
+    expect(cfg.json()).toEqual({ api_key: '', other: 'see  twice ' });
+    expect(cfg.headers['content-security-policy']).toContain("frame-ancestors 'none'");
+    expect(cfg.headers['content-security-policy']).toContain("script-src 'self' 'unsafe-eval'");
+    e.respond(() => new Response(`<a href="/jackett/dl/x/?jackett_apikey=${KEY}&path=1">dl</a>`, { headers: { 'content-type': 'text/html' } }));
+    expect((await e.call(root, 'GET', '/jackett/UI/Dashboard')).body).toBe('<a href="/jackett/dl/x/?jackett_apikey=&path=1">dl</a>');
+    e.respond(() => new Response(null, { status: 302, headers: { location: `http://vpn:9117/jackett/dl/x/?jackett_apikey=${KEY}&path=1` } }));
+    expect((await e.call(root, 'GET', '/jackett/x')).headers.location).toBe('/jackett/dl/x/?jackett_apikey=&path=1');
+    // the browser sends the (now empty) parameters back; the passthrough fills in the real key
+    e.respond(() => new Response('d1:ae', { headers: { 'content-type': 'application/x-bittorrent' } }));
+    const dl = await e.call(root, 'GET', '/jackett/dl/sbmock/?jackett_apikey=&path=QUJD&file=A+B');
+    expect(dl.body).toBe('d1:ae'); // binary: streamed untouched
+    const sent = new URL(e.calls.at(-1)!.url);
+    expect(sent.searchParams.get('jackett_apikey')).toBe(KEY);
+    expect(sent.searchParams.get('file')).toBe('A B');
+    await e.call(root, 'GET', '/jackett/api/v2.0/indexers/all/results?apikey=&Query=x');
+    expect(new URL(e.calls.at(-1)!.url).searchParams.get('apikey')).toBe(KEY);
+    await e.call(root, 'GET', '/jackett/UI/Dashboard?x=1');
+    expect(e.calls.at(-1)!.url).toBe('http://vpn:9117/jackett/UI/Dashboard?x=1'); // nothing to fill: untouched
+    // saving Jackett's server config cannot blank or change the key
+    e.respond(() => new Response(null, { status: 204 }));
+    const same = { 'content-type': 'application/json', origin: 'https://app.example.test' };
+    await e.call(root, 'POST', '/jackett/api/v2.0/server/config', JSON.stringify({ api_key: '', port: 9117 }), { headers: same });
+    expect(JSON.parse(Buffer.from(e.calls.at(-1)!.init.body as Uint8Array).toString())).toEqual({ api_key: KEY, port: 9117 });
   });
 
   it('Jackett down = 502 without detail; encoded path tricks are refused before any request', async () => {

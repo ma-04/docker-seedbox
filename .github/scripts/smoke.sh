@@ -88,7 +88,9 @@ case "$IMAGE" in
     v=$(docker run --rm --entrypoint qbittorrent-nox "$REF" --version) && ok "qbittorrent-nox --version: $v" || fail "qbittorrent-nox --version"
     docker run -d --name "$NAME" "${HARDEN[@]}" --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add KILL \
       --tmpfs /tmp -v "$NAME-vol:/config" -e QBT_TRUSTED_IPS=172.31.250.3,172.31.250.4 "$REF" >/dev/null
-    until_ok 60 ex curl -fsS -o /dev/null http://127.0.0.1:8080/api/v2/app/version && ok "WebUI answers through the entrypoint (seed-config.sh)" || fail "qBittorrent WebUI"
+    webui() { [ "$(ex curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v2/app/version)" = 403 ]; }
+    until_ok 60 webui && ok "WebUI answers through the entrypoint and asks loopback clients to log in (LocalHostAuth=true)" || fail "qBittorrent WebUI (want 403 from loopback)"
+    until_ok 30 sh -c "[ \"\$(docker inspect -f '{{.State.Health.Status}}' $NAME)\" = healthy ]" && ok "image HEALTHCHECK reports healthy" || fail "qBittorrent HEALTHCHECK"
     ;;
   *) fail "unknown image $IMAGE" ;;
 esac

@@ -2,7 +2,7 @@ import { chromium, expect, type FullConfig } from '@playwright/test';
 import fs from 'node:fs';
 import { api, AUTH_DIR, loginUI, statePath } from './app';
 import { env, type UserName } from './env';
-import { getManifest, probe, qbtPreferences, wgConfig } from './infra';
+import { getManifest, qbtPreferences, wgConfig, qbt } from './infra';
 import { raw } from './net';
 
 async function waitFor(what: string, fn: () => Promise<boolean>, ms = 120_000): Promise<void> {
@@ -21,7 +21,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
   await waitFor('app (gateway + authelia)', async () => (await raw(`${env.baseURL}/api/health`)).status === 200);
   await waitFor('fixtures manifest', async () => !!(await getManifest()).multi.infohash);
   await waitFor('wireguard fixtures', async () => !!(await wgConfig('wg1')) && !!(await wgConfig('wg2')));
-  await waitFor('qBittorrent reachable from its namespace', async () => (await probe('http://127.0.0.1:8080/api/v2/app/version')).status === 200);
+  await waitFor('qBittorrent reachable (as the worker sees it)', async () => (await qbt('/api/v2/app/version')).status === 200);
 
   fs.mkdirSync(AUTH_DIR, { recursive: true });
   const browser = await chromium.launch(config.projects[0]!.use.launchOptions);

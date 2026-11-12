@@ -61,10 +61,14 @@ export function torznabCats(category: 'all' | CategoryId, disabled: readonly str
   return [...c.torznab];
 }
 
-/** A result is shown only if none of its (standard) categories is disabled; one without any becomes `other`. */
+/**
+ * A result is shown only if none of its standard categories is disabled. One that carries NO standard category (only the
+ * tracker's own ids >= 100000, i.e. Jackett could not map it) cannot be checked: it is dropped while any category is
+ * disabled (it might be XXX), and shown as `other` only when every category is enabled.
+ */
 export function resultCategory(ids: number[], disabled: readonly string[]): CategoryId | null {
   const all = classifyAll(ids);
+  if (all.length === 0) return disabled.length === 0 ? 'other' : null;
   if (all.some((c) => disabled.includes(c))) return null;
-  const c = all[0] ?? 'other';
-  return disabled.includes(c) ? null : c;
+  return all[0]!;
 }

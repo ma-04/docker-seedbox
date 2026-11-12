@@ -55,7 +55,8 @@ export function parseTorznabResults(xml: string, maxItems = MAX_RESULTS): { item
     for (const a of kids(it, 'torznab:attr')) {
       const n = a.attrs.name, v = a.attrs.value;
       if (n === undefined || v === undefined) continue;
-      attrs.set(n, [...(attrs.get(n) ?? []), v]);
+      const list = attrs.get(n);
+      if (list) list.push(v); else attrs.set(n, [v]); // in place: copying the array per attribute was quadratic
     }
     const attr = (n: string) => attrs.get(n)?.[0] ?? null;
     const enclosure = kids(it, 'enclosure')[0];

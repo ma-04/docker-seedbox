@@ -43,7 +43,12 @@ describe('category mapping (Torznab/Newznab standard ids)', () => {
     expect(resultCategory([5000, 5070], ['anime'])).toBeNull();
     expect(resultCategory([5000, 5070], ['xxx'])).toBe('anime');
     expect(resultCategory([3000, 3030], [])).toBe('audiobooks');
-    expect(resultCategory([100005], ['xxx'])).toBe('other');
+    // only tracker-specific ids (unmapped by Jackett): unknown, so dropped while anything is disabled
+    expect(resultCategory([100005], ['xxx'])).toBeNull();
+    expect(resultCategory([100003, 100004], ['anime'])).toBeNull();
+    expect(resultCategory([], ['xxx'])).toBeNull();
+    expect(resultCategory([100005], [])).toBe('other');
+    expect(resultCategory([], [])).toBe('other');
     expect(resultCategory([], ['other'])).toBeNull();
     expect(resultCategory([6000], [])).toBe('xxx');
   });

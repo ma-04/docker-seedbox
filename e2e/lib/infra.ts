@@ -63,22 +63,28 @@ export interface Probe { reachable: boolean; status: number; body: string; error
 /** curl executed inside the qbittorrent container (the VPN network namespace, uid 1000). */
 export const probe = (url: string): Promise<Probe> => ctl(`/probe?url=${encodeURIComponent(url)}`);
 
+/**
+ * qBittorrent's WebUI API as the worker sees it (a whitelisted address; the WebUI is not exposed, and loopback clients in its
+ * namespace must log in: LocalHostAuth=true).
+ */
+export const qbt = (path: string): Promise<Probe> => ctl(`/qbt?path=${encodeURIComponent(path)}`);
+
 export interface QbtTorrent { hash: string; name: string; state: string; progress: number; category: string }
-/** The torrents qBittorrent currently holds (read from inside its own namespace; the WebUI is not exposed). */
+/** The torrents qBittorrent currently holds. */
 export async function qbtTorrents(): Promise<QbtTorrent[]> {
-  const p = await probe('http://127.0.0.1:8080/api/v2/torrents/info');
+  const p = await qbt('/api/v2/torrents/info');
   if (!p.reachable || p.status !== 200) throw new Error(`qbt unreachable: ${p.error || p.status}`);
   return JSON.parse(p.body) as QbtTorrent[];
 }
 export async function qbtPreferences(): Promise<Record<string, any>> {
-  const p = await probe('http://127.0.0.1:8080/api/v2/app/preferences');
+  const p = await qbt('/api/v2/app/preferences');
   if (!p.reachable || p.status !== 200) throw new Error(`qbt unreachable: ${p.error || p.status}`);
   return JSON.parse(p.body);
 }
 
-/** Tracker URLs of one torrent as qBittorrent lists them (read from inside its namespace), without the DHT/PeX/LSD pseudo entries. */
+/** Tracker URLs of one torrent as qBittorrent lists them, without the DHT/PeX/LSD pseudo entries. */
 export async function qbtTrackers(hash: string): Promise<string[]> {
-  const p = await probe(`http://127.0.0.1:8080/api/v2/torrents/trackers?hash=${hash}`);
+  const p = await qbt(`/api/v2/torrents/trackers?hash=${hash}`);
   if (p.reachable && p.status === 404) return []; // the worker has not added the torrent yet
   if (!p.reachable || p.status !== 200) throw new Error(`qbt unreachable: ${p.error || p.status}`);
   return (JSON.parse(p.body) as { url: string }[]).map((t) => t.url).filter((u) => !u.startsWith('** '));

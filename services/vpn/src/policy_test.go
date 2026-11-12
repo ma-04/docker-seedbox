@@ -402,6 +402,31 @@ func TestSearchPortOnlyFromTrustedAndLocalOnlyPorts(t *testing.T) {
 	}
 }
 
+func TestLoopbackIsScopedByUid(t *testing.T) {
+	p := testPolicy()
+	p.searchPort, p.localOnly, p.searchUID = "9117", []string{"8191"}, "1001"
+	for _, mode := range []string{"required", "off"} {
+		out := ruleLines(chain(t, buildRuleset(mode, p, nil, nil), "output"))
+		lo := indexOf(out, `oifname "lo" accept`)
+		want := []string{
+			`oifname "lo" tcp dport 8000 meta skuid != 0 drop`,
+			`oifname "lo" tcp dport { 9117, 8191 } meta skuid != { 0, 1001 } drop`,
+			`oifname "lo" tcp dport 8080 meta skuid 1001 drop`,
+		}
+		for _, w := range want {
+			if i := indexOf(out, w); i < 0 || i > lo {
+				t.Errorf("%s: %q must exist and precede the loopback accept: %v", mode, w, out)
+			}
+		}
+	}
+	// Without a search uid only the control port is restricted (root only) and the search ports are root-only.
+	p.searchUID = ""
+	out := ruleLines(chain(t, buildRuleset("off", p, nil, nil), "output"))
+	if indexOf(out, `oifname "lo" tcp dport { 9117, 8191 } meta skuid != { 0 } drop`) < 0 || strings.Contains(strings.Join(out, "|"), "skuid 1001") {
+		t.Errorf("no search uid: search ports root-only, no uid-specific rules: %v", out)
+	}
+}
+
 func TestParsePorts(t *testing.T) {
 	if got, err := parsePorts("X", " 8191, 9000 "); err != nil || strings.Join(got, ",") != "8191,9000" {
 		t.Errorf("got %v %v", got, err)

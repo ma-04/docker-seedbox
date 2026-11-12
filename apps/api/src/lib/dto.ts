@@ -124,8 +124,11 @@ export interface SearchAdminDto {
   /** FlareSolverr companion: not enabled, or whether the VPN sidecar can reach it on loopback. */
   flaresolverr: 'disabled' | 'ok' | 'unreachable';
   categories: { id: SearchCategoryId; label: string; enabled: boolean }[];
+  /** The admin's VPN mode. With `off`, search answers 503 `search_vpn_off` unless `allowWithoutVpn`. */
+  vpnMode: 'off' | 'required';
+  allowWithoutVpn: boolean;
 }
-export interface SearchAdminUpdateDto { disabledCategories: SearchCategoryId[] }
+export interface SearchAdminUpdateDto { disabledCategories?: SearchCategoryId[]; allowWithoutVpn?: boolean }
 
 /** GET/PUT /admin/trackers. See docs/architecture.md § Tracker lists. */
 export interface TrackerListStatusDto {

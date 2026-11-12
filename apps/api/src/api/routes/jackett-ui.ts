@@ -9,6 +9,12 @@
  * (the login cookie of this app, Remote-*, X-Gateway-Secret, Authorization and X-Forwarded-* never reach Jackett).
  * Back: status, content headers, Jackett's own Set-Cookie, and Location rewritten to a path on this host.
  * Writes must be same-origin (Origin / Sec-Fetch-Site): the X-Requested-With CSRF rule only covers /api/*.
+ *
+ * Jackett's API key never reaches the browser: it is removed from every text response (Jackett's UI shows it, and builds
+ * download / feed / manual-search URLs with it) and from Location, so it cannot end up in browser history, the gateway's
+ * error log or a copied link; requests that carry an `apikey` / `jackett_apikey` parameter (now empty) get the real key
+ * added here, and a server-config save keeps the real key. Responses carry a restrictive CSP (Jackett's UI needs
+ * `'unsafe-eval'` for its Handlebars templates and inline styles; nothing from other origins, no framing).
  */
 import { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -22,6 +28,36 @@ const UI_TIMEOUT_MS = 120_000;
 const JACKETT_COOKIES = new Set(['Jackett', 'TestCookie']);
 const REQ_HEADERS = ['accept', 'accept-language', 'content-type', 'cache-control', 'if-none-match', 'if-modified-since', 'x-requested-with'];
 const RES_HEADERS = ['content-type', 'cache-control', 'etag', 'last-modified', 'expires', 'content-disposition', 'vary'];
+const KEY_PARAMS = ['apikey', 'jackett_apikey'];
+/** Text responses are buffered (to remove the key) up to this size; Jackett's largest (the indexer list) is ~2 MB. */
+export const MAX_TEXT_RESPONSE = 16 * 1024 * 1024;
+const TEXT_TYPE = /^(text\/|application\/(json|javascript|x-javascript|xml|rss\+xml|xhtml\+xml)|[^;]*\+json)/i;
+export const JACKETT_UI_CSP = "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; "
+  + "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; "
+  + "frame-ancestors 'none'";
+
+/** Path + query with the real key put into every (present) key parameter; anything else unchanged. */
+export function withServerKey(pathAndQuery: string, key: string): string {
+  const q = pathAndQuery.indexOf('?');
+  if (q < 0) return pathAndQuery;
+  const params = new URLSearchParams(pathAndQuery.slice(q + 1));
+  if (!KEY_PARAMS.some((p) => params.has(p))) return pathAndQuery;
+  for (const p of KEY_PARAMS) if (params.has(p)) params.set(p, key);
+  return `${pathAndQuery.slice(0, q)}?${params.toString()}`;
+}
+
+/** Every occurrence of the key removed (the key is 16-128 letters/digits, so it is never part of other markup). */
+export const stripKey = (text: string, key: string): string => (key ? text.split(key).join('') : text);
+
+/** A JSON body (Jackett's server-config save) keeps the real key whatever the browser sent. */
+export function bodyWithServerKey(body: Buffer, contentType: string | undefined, key: string): Buffer {
+  if (!body.length || !/json/i.test(contentType ?? '')) return body;
+  let v: unknown;
+  try { v = JSON.parse(body.toString('utf8')); } catch { return body; }
+  if (!v || typeof v !== 'object' || Array.isArray(v) || !Object.prototype.hasOwnProperty.call(v, 'api_key')) return body;
+  (v as Record<string, unknown>).api_key = key;
+  return Buffer.from(JSON.stringify(v), 'utf8');
+}
 
 /** Keep only Jackett's cookies from a Cookie header. */
 export function filterCookies(header: string | undefined): string {
@@ -66,11 +102,12 @@ export function registerJackettUi(app: FastifyInstance, ctx: Ctx): void {
       for (const h of REQ_HEADERS) { const v = req.headers[h]; if (typeof v === 'string') headers[h] = v; }
       const cookies = filterCookies(req.headers.cookie);
       if (cookies) headers.cookie = cookies;
-      const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : (req.body as Buffer | undefined);
+      const raw = req.method === 'GET' || req.method === 'HEAD' ? undefined : (req.body as Buffer | undefined);
+      const body = raw ? bodyWithServerKey(raw, req.headers['content-type'], s.jackettApiKey) : undefined;
 
       let res: Response;
       try {
-        res = await ctx.fetchImpl(s.jackettUrl + path, {
+        res = await ctx.fetchImpl(s.jackettUrl + withServerKey(path, s.jackettApiKey), {
           method: req.method, headers, body: body && body.length ? new Uint8Array(body) : undefined,
           redirect: 'manual', signal: AbortSignal.timeout(UI_TIMEOUT_MS),
         });
@@ -82,10 +119,25 @@ export function registerJackettUi(app: FastifyInstance, ctx: Ctx): void {
       const setCookies = res.headers.getSetCookie().filter((c) => JACKETT_COOKIES.has(c.split('=')[0]!.trim()));
       if (setCookies.length) reply.header('set-cookie', setCookies);
       const loc = res.headers.get('location');
-      if (loc) reply.header('location', rewriteLocation(loc, s.jackettUrl, path) ?? `${JACKETT_BASE_PATH}/`);
+      if (loc) reply.header('location', stripKey(rewriteLocation(loc, s.jackettUrl, path) ?? `${JACKETT_BASE_PATH}/`, s.jackettApiKey));
       reply.header('cache-control', res.headers.get('cache-control') ?? 'no-store');
+      reply.header('content-security-policy', JACKETT_UI_CSP);
       if (!res.body || req.method === 'HEAD') { await res.body?.cancel().catch(() => {}); return reply.send(); }
-      return reply.send(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream));
+      if (!TEXT_TYPE.test(res.headers.get('content-type') ?? '')) {
+        return reply.send(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream)); // images, fonts, .torrent
+      }
+      // Text: buffered so the key can be removed (it may span chunk boundaries).
+      const reader = res.body.getReader();
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > MAX_TEXT_RESPONSE) { await reader.cancel().catch(() => {}); throw new ApiError(502, 'search_bad_response', 'Jackett response too large'); }
+        chunks.push(Buffer.from(value));
+      }
+      return reply.send(stripKey(Buffer.concat(chunks).toString('utf8'), s.jackettApiKey));
     };
     const methods = ['GET', 'POST', 'PUT', 'DELETE'] as const;
     ui.route({ method: [...methods], url: JACKETT_BASE_PATH, handler });

@@ -508,6 +508,8 @@ func (s *Server) handler() http.Handler {
 	})
 }
 
+func mustAtoi(s string) int { n, _ := strconv.Atoi(s); return n }
+
 func env(k, def string) string {
 	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
 		return v
@@ -579,8 +581,14 @@ func main() {
 	if _, err := parsePorts("FLARESOLVERR_PORT", env("FLARESOLVERR_PORT", "8191")); err != nil {
 		log.Fatal(err)
 	}
+	// SEARCH_UID: the uid Jackett runs as (compose: 1001); only it (and root) may connect to the search / local-only ports
+	// over lo. It must differ from qBittorrent's uid (1000), or loopback could not tell them apart.
+	searchUID := env("SEARCH_UID", "1001")
+	if n, err := strconv.Atoi(searchUID); err != nil || n < 1 || n > 65534 || n == 1000 {
+		log.Fatalf("invalid SEARCH_UID %q (a uid other than 0 and qBittorrent's 1000)", searchUID)
+	}
 	s.fw = fwPolicy{lan: s.lan, webPort: webPort, controlPort: controlPort, controlFrom: controlFrom, allowOut: allowOuts,
-		searchPort: searchPorts[0], searchFrom: searchFrom, localOnly: localOnly}
+		searchPort: searchPorts[0], searchFrom: searchFrom, localOnly: localOnly, searchUID: strconv.Itoa(mustAtoi(searchUID))}
 	if len(allowOuts) > 0 {
 		logf("WARNING: VPN_LAN_ALLOW_OUT is set (%d entries): qBittorrent may reach those LAN addresses. Test setups only.", len(allowOuts))
 	}

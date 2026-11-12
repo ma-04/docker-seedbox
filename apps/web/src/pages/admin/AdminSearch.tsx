@@ -31,6 +31,34 @@ function StatusCard({ s }: { s: SearchAdminDto }) {
   );
 }
 
+function VpnCard({ s }: { s: SearchAdminDto }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const save = useMutation({
+    mutationFn: (allow: boolean) => endpoints.admin.updateSearch({ allowWithoutVpn: allow }),
+    onSuccess: (d) => { qc.setQueryData(['admin-search'], d); toast('ok', 'Saved'); },
+  });
+  const off = s.vpnMode === 'off';
+  return (
+    <section className={off ? 'card border-amber-400 dark:border-amber-600' : 'card'} aria-label="Search and the VPN" data-testid="search-vpn">
+      <h2 className="mb-2 text-base font-semibold">VPN</h2>
+      {off ? (
+        <p className="text-sm text-amber-800 dark:text-amber-300" role="alert" data-testid="search-vpn-off">
+          The VPN is off. {s.allowWithoutVpn
+            ? 'Search is allowed anyway: Jackett (and FlareSolverr) contact tracker sites from this server\'s own address.'
+            : 'Search is paused: Jackett would contact tracker sites from this server\'s own address. Set the VPN to required (Admin -> VPN), or allow search without it below.'}
+          {' '}Testing indexers in Jackett&apos;s own UI also goes out directly while the VPN is off.
+        </p>
+      ) : <p className="text-sm text-slate-600 dark:text-slate-300">The VPN is required: Jackett&apos;s tracker traffic goes through the tunnel or nowhere.</p>}
+      <div className="mt-2">
+        <Check label="Allow search while the VPN is off (tracker sites see this server's address)" checked={s.allowWithoutVpn}
+          disabled={save.isPending} onChange={(v) => save.mutate(v)} />
+      </div>
+      <ErrorNote error={save.error} />
+    </section>
+  );
+}
+
 function CategoriesCard({ s }: { s: SearchAdminDto }) {
   const qc = useQueryClient();
   const toast = useToast();
@@ -69,6 +97,7 @@ export default function AdminSearch() {
             Torrent search is not enabled. Run <code>./setup.sh --search</code> on the server to add Jackett (it runs inside the VPN namespace).
           </section>
         )}
+        {s.enabled && <VpnCard s={s} />}
         <CategoriesCard s={s} />
       </div>
     </>

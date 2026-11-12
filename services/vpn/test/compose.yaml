@@ -64,6 +64,7 @@ services:
       SEARCH_TRUSTED_IPS: 172.31.250.50         # lan-client plays the api: the only address that may open :9117 (Jackett)
       SEARCH_PORT: "9117"
       LOCAL_ONLY_PORTS: "8191"                  # FlareSolverr: loopback only
+      SEARCH_UID: "1001"                        # Jackett's uid (loopback access to :9117 / :8191)
       VPN_MTU: ${VPN_MTU:-}                     # unset = 1280; run.sh asserts precedence
       VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-}   # unset/empty must mean "required" (fail closed); run.sh asserts it
       PUBLIC_IP_URL: http://203.0.113.20/
@@ -100,23 +101,23 @@ services:
     image: sbvpn-tools
     user: "0:0"
     restart: "no"
-    command: ["sh", "-c", "mkdir -p /config/Jackett && chown -h 1000:1000 /config /config/Jackett"]
+    command: ["sh", "-c", "mkdir -p /config/Jackett && chown -h 1001:1001 /config /config/Jackett"]
     volumes: ["jackett-config:/config"]
     depends_on: { tools-build: { condition: service_completed_successfully } }
   jackett:
     image: lscr.io/linuxserver/jackett:0.24.3047@sha256:f311762e5549286f71c281f2772125908e5fce73a28445b3f28d01bcf579c867
     network_mode: service:vpn
-    user: "1000:1000"
+    user: "1001:1001"
     entrypoint: ["/bin/sh", "/seedbox/entrypoint.sh"]
     environment: { JACKETT_API_KEY: sbvpntestjackettkey0123456789ab, FLARESOLVERR_URL: "http://127.0.0.1:8191", HOME: /tmp, TMPDIR: /tmp }
     volumes:
       - ../../../deploy/jackett/entrypoint.sh:/seedbox/entrypoint.sh:ro
       - { type: volume, source: jackett-config, target: /config, volume: { nocopy: true } }
     read_only: true
-    tmpfs: ["/tmp:uid=1000,gid=1000"]
+    tmpfs: ["/tmp:uid=1001,gid=1001"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    healthcheck: { test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login && test \"$$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/status)\" = 401"], interval: 5s, timeout: 5s, retries: 30, start_period: 10s }
+    healthcheck: { test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login && awk 'NR>2 && $$1 != \"lo:\" {f=1} END {exit !f}' /proc/net/dev"], interval: 5s, timeout: 5s, retries: 30, start_period: 10s }
     depends_on:
       jackett-init: { condition: service_completed_successfully }
       vpn: { condition: service_healthy, restart: true }
@@ -130,7 +131,7 @@ services:
     pids_limit: 512
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    healthcheck: { test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8191/health && test \"$$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/status)\" = 401"], interval: 5s, timeout: 10s, retries: 30, start_period: 20s }
+    healthcheck: { test: ["CMD-SHELL", "grep -q '0100007F:1FFF 00000000:0000 0A' /proc/net/tcp && awk 'NR>2 && $$1 != \"lo:\" {f=1} END {exit !f}' /proc/net/dev"], interval: 5s, timeout: 10s, retries: 30, start_period: 20s }
     depends_on: { vpn: { condition: service_healthy, restart: true } }
 
   # test helpers

@@ -28,8 +28,18 @@ const searchQuery = z.object({
 }).strict();
 const addBody = z.object({ token: z.string().min(1).max(MAX_TOKEN_CHARS), destinationId: z.coerce.number().int().positive() }).strict();
 const adminUpdate = z.object({
-  disabledCategories: z.array(z.enum(CATEGORY_IDS)).max(CATEGORY_IDS.length).refine((a) => new Set(a).size === a.length, 'Duplicate category'),
-}).strict();
+  disabledCategories: z.array(z.enum(CATEGORY_IDS)).max(CATEGORY_IDS.length).refine((a) => new Set(a).size === a.length, 'Duplicate category').optional(),
+  allowWithoutVpn: z.boolean().optional(),
+}).strict().refine((b) => b.disabledCategories !== undefined || b.allowWithoutVpn !== undefined, 'Nothing to change');
+
+export const VPN_OFF_MESSAGE = 'Search is paused because the VPN is off: tracker sites would see this server\'s own address. '
+  + 'An admin can set the VPN to required (Admin -> VPN) or explicitly allow search without the VPN (Admin -> Search).';
+/** Anything that makes Jackett contact tracker sites waits for the VPN, unless an admin opted out. */
+function assertVpnOrOptIn(ctx: Ctx): void {
+  if (getSetting(ctx.db, 'vpn.mode') === 'off' && !getSetting(ctx.db, 'search.allowWithoutVpn')) {
+    throw new ApiError(503, 'search_vpn_off', VPN_OFF_MESSAGE);
+  }
+}
 
 const disabledError = () => new ApiError(404, 'search_disabled', 'Torrent search is not enabled on this server');
 
@@ -60,6 +70,7 @@ export function registerSearch(app: FastifyInstance, ctx: Ctx): void {
   app.get('/api/search', async (req): Promise<SearchResponseDto> => {
     const svc = need();
     const p = parse(searchQuery, req.query);
+    assertVpnOrOptIn(ctx);
     enforce(ctx.limiter, req.user.id, 'search', RATE.search);
     const disabled = disabledCats(ctx);
     let cats: number[];
@@ -95,8 +106,9 @@ export function registerSearch(app: FastifyInstance, ctx: Ctx): void {
     }
     // Everything below goes through the SAME validation as a user-submitted magnet / .torrent upload.
     let parsed: ParsedSource;
-    if (t.m) parsed = await parseMagnet(t.m);
+    if (t.m) parsed = await parseMagnet(t.m); // goes to qBittorrent like any magnet (it follows vpn.mode itself)
     else {
+      assertVpnOrOptIn(ctx); // fetching the .torrent makes Jackett contact the tracker site
       let d: Awaited<ReturnType<typeof svc.backend.download>>;
       try { d = await svc.backend.download(t.l!); } catch (e) { throw searchApiError(e); }
       parsed = d.kind === 'magnet' ? await parseMagnet(d.magnet) : await parseTorrentFile(d.data);
@@ -112,7 +124,8 @@ export function registerAdminSearch(app: FastifyInstance, ctx: Ctx): void {
     const disabled = disabledCats(ctx);
     const categories = SEARCH_CATEGORIES.map((c) => ({ id: c.id, label: c.label, enabled: !disabled.includes(c.id) }));
     const svc = ctx.search;
-    if (!svc) return { enabled: false, backend: null, uiPath: null, reachable: false, indexerCount: null, error: null, flaresolverr: 'disabled', categories };
+    const vpn = { vpnMode: getSetting(ctx.db, 'vpn.mode'), allowWithoutVpn: getSetting(ctx.db, 'search.allowWithoutVpn') };
+    if (!svc) return { enabled: false, backend: null, uiPath: null, reachable: false, indexerCount: null, error: null, flaresolverr: 'disabled', categories, ...vpn };
     let reachable = false, indexerCount: number | null = null, error: string | null = null;
     try { indexerCount = (await svc.indexers(true)).length; reachable = true; } catch (e) {
       error = e instanceof SearchError ? e.message : 'The search backend is unreachable';
@@ -121,12 +134,13 @@ export function registerAdminSearch(app: FastifyInstance, ctx: Ctx): void {
     if (ctx.config.search?.flaresolverr) {
       try { flaresolverr = (await ctx.vpn.companions?.())?.flaresolverr ? 'ok' : 'unreachable'; } catch { flaresolverr = 'unreachable'; }
     }
-    return { enabled: true, backend: svc.backend.kind, uiPath: svc.backend.uiPath, reachable, indexerCount, error, flaresolverr, categories };
+    return { enabled: true, backend: svc.backend.kind, uiPath: svc.backend.uiPath, reachable, indexerCount, error, flaresolverr, categories, ...vpn };
   }
   app.get('/api/admin/search', async () => dto());
   app.put('/api/admin/search', async (req) => {
     const b = parse(adminUpdate, req.body ?? {});
-    setSetting(ctx.db, 'search.disabledCategories', b.disabledCategories);
+    if (b.disabledCategories) setSetting(ctx.db, 'search.disabledCategories', b.disabledCategories);
+    if (b.allowWithoutVpn !== undefined) setSetting(ctx.db, 'search.allowWithoutVpn', b.allowWithoutVpn);
     return dto();
   });
 }

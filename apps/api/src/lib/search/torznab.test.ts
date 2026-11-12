@@ -53,6 +53,22 @@ describe('parseTorznabResults', () => {
   });
 });
 
+describe('parseTorznabResults: cost stays linear in the input', () => {
+  it('many same-name attributes (within the caps) parse quickly and scale linearly', () => {
+    const time = (n: number) => {
+      const xml = `<rss><channel><item><title>x</title>${'<torznab:attr name="category" value="2000"/>'.repeat(n)}</item></channel></rss>`;
+      const t = performance.now();
+      parseTorznabResults(xml);
+      return performance.now() - t;
+    };
+    time(1000); // warm-up
+    const small = time(25_000);
+    const big = time(100_000); // 4.4 MB, under the 5 MiB cap; quadratic was 37 s at 150k
+    expect(big).toBeLessThan(2000);
+    expect(big / Math.max(small, 1)).toBeLessThan(10); // 4x the input: linear ~4x, quadratic ~16x
+  });
+});
+
 describe('parseTorznabIndexers', () => {
   it('lists configured indexers with valid ids only', () => {
     expect(parseTorznabIndexers(INDEXERS_XML)).toEqual([{ id: 'sbmock', name: 'SeedboxE2E' }, { id: 'other-one', name: 'Other & One' }]);

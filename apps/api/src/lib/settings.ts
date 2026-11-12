@@ -27,6 +27,9 @@ export const SETTING_DEFAULTS = {
   'trackers.refreshDoneAt': 0,
   // Torrent search (docs/architecture.md § Torrent search). Edited through /admin/search, never /admin/settings.
   'search.disabledCategories': ['xxx'] as string[],
+  // With vpn.mode = off Jackett/FlareSolverr would reach tracker sites from the server's own address: search answers 503
+  // unless an admin explicitly allows that.
+  'search.allowWithoutVpn': false,
 };
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
 export type Settings = typeof SETTING_DEFAULTS;

@@ -79,9 +79,10 @@ awk '!/^Password_PBKDF2=/' "$CONF" > "$T" && mv -f -- "$T" "$CONF"
 set_key WebUI 'Address' '*'
 set_key WebUI 'Port' "${QBT_WEBUI_PORT:-8080}"
 set_key WebUI 'AuthSubnetWhitelist' "$TRUSTED"
-# Loopback is shared only with the vpn sidecar (same network namespace): siblings arrive with their own address,
-# the tunnel side is dropped by the sidecar's firewall. Keeping it open lets the image HEALTHCHECK work.
-set_key WebUI 'LocalHostAuth' false
+# Loopback is NOT trusted: the namespace (and so 127.0.0.1) is shared with the vpn sidecar and, with torrent search, with
+# Jackett and FlareSolverr's headless browser. Loopback clients must log in like everyone outside AuthSubnetWhitelist (the
+# HEALTHCHECK accepts the 403). The sidecar's kill switch also keeps Jackett's uid off this port.
+set_key WebUI 'LocalHostAuth' true
 set_key WebUI 'HostHeaderValidation' false
 set_key WebUI 'ServerDomains' '*'
 set_key WebUI 'CSRFProtection' false

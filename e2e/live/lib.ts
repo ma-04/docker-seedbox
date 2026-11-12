@@ -88,8 +88,11 @@ export function sh(cmd: string, timeoutMs = 120_000): Promise<{ code: number; ou
 export const compose = (args: string, t = 240_000) => sh(`cd ${live.ssh.dir}/deploy && sudo docker compose ${args}`, t);
 /** A shell command executed inside the qbittorrent container (the VPN network namespace). */
 export const inQbt = (cmd: string, t = 60_000) => sh(`sudo docker exec seedbox-qbittorrent-1 sh -c '${cmd.replace(/'/g, "'\\''")}'`, t);
+/** qBittorrent's WebUI API as the worker sees it (whitelisted; loopback clients must log in, LocalHostAuth=true). */
+export const inWorker = (url: string, t = 60_000) =>
+  sh(`sudo docker exec seedbox-worker-1 node -e 'fetch(process.argv[1]).then(async r=>{if(!r.ok)process.exit(1);process.stdout.write(await r.text())},()=>process.exit(1))' '${url.replace(/'/g, "'\\''")}'`, t);
 export async function qbtJson<T = any>(p: string): Promise<T> {
-  const r = await inQbt(`curl -fsS -m 10 http://127.0.0.1:8080${p}`);
+  const r = await inWorker(`http://vpn:8080${p}`);
   if (r.code !== 0) throw new Error(`qbt ${p}: ${r.err || r.out}`);
   return JSON.parse(r.out) as T;
 }

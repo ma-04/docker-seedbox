@@ -76,6 +76,33 @@ type fwPolicy struct {
 	searchPort  string       // torrent search backend (Jackett) port
 	searchFrom  []netip.Addr // sources allowed to open connections to searchPort; empty = nobody
 	localOnly   []string     // ports reachable over lo only (FlareSolverr: Jackett talks to it on 127.0.0.1)
+	searchUID   string       // uid Jackett runs as: the only non-root uid allowed to the search / local-only ports over lo
+}
+
+// loopbackRules: who may open connections over lo. Every process in the namespace shares one loopback (the sidecar,
+// qBittorrent, Jackett, FlareSolverr), so the port alone says nothing; the socket owner does. qBittorrent and FlareSolverr
+// run as uid 1000, Jackett as searchUID (compose: 1001), the sidecar as root.
+//   - control port: root only (the sidecar's own healthcheck). Nothing else in the namespace has the token anyway.
+//   - search + local-only ports (Jackett, FlareSolverr): root (the sidecar's /companions probe) and Jackett only, so
+//     neither qBittorrent nor FlareSolverr's browser can reach Jackett's unauthenticated admin API, and only Jackett can
+//     drive FlareSolverr.
+//   - WebUI port: never Jackett (qBittorrent itself requires a login for loopback clients as well: LocalHostAuth=true).
+//
+// A packet without a socket (no skuid) does not match `meta skuid` and is left to the rules below.
+func (p fwPolicy) loopbackRules() []string {
+	var r []string
+	r = append(r, fmt.Sprintf(`oifname "lo" tcp dport %s meta skuid != 0 drop`, p.controlPort))
+	if closed := p.closedPorts(); len(closed) > 0 {
+		allowed := "0"
+		if p.searchUID != "" {
+			allowed = "0, " + p.searchUID
+		}
+		r = append(r, fmt.Sprintf(`oifname "lo" tcp dport { %s } meta skuid != { %s } drop`, strings.Join(closed, ", "), allowed))
+	}
+	if p.searchUID != "" {
+		r = append(r, fmt.Sprintf(`oifname "lo" tcp dport %s meta skuid %s drop`, p.webPort, p.searchUID))
+	}
+	return r
 }
 
 // closedPorts is every port that must never accept a new connection from outside the namespace, except searchPort
@@ -211,6 +238,9 @@ func buildRuleset(mode string, p fwPolicy, endpoints []netip.AddrPort, dns []net
 		b.WriteString("    ip daddr 127.0.0.11 meta skuid != 0 drop\n")
 	}
 	b.WriteString("    meta nfproto ipv6 oifname != \"lo\" drop\n") // IPv6 is disabled in the namespace; nothing may use it
+	for _, l := range p.loopbackRules() {
+		fmt.Fprintf(&b, "    %s\n", l)
+	}
 	b.WriteString("    oifname \"lo\" accept\n")
 	if mode == "required" {
 		// WireGuard's own (kernel-originated, fwmarked) packets have no socket owner: accept them before the drops.

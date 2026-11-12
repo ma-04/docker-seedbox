@@ -35,10 +35,9 @@ test.describe('16. torrent search (Jackett in the VPN namespace)', () => {
     }
     expect((await api(page, 'PUT', '/api/admin/settings', { 'vpn.mode': 'required' })).status).toBe(200);
     await expect.poll(async () => (await api(page, 'GET', '/api/admin/vpn/status')).json.connected, { timeout: 90_000 }).toBe(true);
-    // Jackett listens inside the same namespace as qBittorrent
-    const j = await probe('http://127.0.0.1:9117/jackett/UI/Login');
-    expect(j.reachable).toBe(true);
-    expect([200, 302]).toContain(j.status);   // Jackett's cookie check redirects first
+    // Jackett shares qBittorrent's namespace, but not its loopback rights: qBittorrent's uid cannot open Jackett's port
+    // (nor FlareSolverr's), and Jackett is reachable for the api (status card below).
+    expect((await probe('http://127.0.0.1:9117/jackett/UI/Login')).reachable).toBe(false);
     await close();
   });
 
@@ -57,6 +56,11 @@ test.describe('16. torrent search (Jackett in the VPN namespace)', () => {
       return r.status;
     });
     expect(configured).toBeLessThan(300);
+    // Jackett's API key never reaches the browser (its UI would show it and put it into every link).
+    const keyCheck = await page.evaluate(async () => (await (await fetch('/jackett/api/v2.0/server/config')).json()).api_key);
+    expect(keyCheck).toBe('');
+    const dash = await page.goto('/jackett/UI/Dashboard');
+    expect(dash!.headers()['content-security-policy']).toContain("frame-ancestors 'none'");
     // A write without a same-origin Origin is refused by the passthrough.
     const ctx = page.context();
     const cross = await ctx.request.post(`${env.baseURL}/jackett/api/v2.0/indexers/sbmock/config`, { headers: { origin: 'https://evil.example', 'content-type': 'application/json' }, data: '[]' });
@@ -198,6 +202,12 @@ test.describe('16. torrent search (Jackett in the VPN namespace)', () => {
   test('cleanup: VPN mode off, the search VPN configs deleted', async ({ browser }, testInfo) => {
     const { page, close } = await userPage(browser, testInfo, 'admin');
     expect((await api(page, 'PUT', '/api/admin/settings', { 'vpn.mode': 'off' })).status).toBe(200);
+    // VPN off: search is paused (tracker sites would see the server's own address) until an admin opts in
+    const paused = await api(page, 'GET', `/api/search?q=${encodeURIComponent(QUERY)}`);
+    expect(paused.status).toBe(503);
+    expect(paused.json.error.code).toBe('search_vpn_off');
+    await page.goto('/admin/search');
+    await expect(page.getByTestId('search-vpn-off')).toBeVisible();
     for (const c of (await api(page, 'GET', '/api/admin/vpn/configs')).json as { id: number; name: string }[]) {
       if (c.name.startsWith('e2e-search-')) expect((await api(page, 'DELETE', `/api/admin/vpn/configs/${c.id}`)).status).toBe(204);
     }

@@ -38,7 +38,7 @@ D=$(fresh conf-link); mkdir -p "$D/config/qBittorrent/config"
 ln -s "$D/victim/entrypoint.sh" "$D/config/qBittorrent/config/qBittorrent.conf"
 run_edit "$D" 2>/dev/null
 check "symlink at qBittorrent.conf -> victim: victim untouched" victim_intact "$D"
-check "...and the config is now a regular file with the seeded keys" sh -c "[ ! -L '$D/config/qBittorrent/config/qBittorrent.conf' ] && grep -q 'LocalHostAuth=false' '$D/config/qBittorrent/config/qBittorrent.conf'"
+check "...and the config is now a regular file with the seeded keys" sh -c "[ ! -L '$D/config/qBittorrent/config/qBittorrent.conf' ] && grep -q 'LocalHostAuth=true' '$D/config/qBittorrent/config/qBittorrent.conf'"
 
 D=$(fresh dir-link); mkdir -p "$D/config/qBittorrent"
 ln -s "$D/victim" "$D/config/qBittorrent/config"

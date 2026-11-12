@@ -144,20 +144,33 @@ Decision record: [adr/0001-torrent-search-backend.md](adr/0001-torrent-search-ba
 says `searchEnabled: false`, the UI hides it, every `/api/search*` route and `/jackett/*` answer 404 `search_disabled`.
 
 - **Where it runs:** `jackett` shares the vpn container's network namespace (`network_mode: service:vpn`): all tracker-site
-  traffic is subject to the kill switch exactly like qBittorrent's. It runs the upstream image as uid 1000 without its s6
+  traffic is subject to the kill switch exactly like qBittorrent's. It runs the upstream image as uid **1001** (not qBittorrent's 1000: see "Loopback" below) without its s6
   init, read-only root filesystem, no capabilities, `mem_limit` 768m. `deploy/jackett/entrypoint.sh` (mounted read-only)
   re-asserts in `ServerConfig.json` on every start: `APIKey` = `JACKETT_API_KEY` (passed via the environment, read by jq from
   `$ENV`, then unset before `exec`), `BasePathOverride=/jackett`, port 9117, `AllowExternal`, updates off, and
   `FlareSolverrUrl` (set from `JACKETT_FLARESOLVERR_URL`, cleared again when that is empty and the value is our loopback
   URL). Indexers, Jackett's own admin password and everything else belong to the admin. `jackett-init` (root, `CHOWN` only)
-  gives the volume to uid 1000; Jackett mounts it with `nocopy`. Healthcheck: Jackett answers AND the sidecar's control port answers 401 on
-  loopback, i.e. the container still shares the live vpn namespace (after a plain `docker restart vpn`, outside compose, it
-  would sit in the dead old namespace: unreachable but answering its own loopback; `depends_on: restart: true` only covers
-  compose operations). FlareSolverr's healthcheck has the same second condition.
+  gives the volume to uid 1001; Jackett mounts it with `nocopy`. Healthcheck: Jackett answers AND the container still shares
+  a live namespace (a non-`lo` interface is listed in `/proc/net/dev`). After a plain `docker restart vpn` (outside compose;
+  `depends_on: restart: true` only covers compose operations) a companion sits in the dead old namespace: only `lo`,
+  unreachable, but answering its own loopback. FlareSolverr's healthcheck (listening on `127.0.0.1:8191`, read from
+  `/proc/net/tcp`) and qBittorrent's (WebUI answers 403/200) have the same second condition.
 - **Kill switch:** the sidecar's INPUT chain accepts new connections to `SEARCH_PORT` (9117) only from `SEARCH_TRUSTED_IPS`
   (compose: `API_IP`) and never from a `wg*` interface; `SEARCH_PORT` and `LOCAL_ONLY_PORTS` (8191, FlareSolverr) are then
-  dropped for everything else, on every interface, before any LAN accept (also before the test-only allow-list). Loopback
-  stays open: Jackett talks to FlareSolverr on `127.0.0.1:8191`. Both rules exist whether or not the services run.
+  dropped for everything else, on every interface, before any LAN accept (also before the test-only allow-list). Both rules
+  exist whether or not the services run.
+- **Loopback:** the sidecar, qBittorrent, Jackett and FlareSolverr share ONE loopback, so the OUTPUT chain decides by socket
+  owner (`meta skuid`, before `oifname "lo" accept`; `SEARCH_UID`, compose 1001, is Jackett's uid):
+  `lo` -> control port (8000): root only (the sidecar's own healthcheck); `lo` -> `SEARCH_PORT` and `LOCAL_ONLY_PORTS`
+  (9117, 8191): root (the `/companions` probe) and Jackett only; `lo` -> WebUI (8080): never Jackett. So qBittorrent (uid
+  1000) reaches neither Jackett's unauthenticated admin API nor FlareSolverr, FlareSolverr's browser (uid 1000) cannot reach
+  Jackett, and only Jackett can drive FlareSolverr. FlareSolverr shares uid 1000 with qBittorrent (its image patches files
+  owned by that uid), so the WebUI is protected from it by qBittorrent itself: `LocalHostAuth=true` (loopback clients must
+  log in like everyone outside `AuthSubnetWhitelist`). `services/vpn/test` asserts every direction.
+- **VPN off:** with `vpn.mode = off` Jackett and FlareSolverr would reach tracker sites from the server's own address, so
+  `GET /api/search` and adding a result through Jackett's `/dl/` answer 503 `search_vpn_off` unless an admin sets
+  `search.allowWithoutVpn` (Admin -> Search, which warns while the VPN is off). Adding a magnet result is not affected (it
+  goes to qBittorrent, which follows `vpn.mode` like any magnet); the indexer list and the admin UI stay available.
 - **FlareSolverr** (profile `search-flaresolverr`, `./setup.sh --flaresolverr`, needs search): same namespace, `HOST=127.0.0.1`,
   no capabilities, `mem_limit` 1g, `pids_limit` 512, `shm_size` 256m, healthcheck on `/health`. Not read-only (it patches its
   chromedriver binary at start). Its status reaches the admin through the sidecar's control API: `GET /companions` ->
@@ -198,6 +211,13 @@ says `searchEnabled: false`, the UI hides it, every `/api/search*` route and `/j
   elsewhere). Non-GET requests must be same-origin (`Origin` = `PUBLIC_SCHEME://APP_HOST` and/or `Sec-Fetch-Site:
   same-origin`, at least one present), else 403 `csrf`. 120 s timeout; Jackett unreachable = 502 without detail. The
   gateway routes `/jackett/` (APP_HOST, every layout) like a page (login redirect) to the api, never to Jackett.
+  Jackett's API key never reaches the browser: every occurrence is removed from text responses (json/html/xml/js, buffered,
+  <= 16 MiB; binaries are streamed) and from `Location`; a request carrying an `apikey`/`jackett_apikey` parameter (empty,
+  since the UI never saw the key) gets the real key added; a JSON body with `api_key` (Jackett's server-config save) keeps
+  the real key. Every response carries `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval';
+  style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none';
+  base-uri 'self'; form-action 'self'; frame-ancestors 'none'` (Jackett's UI has no inline scripts but compiles Handlebars
+  templates at run time); the gateway adds `X-Frame-Options: DENY`.
 
 ## Domain model (SQLite)
 
@@ -593,7 +613,8 @@ uid/gid 1000 (`doas -u qbtUser`; another `PUID`/`PGID` needs a writable `/etc/pa
 official `/entrypoint.sh` is not used (it runs `chown -R` and writes config as root, both of which follow symlinks that a
 compromised qBittorrent can plant in `/config`). `conf-edit.sh` then runs as uid 1000 and (re)asserts, in `qBittorrent.conf` (`[WebUI]` section
 in qBittorrent 5): WebUI port 8080, password-less access only for `QBT_TRUSTED_IPS` (compose: the static `api` and `worker` /32
-addresses) via `AuthSubnetWhitelist`, `LocalHostAuth=false` (loopback is shared only with the vpn sidecar), host-header
+addresses) via `AuthSubnetWhitelist`, `LocalHostAuth=true` (loopback is shared with the sidecar and, with search, Jackett and
+FlareSolverr: loopback clients must log in; the healthcheck accepts the 403), host-header
 validation and CSRF protection off, no UPnP, anonymous mode off, no interface binding, libtorrent's SSRF mitigation
 (`Session\SSRFMitigation=true`) and, on first
 start only: DHT/PeX on, LSD off, anonymous mode off, no pre-allocation, default save path `/downloads/incomplete`
