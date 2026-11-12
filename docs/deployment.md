@@ -244,6 +244,7 @@ By hand (same result): `docker compose stop api worker authelia`, then
 | `downloads` | worker (whole volume); qbittorrent (`incomplete/` only); gateway (`library/`, read-only); api (`library/` only, for the local-destination test) | in-flight torrents (`incomplete/<infohash>`), delivered files for the local destination (`library/`) |
 | `authelia` | authelia | Authelia sessions, SQLite, `notification.txt` |
 | `qbt-config` | qbittorrent | qBittorrent settings |
+| `jackett-config` | jackett (search profile only) | Jackett's settings, configured indexers (including private-tracker credentials) and API key |
 
 qBittorrent runs in the VPN namespace and parses untrusted input from the internet, so it only sees `incomplete/`:
 a compromised qBittorrent cannot read or tamper with other users' delivered files. This uses Compose

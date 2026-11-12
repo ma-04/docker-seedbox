@@ -12,11 +12,12 @@ A self-hosted, multi-user **torrent-to-cloud seedbox** in a handful of container
 - **Destinations**: Google Drive (shared account, optional Cloudflare Worker proxy for signed links), any S3-compatible bucket (incl. Backblaze B2), or a local folder served with signed links.
 - **VPN**: WireGuard sidecar with a kill switch; upload several configs and rotate manually, on an interval, or on failure. qBittorrent shares the VPN's network namespace, so no tunnel means no traffic.
 - **Tracker lists**: admins can load extra BitTorrent trackers from public plain-text lists (for example [ngosang/trackerslist](https://github.com/ngosang/trackerslist)); the app downloads, filters and refreshes them and adds them to new downloads. See [Tracker lists](docs/configuration.md#tracker-lists).
+- **Torrent search (optional)**: search the indexers an admin configures in [Jackett](https://github.com/Jackett/Jackett) and add a result in one click. Jackett runs inside the VPN namespace, so tracker-site queries never leave outside the tunnel; optional FlareSolverr for indexers behind Cloudflare. `./setup.sh --search`; see [Torrent search](docs/configuration.md#torrent-search).
 - **Limits**: active jobs per user, maximum torrent size, minimum free disk, seeding ratio.
 - **Live progress** in the browser (server-sent events).
 - **Magnet links**: optionally register the app as your browser's `magnet:` handler (Chrome, Edge, Firefox; installed PWA); links pre-fill the add form and are never started automatically. See [Browser integration](docs/configuration.md#browser-integration).
 - **Small attack surface**: one entry point (the gateway), no Docker socket mounts in the app stack, secrets encrypted at rest, signed download links.
-- **Reuses open source**: Authelia, nginx, nginx-proxy + acme-companion, qBittorrent, rclone, WireGuard.
+- **Reuses open source**: Authelia, nginx, nginx-proxy + acme-companion, qBittorrent, rclone, WireGuard, and optionally Jackett and FlareSolverr.
 
 <!-- Screenshots: add docs/img/*.png and reference them here. -->
 *Screenshots: coming soon.*

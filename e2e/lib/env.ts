@@ -37,6 +37,10 @@ export const env = {
   minioUser: process.env.E2E_MINIO_USER ?? 'minioadmin',
   minioPassword: need('E2E_MINIO_PASSWORD'),
   workers: Number(process.env.E2E_WORKERS ?? 1),
+  /** Torrent search is on in the stack under test (e2e/run.sh --search on): tests/16 run, tests/17 skip; off: the reverse. */
+  search: !!process.env.E2E_SEARCH,
+  /** The mock indexer's own HTTP port, for the suite only (the vpn namespace reaches it at 203.0.113.40 through a WG server). */
+  indexerURL: process.env.E2E_INDEXER_URL ?? 'http://indexer:8080',
   passwords: {
     admin: need('E2E_ADMIN_PASSWORD'),
     alice: need('E2E_ALICE_PASSWORD'),

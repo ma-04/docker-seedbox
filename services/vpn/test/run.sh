@@ -168,14 +168,15 @@ check "symlink attack: the plant did not turn the entrypoint into a shell script
 check "qbittorrent: no root-owned files appeared in /config" test -z "$($DC exec -T -u 1000 qbittorrent find /config ! -user qbtUser 2>&1)"
 
 section "1a3. search companions (Jackett, FlareSolverr): reachability and hardening"
-check "Jackett answers the trusted LAN client (the api) on :9117" retry 30 sh_ '[ "$(lan_code lan-client http://vpn:9117/jackett/UI/Login)" = 200 ]'
+check "Jackett answers the trusted LAN client (the api) on :9117" retry 30 sh_ '[ "$(lan_code lan-client http://vpn:9117/jackett/UI/Login)" = 302 ]'   # its cookie check redirects
 check "untrusted sibling -> Jackett :9117 times out (SEARCH_TRUSTED_IPS)" test "$(lan_code lan-intruder http://vpn:9117/jackett/UI/Login)" = 000
 check "FlareSolverr answers on loopback inside the namespace" retry 30 probe curl -fsS -m 5 http://127.0.0.1:8191/health
 check "trusted LAN client -> FlareSolverr :8191 times out (loopback only)" test "$(lan_code lan-client http://vpn:8191/health)" = 000
 check "untrusted sibling -> FlareSolverr :8191 times out" test "$(lan_code lan-intruder http://vpn:8191/health)" = 000
 check "control API /companions reports FlareSolverr reachable (fixed loopback probe)" sh_ "ctl GET /companions </dev/null | head -1 | jq -e '.flaresolverr == true'"
 check "Jackett: the entrypoint applied the API key, base path and FlareSolverr URL" sh_ "$DC exec -T jackett jq -e '.APIKey == \"sbvpntestjackettkey0123456789ab\" and .BasePathOverride == \"/jackett\" and .UpdateDisabled and .FlareSolverrUrl == \"http://127.0.0.1:8191\"' /config/Jackett/ServerConfig.json"
-check "Jackett: the API key is not in its environment or argv" sh_ "! $DC exec -T jackett sh -c 'cat /proc/[0-9]*/environ /proc/[0-9]*/cmdline 2>/dev/null' | tr '\\0' '\\n' | grep -q sbvpntestjackettkey"
+# (docker exec'd shells inherit the container's configured environment; the running Jackett, PID 1 after exec, must not)
+check "Jackett: the API key is not in the Jackett process's environment or argv" sh_ "[ \"\$($DC exec -T jackett sh -c 'cat /proc/1/cmdline' | tr '\\0' ' ')\" != '' ] && ! $DC exec -T jackett sh -c 'cat /proc/1/environ /proc/1/cmdline' | tr '\\0' '\\n' | grep -q sbvpntestjackettkey"
 JC=$($DC ps -q jackett); FC=$($DC ps -q flaresolverr)
 check "Jackett runs as uid 1000 with a read-only root filesystem and no capabilities" sh_ "[ \"\$($DC exec -T jackett id -u)\" = 1000 ] && [ \"\$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{range .HostConfig.CapDrop}}{{.}}{{end}} {{len .HostConfig.CapAdd}}' $JC | sed 's/CAP_//')\" = 'true ALL 0' ]"
 check "FlareSolverr runs as uid 1000, no capabilities, memory and pid limits" sh_ "[ \"\$($DC exec -T flaresolverr id -u)\" = 1000 ] && [ \"\$(docker inspect -f '{{range .HostConfig.CapDrop}}{{.}}{{end}} {{len .HostConfig.CapAdd}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' $FC | sed 's/CAP_//')\" = 'ALL 0 1073741824 512' ]"
@@ -237,7 +238,7 @@ check "required, no tunnel: Jackett -> internet-direct echo times out" test "$(j
 check "required, no tunnel: FlareSolverr -> internet-direct echo times out" test "$(fs_rc http://198.51.100.20/)" = 28
 check "required, no tunnel: FlareSolverr's headless browser cannot fetch the internet-direct echo" test "$(fs_fetch http://198.51.100.20/)" = failed
 checkno "required, no tunnel: Jackett cannot resolve names (no nameserver)" $DC exec -T jackett sh -c 'getent hosts example.com'
-check "required, no tunnel: Jackett still answers the api (LAN input is independent of the tunnel)" test "$(lan_code lan-client http://vpn:9117/jackett/UI/Login)" = 200
+check "required, no tunnel: Jackett still answers the api (LAN input is independent of the tunnel)" test "$(lan_code lan-client http://vpn:9117/jackett/UI/Login)" = 302
 
 # ---------------------------------------------------------------- 3
 section "3. connect A (hostname endpoint, ::/0 in AllowedIPs)"
