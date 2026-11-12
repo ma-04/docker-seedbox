@@ -20,11 +20,18 @@ import { registerEngine } from './routes/engine.js';
 import { registerTrackers } from './routes/trackers.js';
 import { registerEvents } from './routes/events.js';
 import { registerAdminJobs, registerJobs } from './routes/jobs.js';
+import { registerJackettUi } from './routes/jackett-ui.js';
+import { registerAdminSearch, registerSearch } from './routes/search.js';
+import type { SearchBackend } from '../lib/search/backend.js';
+import { JackettBackend } from '../lib/search/jackett.js';
+import { SearchService } from '../lib/search/service.js';
 
 export interface BuildAppOptions {
   db: Db; config: Config; vpn?: VpnClient; engine?: EngineClient; fetchImpl?: typeof fetch;
   logger?: boolean | object; ssePollMs?: number; ssePingMs?: number;
   sseMaxPerUser?: number; sseMaxTotal?: number; vpnLockWaitMs?: number; limiter?: RateLimiter; lookup?: GuardOptions['lookup'];
+  /** Test seam: a search backend to use instead of the one from config.search (null = off). */
+  searchBackend?: SearchBackend | null;
 }
 
 export interface RouteInfo { method: string | string[]; url: string; config?: { guard?: string } }
@@ -35,6 +42,8 @@ const envInt = (k: string, d: number) => { const n = Number(process.env[k]); ret
 export function buildApp(opts: BuildAppOptions): FastifyInstance {
   const { db, config } = opts;
   const fetchImpl = opts.fetchImpl ?? ((...a: Parameters<typeof fetch>) => globalThis.fetch(...a));
+  const backend: SearchBackend | null = opts.searchBackend !== undefined ? opts.searchBackend
+    : config.search ? new JackettBackend({ origin: config.search.jackettUrl, apiKey: config.search.jackettApiKey, fetchImpl, lookup: opts.lookup }) : null;
   const ctx: Ctx = {
     db, config,
     vpn: opts.vpn ?? vpnClient(config),
@@ -47,6 +56,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     limiter: opts.limiter ?? new RateLimiter(),
     vpnLockWaitMs: opts.vpnLockWaitMs ?? 15_000,
     lookup: opts.lookup,
+    search: backend ? new SearchService(backend) : null,
   };
   const app = Fastify({ logger: loggerOptions(opts.logger) as never, trustProxy: true });
 
@@ -89,12 +99,14 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
         cleanup: { deleteRemoteOnJobDelete: getSetting(db, 'cleanup.deleteRemoteOnJobDelete') },
         googleConnectAvailable: false,
         logoutUrl: config.logoutUrl,
+        searchEnabled: !!ctx.search,
       };
     });
 
     registerDestinations(authed, ctx);
     registerJobs(authed, ctx);
     registerEvents(authed, ctx);
+    registerSearch(authed, ctx);
 
     authed.register(async (admin) => {
       tagRoutes(admin, 'admin');
@@ -104,6 +116,8 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       registerAdminJobs(admin, ctx);
       registerEngine(admin, ctx);
       registerTrackers(admin, ctx);
+      registerAdminSearch(admin, ctx);
+      registerJackettUi(admin, ctx);
     });
   });
   return app;

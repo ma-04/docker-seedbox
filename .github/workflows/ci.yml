@@ -51,7 +51,7 @@ jobs:
         run: |
           shellcheck -x -s bash setup.sh services/gateway/25-gateway-auth-mode.sh services/qbittorrent/seed-config.sh services/qbittorrent/conf-edit.sh
           # the gateway script runs under busybox ash: check it as plain sh too
-          shellcheck -s sh services/gateway/25-gateway-auth-mode.sh services/gateway/test/layouts.sh
+          shellcheck -s sh services/gateway/25-gateway-auth-mode.sh services/gateway/test/layouts.sh deploy/jackett/entrypoint.sh
       - name: qBittorrent entrypoint cannot be steered through planted symlinks (plain sh, no Docker)
         run: sh services/qbittorrent/test/symlink.sh
       - name: Gateway refuses to serve through symlinks
@@ -84,6 +84,17 @@ jobs:
             test "$got" = "$4 $4"
           }
           check "" "" "" seedbox.example.com
+          # torrent search profiles: valid in every proxy mode, and the optional services are hardened and VPN-contained
+          for mode in bundled external none; do
+            COMPOSE_PROFILES=authelia,search,search-flaresolverr COMPOSE_FILE="compose.yaml:compose.proxy-$mode.yaml" docker compose config -q
+          done
+          COMPOSE_PROFILES=authelia,search,search-flaresolverr COMPOSE_FILE=compose.yaml:compose.proxy-none.yaml docker compose config --format json > /tmp/search.json
+          jq -e '.services.jackett | .network_mode == "service:vpn" and (.ports // [] | length) == 0 and .read_only and .user == "1001:1001" and .cap_drop == ["ALL"] and ((.cap_add // []) | length) == 0 and (.security_opt | index("no-new-privileges:true"))' /tmp/search.json
+          jq -e '.services.flaresolverr | .network_mode == "service:vpn" and (.ports // [] | length) == 0 and .cap_drop == ["ALL"] and ((.cap_add // []) | length) == 0 and .mem_limit != null and .pids_limit != null and .environment.HOST == "127.0.0.1" and .environment.LOG_LEVEL == "info" and .healthcheck != null and (.security_opt | index("no-new-privileges:true"))' /tmp/search.json
+          jq -e '.services.vpn.environment | .SEARCH_TRUSTED_IPS == "172.31.250.3" and .LOCAL_ONLY_PORTS == "8191" and .SEARCH_UID == "1001"' /tmp/search.json
+          jq -e '[.services[] | select(.network_mode == null and .ports != null) | .ports[]] | all(.target != 9117 and .target != 8191)' /tmp/search.json
+          # and without them nothing of search is started
+          test "$(COMPOSE_FILE=compose.yaml:compose.proxy-none.yaml docker compose config --services | grep -cE '^(jackett|jackett-init|flaresolverr)$')" = 0
           check "" files.example.net "" seedbox.example.com,files.example.net
           check auth.seedbox.example.com files.seedbox.example.com seedbox.example.com \
             seedbox.example.com,auth.seedbox.example.com,files.seedbox.example.com
@@ -159,6 +170,23 @@ jobs:
           # AUTH_MODE=external has no portal: a separate login host is dropped
           ./setup.sh --auth-mode external --auth-host auth.app3.example.com --yes --no-start >/dev/null 2>&1
           test "$(hosts)" = "APP_HOST=app3.example.com AUTH_HOST= FILES_HOST= COOKIE_DOMAIN=app3.example.com "
+          # torrent search toggles: profiles are merged (not overwritten) and survive re-runs, the key is generated once
+          srch() { grep -E '^(COMPOSE_PROFILES|SEARCH_BACKEND|FLARESOLVERR_ENABLED|JACKETT_FLARESOLVERR_URL)=' deploy/.env | tr '\n' ' '; echo; }
+          ./setup.sh --auth-mode authelia --yes --no-start >/dev/null 2>&1
+          test "$(srch)" = "COMPOSE_PROFILES=authelia SEARCH_BACKEND= FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
+          ./setup.sh --search --yes --no-start >/dev/null 2>&1
+          test "$(srch)" = "COMPOSE_PROFILES=authelia,search SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
+          key=$(grep '^JACKETT_API_KEY=' deploy/.env); [[ $key =~ ^JACKETT_API_KEY=[0-9a-f]{32}$ ]]
+          ./setup.sh --yes --no-start >/dev/null 2>&1
+          test "$(srch)" = "COMPOSE_PROFILES=authelia,search SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
+          ./setup.sh --flaresolverr --yes --no-start >/dev/null 2>&1
+          test "$(srch)" = "COMPOSE_PROFILES=authelia,search,search-flaresolverr SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED=1 JACKETT_FLARESOLVERR_URL=http://127.0.0.1:8191 "
+          ./setup.sh --no-search --yes --no-start >/dev/null 2>&1
+          test "$(srch)" = "COMPOSE_PROFILES=authelia SEARCH_BACKEND= FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
+          if ./setup.sh --flaresolverr --yes --no-start >/dev/null 2>&1; then echo "--flaresolverr without search must be refused"; exit 1; fi
+          ./setup.sh --search --auth-mode external --yes --no-start >/dev/null 2>&1
+          test "$(srch)" = "COMPOSE_PROFILES=search SEARCH_BACKEND=jackett FLARESOLVERR_ENABLED= JACKETT_FLARESOLVERR_URL= "
+          test "$(grep '^JACKETT_API_KEY=' deploy/.env)" = "$key"   # kept across off/on
 
   # Every image, natively for linux/amd64 AND linux/arm64 (arm64 on GitHub's arm runner, free for public repositories;
   # per image+arch build cache), each smoke-tested on the runner that built it. release.yml skips this (build-images:
@@ -187,7 +215,7 @@ jobs:
         run: services/vpn/test/run.sh
 
   e2e:
-    name: End-to-end (Playwright, ${{ matrix.layout }})
+    name: End-to-end (Playwright, ${{ matrix.layout }}, search ${{ matrix.search }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -196,11 +224,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # the default layout runs the whole suite
-          - { layout: single, specs: "" }
-          # the optional layouts run what depends on hosts: login, downloads, the magnet round trip, the layout checks
-          - { layout: split-files, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/15-layout.spec.ts" }
-          - { layout: multi, specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/15-layout.spec.ts" }
+          # the default layout runs the whole suite, with torrent search on (tests/17 skips itself)
+          - { layout: single, search: "on", specs: "" }
+          # the optional layouts run what depends on hosts: login, downloads, the magnet round trip, the layout checks;
+          # split-files also proves the app without search (tests/17), multi the search UI behind a separate login host
+          - { layout: split-files, search: "off", specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/15-layout.spec.ts tests/17-search-disabled.spec.ts" }
+          - { layout: multi, search: "on", specs: "tests/01-auth.spec.ts tests/03-local-download.spec.ts tests/12-magnet-handler.spec.ts tests/15-layout.spec.ts tests/16-search.spec.ts" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -209,7 +238,7 @@ jobs:
         env:
           SPECS: ${{ matrix.specs }}
         # SPECS is a fixed list from the matrix above; word splitting into separate arguments is intended
-        run: e2e/run.sh --layout "${{ matrix.layout }}" -- $SPECS
+        run: e2e/run.sh --layout "${{ matrix.layout }}" --search "${{ matrix.search }}" -- $SPECS
       - name: Upload report, traces and container logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

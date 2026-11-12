@@ -6,6 +6,9 @@ FROM qbittorrentofficial/qbittorrent-nox:5.3.0-2@sha256:43b2d352cf76330a7ca34c73
 COPY --chmod=0755 seed-config.sh conf-edit.sh /
 ENV PUID=1000 PGID=1000 QBT_LEGAL_NOTICE=confirm QBT_WEBUI_PORT=8080 LAN_CIDRS=172.31.250.0/24
 EXPOSE 8080 6881
+# The WebUI answers (403 = it asks loopback clients to log in as well: LocalHostAuth=true) and this container still
+# shares a live network namespace: one of Docker's interfaces (eth*) is visible. A qbittorrent left behind by a plain
+# `docker restart vpn` keeps only lo and the sidecar's wg* interface (Docker removes only its own).
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=5 \
-  CMD curl -fsS -o /dev/null http://127.0.0.1:8080/api/v2/app/version || exit 1
+  CMD c=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v2/app/version); { [ "$c" = 403 ] || [ "$c" = 200 ]; } && awk 'NR>2 && $1 ~ /^eth[0-9]+:/ {f=1} END {exit !f}' /proc/net/dev || exit 1
 ENTRYPOINT ["/sbin/tini", "-g", "--", "/seed-config.sh"]

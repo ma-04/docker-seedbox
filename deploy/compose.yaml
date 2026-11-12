@@ -138,6 +138,11 @@ services:
     environment:
       <<: *app-env
       PORT: "3000"
+      # Torrent search (optional, ./setup.sh --search): empty SEARCH_BACKEND = off. Jackett runs in the vpn namespace.
+      SEARCH_BACKEND: ${SEARCH_BACKEND:-}
+      JACKETT_URL: http://vpn:9117
+      JACKETT_API_KEY: ${JACKETT_API_KEY:-}
+      FLARESOLVERR_ENABLED: ${FLARESOLVERR_ENABLED:-}
     volumes:
       - data:/data
       - type: volume                    # only for the local-destination "Test" (mkdir + write probe in library/)
@@ -204,6 +209,12 @@ services:
       CONTROL_TRUSTED_IPS: ${API_IP:-172.31.250.3},${WORKER_IP:-172.31.250.4}   # only api and worker may reach the control API :8000
       VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-required}   # fail closed after any restart until the worker applies vpn.mode
       VPN_MTU: ${VPN_MTU:-}              # empty = 1280 unless the WireGuard config sets MTU =; see docs/configuration.md
+      # Torrent search: only the api may open connections to Jackett (:9117); FlareSolverr (:8191) is loopback-only.
+      # Both stay closed to everything else whether or not the "search" profiles run.
+      SEARCH_TRUSTED_IPS: ${API_IP:-172.31.250.3}
+      SEARCH_PORT: "9117"
+      LOCAL_ONLY_PORTS: "8191"
+      SEARCH_UID: "1001"                # Jackett's uid: over loopback only it (and root) may reach :9117 / :8191
       LOG_LEVEL: ${LOG_LEVEL:-info}
     tmpfs: ["/tmp"]                   # not read_only: /etc/resolv.conf must stay writable
     security_opt: ["no-new-privileges:true"]
@@ -252,13 +263,106 @@ services:
         condition: service_healthy
         restart: true                 # re-attach to the new namespace when vpn is recreated/restarted
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8080/api/v2/app/version"]
+      # WebUI up (403: loopback clients must log in too, LocalHostAuth=true) AND still in the live vpn namespace (a Docker
+      # interface eth* is visible; after a plain `docker restart vpn` only lo and the sidecar's wg* remain). No other connection.
+      test: ["CMD-SHELL", "c=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v2/app/version); { [ \"$$c\" = 403 ] || [ \"$$c\" = 200 ]; } && awk 'NR>2 && $$1 ~ /^eth[0-9]+:/ {f=1} END {exit !f}' /proc/net/dev"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 20s
     logging: *logging
   # ================================================================ END qbittorrent
+
+  # ================================================================ BEGIN search (optional: ./setup.sh --search)
+  # Jackett (torrent search) in the vpn container's network namespace like qbittorrent: every tracker-site query goes
+  # through the tunnel or nowhere. The kill switch lets only the api container connect to :9117; admins reach Jackett's own
+  # UI at https://APP_HOST/jackett/ through the api (admin-only passthrough). Upstream image, pinned by digest, run as
+  # uid 1000 without s6/root, with a read-only root filesystem and no capabilities.
+  jackett-init:   # one-shot, root: the config volume must belong to uid 1000 before Jackett (not root) starts
+    image: busybox:1.38@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+    profiles: ["search"]
+    restart: "no"
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /config/Jackett && chown -h 1001:1001 /config /config/Jackett"]
+    volumes:
+      - jackett-config:/config
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+
+  jackett:
+    image: lscr.io/linuxserver/jackett:0.24.3047@sha256:f311762e5549286f71c281f2772125908e5fce73a28445b3f28d01bcf579c867
+    profiles: ["search"]
+    restart: unless-stopped
+    network_mode: service:vpn
+    user: "1001:1001"               # NOT qBittorrent's 1000: the kill switch tells loopback clients apart by uid (SEARCH_UID)
+    entrypoint: ["/bin/sh", "/seedbox/entrypoint.sh"]
+    environment:
+      JACKETT_API_KEY: ${JACKETT_API_KEY:-}            # required when the profile runs; the entrypoint refuses an empty one
+      FLARESOLVERR_URL: ${JACKETT_FLARESOLVERR_URL:-}   # http://127.0.0.1:8191 with the "search-flaresolverr" profile
+      HOME: /tmp
+      TMPDIR: /tmp
+    volumes:
+      - ./jackett/entrypoint.sh:/seedbox/entrypoint.sh:ro
+      - type: volume                    # nocopy: the image's root-owned /config must not be copied over the volume
+        source: jackett-config
+        target: /config
+        volume: { nocopy: true }
+    read_only: true
+    tmpfs: ["/tmp:uid=1001,gid=1001"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 768m
+    pids_limit: 256
+    depends_on:
+      jackett-init: { condition: service_completed_successfully }
+      vpn:
+        condition: service_healthy
+        restart: true                 # re-attach to the new namespace when vpn is recreated/restarted
+    # Healthy = Jackett answers AND it still shares the vpn container's live namespace (a Docker interface eth* is visible).
+    # After a plain `docker restart vpn` (not through compose) it would sit in the dead old namespace (only lo and the
+    # sidecar's wg*: Docker removes only its own interfaces), unreachable but
+    # answering its own loopback; this makes that state "unhealthy" (`./setup.sh doctor`; fix: docker compose up -d).
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login && awk 'NR>2 && $$1 ~ /^eth[0-9]+:/ {f=1} END {exit !f}' /proc/net/dev"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
+  # FlareSolverr (optional, off by default: ./setup.sh --flaresolverr): headless Chromium that solves Cloudflare challenges
+  # for Jackett. Same namespace; listens on 127.0.0.1:8191 only and the kill switch keeps that port loopback-only, so only
+  # Jackett can use it. Not read-only: it patches its chromedriver binary at start.
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2@sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767
+    profiles: ["search-flaresolverr"]
+    restart: unless-stopped
+    network_mode: service:vpn
+    environment:
+      HOST: 127.0.0.1
+      PORT: "8191"
+      LOG_LEVEL: info
+    tmpfs: ["/tmp"]
+    shm_size: 256m
+    mem_limit: 1g
+    pids_limit: 512
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      vpn:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      # listening on 127.0.0.1:8191 (read from /proc: the kill switch lets only Jackett and root connect) + live namespace
+      test: ["CMD-SHELL", "grep -q '0100007F:1FFF 00000000:0000 0A' /proc/net/tcp && awk 'NR>2 && $$1 ~ /^eth[0-9]+:/ {f=1} END {exit !f}' /proc/net/dev"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging: *logging
+  # ================================================================ END search
 
 networks:
   default:
@@ -272,3 +376,4 @@ volumes:
   downloads:
   authelia:
   qbt-config:
+  jackett-config:

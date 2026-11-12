@@ -57,6 +57,10 @@ Install options (each also readable from the environment as SEEDBOX_<NAME>, e.g.
   --proxy MODE           bundled | external | none
   --proxy-network NAME   Docker network of your existing reverse proxy (external mode)
   --acme-email MAIL      e-mail for Let's Encrypt (bundled / nginx-proxy + acme-companion)
+  --search               enable torrent search: Jackett in the VPN namespace (compose profile "search"); generates its
+                         API key. Asked on an interactive first install. --no-search switches it off (the key is kept)
+  --flaresolverr         also run FlareSolverr for indexers behind Cloudflare (profile "search-flaresolverr"; needs
+                         --search; about 1 GB RAM; see docs/configuration.md). --no-flaresolverr switches it off
   --version VERSION      image version to run: X.Y.Z, latest (= the newest release, pinned as its X.Y.Z), edge (the
                          head of main, CI-tested, not for production) or local (default: the newest release; with none
                          published yet, edge; with neither in the registry, the images are built from this clone)
@@ -86,6 +90,7 @@ AUTH_MODE_IN=${SEEDBOX_AUTH_MODE:-}; VERSION_IN=${SEEDBOX_VERSION_OVERRIDE:-}
 BUILD=${SEEDBOX_BUILD:-0}; YES=${SEEDBOX_YES:-0}; NO_START=0; USER_GROUP=users
 ALLOW_DOWNGRADE=0; ACCEPT_NEW_SECRET=0; I_KNOW=${SEEDBOX_I_KNOW_EXTERNAL_AUTH_IS_UNSAFE:-0}
 BACKUP_OUT=""; RESTORE_FILE=""
+SEARCH_IN=${SEEDBOX_SEARCH:-}; FS_IN=${SEEDBOX_FLARESOLVERR:-}   # 1 / 0 / empty = keep what .env has
 
 if [ $# -gt 0 ]; then
   case "$1" in install|add-user|update|doctor|backup|restore) CMD=$1; shift ;; esac
@@ -108,6 +113,10 @@ while [ $# -gt 0 ]; do
     --version) VERSION_IN=${2:?}; shift 2 ;;
     --out) BACKUP_OUT=${2:?}; shift 2 ;;
     --build) BUILD=1; shift ;;
+    --search) SEARCH_IN=1; shift ;;
+    --no-search) SEARCH_IN=0; shift ;;
+    --flaresolverr) FS_IN=1; shift ;;
+    --no-flaresolverr) FS_IN=0; shift ;;
     --no-start) NO_START=1; shift ;;
     --allow-downgrade) ALLOW_DOWNGRADE=1; shift ;;
     --accept-new-secret) ACCEPT_NEW_SECRET=1; shift ;;
@@ -647,12 +656,37 @@ or continue with --accept-new-secret if you want a new secret and will re-enter 
   [ -z "$proxy_network" ] || env_put PROXY_NETWORK "$proxy_network"
   [ -z "$acme_email" ] || env_put ACME_EMAIL "$acme_email"
   env_put AUTH_MODE "$auth_mode"
-  if [ "$auth_mode" = external ]; then
-    env_put COMPOSE_PROFILES ""
-    if [ "$PROXY" = bundled ]; then env_put ALLOW_EXTERNAL_AUTH_WITH_BUNDLED_PROXY 1; fi
-  else
-    env_put COMPOSE_PROFILES authelia
+  if [ "$auth_mode" = external ] && [ "$PROXY" = bundled ]; then env_put ALLOW_EXTERNAL_AUTH_WITH_BUNDLED_PROXY 1; fi
+
+  # ---- torrent search (optional): Jackett (+ FlareSolverr) in the VPN namespace -----------------------------------
+  # Re-runs keep what .env has unless --search/--no-search, --flaresolverr/--no-flaresolverr say otherwise.
+  local search=0 fsolver=0
+  if [ "$fresh" = 0 ]; then
+    [ -z "$(env_get SEARCH_BACKEND)" ] || search=1
+    [ "$(env_get FLARESOLVERR_ENABLED)" != 1 ] || fsolver=1
   fi
+  if [ "$fresh" = 1 ] && [ "$INTERACTIVE" = 1 ] && [ -z "$SEARCH_IN" ]; then
+    if confirm "Enable torrent search? (Jackett; its tracker traffic goes through the VPN; admins add indexers in its own UI)" n; then search=1; fi
+  fi
+  case "$SEARCH_IN" in 1) search=1 ;; 0) search=0 ;; "") ;; *) die "SEEDBOX_SEARCH must be 1 or 0" ;; esac
+  case "$FS_IN" in 1) fsolver=1 ;; 0) fsolver=0 ;; "") ;; *) die "SEEDBOX_FLARESOLVERR must be 1 or 0" ;; esac
+  if [ "$fsolver" = 1 ] && [ "$search" = 0 ]; then
+    if [ "$FS_IN" = 1 ]; then die "--flaresolverr needs torrent search: add --search"; fi
+    fsolver=0   # search was switched off: its helper goes with it
+  fi
+  if [ "$search" = 1 ]; then
+    env_put SEARCH_BACKEND jackett
+    env_ensure JACKETT_API_KEY "$(gen_hex 16)"   # generated once, kept when search is switched off and on again
+  else
+    env_put SEARCH_BACKEND ""
+  fi
+  if [ "$fsolver" = 1 ]; then env_put FLARESOLVERR_ENABLED 1; env_put JACKETT_FLARESOLVERR_URL http://127.0.0.1:8191
+  else env_put FLARESOLVERR_ENABLED ""; env_put JACKETT_FLARESOLVERR_URL ""; fi
+  local profiles=()
+  [ "$auth_mode" = external ] || profiles+=(authelia)
+  [ "$search" = 0 ] || profiles+=(search)
+  [ "$fsolver" = 0 ] || profiles+=(search-flaresolverr)
+  env_put COMPOSE_PROFILES "$(IFS=,; printf '%s' "${profiles[*]}")"
   [ -n "$(env_get SEEDBOX_REGISTRY)" ] || env_put SEEDBOX_REGISTRY ghcr.io/ma-04
   [ -n "$(env_get SEEDBOX_VERSION)" ] || env_put SEEDBOX_VERSION latest
   # One source of truth: LAN_CIDRS. The static addresses of vpn/api/worker (api and worker are the only ones
@@ -720,8 +754,25 @@ or continue with --accept-new-secret if you want a new secret and will re-enter 
     dc ps || true
     die "Some containers did not become healthy. Inspect with: (cd deploy && docker compose logs --tail 50)   or ./setup.sh doctor"
   }
+  remove_disabled_search
   fpr_record
   print_summary "$generated_pw"
+}
+
+remove_disabled_search() { # containers of switched-off optional services (inactive profiles are not "orphans" to compose)
+  local svc ids
+  for svc in jackett jackett-init flaresolverr; do
+    case "$svc" in
+      flaresolverr) [ "$(env_get FLARESOLVERR_ENABLED)" != 1 ] || continue ;;
+      *) [ -z "$(env_get SEARCH_BACKEND)" ] || continue ;;
+    esac
+    ids=$(docker ps -aq --filter "label=com.docker.compose.project=$(project_name)" --filter "label=com.docker.compose.service=$svc" 2>/dev/null || true)
+    if [ -n "$ids" ]; then
+      say "Removing the $svc container (switched off; its volume is kept)."
+      # shellcheck disable=SC2086  # one id per word
+      docker rm -f $ids >/dev/null || warn "Could not remove the $svc container"
+    fi
+  done
 }
 
 build_version() { # shown in the web footer: git describe when this is a clone, else the pinned version (or dev)
@@ -767,6 +818,10 @@ print_summary() {
     say "Login:      $scheme://${auth:-$app/auth}/  (you are redirected there automatically)"
   fi
   say "Downloads:  $scheme://${files:-$app}/dl/...  (signed links shown in the app)"
+  if [ -n "$(env_get SEARCH_BACKEND)" ]; then
+    say "Search:     $scheme://$app/search   (indexers: Admin -> Search -> Open Jackett = $scheme://$app/jackett/, admins only)"
+    [ "$(env_get FLARESOLVERR_ENABLED)" != 1 ] || say "            FlareSolverr is on (for indexers behind Cloudflare; uses up to 1 GB RAM)"
+  fi
   [ -z "$gen_pw" ] || say "Admin password (shown once, change it later): ${B}$gen_pw${N}"
   say ""
   n=$(hosts_in_use | wc -l | tr -d ' ')
@@ -842,6 +897,7 @@ cmd_update() {
   fi
   step "Restarting changed services"
   dc up -d --remove-orphans --wait --wait-timeout 300
+  remove_disabled_search
   fpr_record
   say "Updated to $(env_get SEEDBOX_VERSION). Running images:"
   dc ps --format '  {{.Service}}  {{.Image}}' 2>/dev/null || true
@@ -1100,6 +1156,20 @@ cmd_doctor() {
     fi
   else
     meh "curl not installed; skipping HTTPS checks"
+  fi
+
+  say ""; say "Torrent search"
+  local prof; prof=",$(env_get COMPOSE_PROFILES),"
+  if [ -z "$(env_get SEARCH_BACKEND)" ]; then
+    ok "off (./setup.sh --search enables it)"
+    case "$prof" in *,search,*|*,search-flaresolverr,*) meh "COMPOSE_PROFILES still lists search profiles; re-run ./setup.sh to tidy it" ;; esac
+  else
+    if [[ $(env_get JACKETT_API_KEY) =~ ^[A-Za-z0-9]{16,128}$ ]]; then ok "Jackett enabled; API key present (kept in deploy/.env)"; else bad "SEARCH_BACKEND is set but JACKETT_API_KEY is missing or invalid: re-run ./setup.sh --search"; fi
+    case "$prof" in *,search,*) ok "compose profile \"search\" active" ;; *) bad "COMPOSE_PROFILES lacks \"search\": Jackett does not run; re-run ./setup.sh --search" ;; esac
+    if [ "$(env_get FLARESOLVERR_ENABLED)" = 1 ]; then
+      case "$prof" in *,search-flaresolverr,*) ok "FlareSolverr enabled (profile \"search-flaresolverr\"; reachable only by Jackett, on loopback)" ;; *) bad "FLARESOLVERR_ENABLED=1 but COMPOSE_PROFILES lacks \"search-flaresolverr\"; re-run ./setup.sh --flaresolverr" ;; esac
+    fi
+    say "  (Jackett's own UI: https://$(norm_host "$(env_get APP_HOST)")/jackett/ for admins; Admin -> Search shows its status)"
   fi
 
   say ""; say "VPN prerequisites"

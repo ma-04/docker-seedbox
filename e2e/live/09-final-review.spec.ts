@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import crypto from 'node:crypto';
-import { api, fetchHash, inQbt, jobRow, login, mask, note, serverEgressIp, sh, state } from './lib';
+import { api, fetchHash, jobRow, login, mask, note, qbtJson, serverEgressIp, sh, state } from './lib';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -32,8 +32,8 @@ test.describe('9. final review fixes on the live deployment', () => {
       expect(r.status, JSON.stringify(r.json)).toBe(400);
     }
     expect(((await api(page, 'GET', '/api/jobs')).json as unknown[]).length).toBe(before);
-    const t = await inQbt('curl -fsS -m 10 http://127.0.0.1:8080/api/v2/torrents/info');
-    expect(t.out).not.toContain(a); expect(t.out).not.toContain(b);
+    const t = JSON.stringify(await qbtJson('/api/v2/torrents/info'));
+    expect(t).not.toContain(a); expect(t).not.toContain(b);
   });
 
   test('/add?magnet= pre-fills the form and submits nothing', async ({ page }) => {

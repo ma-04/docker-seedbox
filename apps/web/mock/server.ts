@@ -70,7 +70,7 @@ export function mockMiddleware() {
       res.write('event: ping\ndata: {}\n\n');
       return;
     }
-    if (p === '/me') return send({ user: { id: 1, username: 'alice', email: 'alice@example.com', displayName: 'Alice' }, isAdmin: !url.searchParams.has('user'), limits: { maxActiveJobs: 5, maxTorrentBytes: 0 }, cleanup: { deleteRemoteOnJobDelete: false }, googleConnectAvailable: false, logoutUrl: '/logout' });
+    if (p === '/me') return send({ user: { id: 1, username: 'alice', email: 'alice@example.com', displayName: 'Alice' }, isAdmin: !url.searchParams.has('user'), limits: { maxActiveJobs: 5, maxTorrentBytes: 0 }, cleanup: { deleteRemoteOnJobDelete: false }, googleConnectAvailable: false, logoutUrl: '/logout', searchEnabled: false });
     if (p === '/destinations' && m === 'GET') return send(db.destinations);
     if (p === '/jobs' && m === 'GET') return send(db.jobs);
     if (p === '/jobs' && m === 'POST') {

@@ -36,7 +36,10 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: docker-compose
-    directory: /deploy
+    # /services/vpn/test pins the same Jackett and FlareSolverr images as /deploy (the kill-switch test runs them)
+    directories:
+      - /deploy
+      - /services/vpn/test
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
     ignore:

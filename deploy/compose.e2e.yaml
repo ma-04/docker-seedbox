@@ -9,7 +9,11 @@
 #   default 172.31.250.0/24  the compose LAN (LAN_CIDRS): tracker .30, seeder .31, vpn .2 (from compose.yaml)
 #   inet    198.51.100.0/24  stand-in for "the internet" (the vpn's normal default route, gw_priority): echo-direct .20, WireGuard servers .11 / .12;
 #                            the vpn container is attached too (.2), so the kill switch has something to block
-#   behind  203.0.113.0/24  only reachable through a WireGuard server: echo-behind .20
+#   behind  203.0.113.0/24  only reachable through a WireGuard server: echo-behind .20, the mock indexer .40
+#
+# Torrent search (e2e/run.sh --search on, the default): Jackett runs from compose.yaml's "search" profile with a custom
+# Cardigann definition for the mock indexer (e2e/fixtures/indexer), which sits behind the WireGuard servers: Jackett can
+# reach it only through the tunnel, never directly, and the indexer records where each request came from.
 #
 # The tracker and seeder are addressed by IP: while a tunnel is up the vpn namespace cannot resolve compose names.
 
@@ -46,6 +50,10 @@ services:
     environment:
       TRACKER_LIST_ALLOW_PRIVATE: "1"
       E2E_HERMETIC: "1"
+
+  jackett:   # only started with the "search" profile (e2e/run.sh --search on)
+    volumes:
+      - ../e2e/fixtures/indexer/sbmock.yml:/etc/xdg/cardigan/definitions/sbmock.yml:ro   # TEST ONLY: the mock indexer's definition
 
   qbittorrent:
     environment:
@@ -182,6 +190,19 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+  indexer:   # TEST ONLY: mock torrent site for Jackett (search profile)
+    <<: *fixture
+    profiles: ["search"]
+    image: ${SEEDBOX_REGISTRY:-ghcr.io/ma-04}/e2e-indexer:${SEEDBOX_VERSION:-latest}
+    build: { context: ../e2e/fixtures/indexer }
+    volumes:
+      - fixtures:/fixtures:ro
+    depends_on:
+      seeder: { condition: service_healthy }
+    networks:
+      behind: { ipv4_address: 203.0.113.40 }   # what Jackett uses (sbmock.yml): only reachable through a WG server
+      default: {}                              # for the suite (GET http://indexer:8080/seen); the vpn namespace cannot reach the LAN
+
   # ---------------------------------------------------------------- the test runner (profile "runner")
   playwright:
     <<: *fixture
@@ -203,6 +224,7 @@ services:
       E2E_MINIO_PASSWORD: ${E2E_MINIO_PASSWORD:?}
       E2E_CTL_TOKEN: ${E2E_CTL_TOKEN:?}
       E2E_WORKERS: ${E2E_WORKERS:-1}
+      E2E_SEARCH: ${SEARCH_BACKEND:-}          # non-empty = torrent search is on in this stack (tests/16 vs tests/17)
     volumes:
       - ../e2e/.out:/e2e/.out
     depends_on:

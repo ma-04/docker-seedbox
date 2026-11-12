@@ -5,7 +5,7 @@ networks:
   inet:   { ipam: { config: [ { subnet: 198.51.100.0/24 } ] } }   # stands in for "the internet"
   behind: { ipam: { config: [ { subnet: 203.0.113.0/24 } ] } }   # only the WG servers sit here
   priv:   { ipam: { config: [ { subnet: 10.77.0.0/24 } ] } }      # a private range the vpn container is attached to (must NOT be reachable from the namespace)
-volumes: { qbt-config: {}, downloads: {} }
+volumes: { qbt-config: {}, downloads: {}, jackett-config: {} }
 x-tools: &tools
   image: sbvpn-tools
   volumes: ["./:/t:ro"]
@@ -61,6 +61,10 @@ services:
       LAN_CIDRS: 172.31.250.0/24
       CONTROL_TRUSTED_IPS: 172.31.250.50        # only lan-client may reach the control API (the intruder may not)
       VPN_LAN_ALLOW_OUT: 172.31.250.50:9000     # TEST ONLY: one LAN ip:port qBittorrent may dial (positive control for the LAN rules)
+      SEARCH_TRUSTED_IPS: 172.31.250.50         # lan-client plays the api: the only address that may open :9117 (Jackett)
+      SEARCH_PORT: "9117"
+      LOCAL_ONLY_PORTS: "8191"                  # FlareSolverr: loopback only
+      SEARCH_UID: "1001"                        # Jackett's uid (loopback access to :9117 / :8191)
       VPN_MTU: ${VPN_MTU:-}                     # unset = 1280; run.sh asserts precedence
       VPN_DEFAULT_MODE: ${VPN_DEFAULT_MODE:-}   # unset/empty must mean "required" (fail closed); run.sh asserts it
       PUBLIC_IP_URL: http://203.0.113.20/
@@ -92,6 +96,44 @@ services:
     command: ["sh", "-c", "mkdir -p /downloads/incomplete /downloads/library && chown 1000:1000 /downloads/incomplete"]
     volumes: ["downloads:/downloads"]
     depends_on: { tools-build: { condition: service_completed_successfully } }
+  # ---- torrent search companions, exactly as deploy/compose.yaml runs them (same images, pins and hardening) ----
+  jackett-init:
+    image: sbvpn-tools
+    user: "0:0"
+    restart: "no"
+    command: ["sh", "-c", "mkdir -p /config/Jackett && chown -h 1001:1001 /config /config/Jackett"]
+    volumes: ["jackett-config:/config"]
+    depends_on: { tools-build: { condition: service_completed_successfully } }
+  jackett:
+    image: lscr.io/linuxserver/jackett:0.24.3047@sha256:f311762e5549286f71c281f2772125908e5fce73a28445b3f28d01bcf579c867
+    network_mode: service:vpn
+    user: "1001:1001"
+    entrypoint: ["/bin/sh", "/seedbox/entrypoint.sh"]
+    environment: { JACKETT_API_KEY: sbvpntestjackettkey0123456789ab, FLARESOLVERR_URL: "http://127.0.0.1:8191", HOME: /tmp, TMPDIR: /tmp }
+    volumes:
+      - ../../../deploy/jackett/entrypoint.sh:/seedbox/entrypoint.sh:ro
+      - { type: volume, source: jackett-config, target: /config, volume: { nocopy: true } }
+    read_only: true
+    tmpfs: ["/tmp:uid=1001,gid=1001"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck: { test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login && awk 'NR>2 && $$1 ~ /^eth[0-9]+:/ {f=1} END {exit !f}' /proc/net/dev"], interval: 5s, timeout: 5s, retries: 30, start_period: 10s }
+    depends_on:
+      jackett-init: { condition: service_completed_successfully }
+      vpn: { condition: service_healthy, restart: true }
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2@sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767
+    network_mode: service:vpn
+    environment: { HOST: 127.0.0.1, PORT: "8191", LOG_LEVEL: info }
+    tmpfs: ["/tmp"]
+    shm_size: 256m
+    mem_limit: 1g
+    pids_limit: 512
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck: { test: ["CMD-SHELL", "grep -q '0100007F:1FFF 00000000:0000 0A' /proc/net/tcp && awk 'NR>2 && $$1 ~ /^eth[0-9]+:/ {f=1} END {exit !f}' /proc/net/dev"], interval: 5s, timeout: 10s, retries: 30, start_period: 20s }
+    depends_on: { vpn: { condition: service_healthy, restart: true } }
+
   # test helpers
   probe:   # shares the vpn netns, like qbittorrent does
     <<: *tools

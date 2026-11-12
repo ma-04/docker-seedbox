@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strconv"
@@ -354,5 +355,112 @@ func TestRulesUseTheDNSOfTheTunnelThatIsUp(t *testing.T) {
 	s.dns = []netip.Addr{netip.MustParseAddr("10.99.1.1")}
 	if !strings.Contains(s.rules("required"), "{ 10.99.1.1 } meta l4proto { tcp, udp } th dport 53 accept") {
 		t.Error("DNS of the tunnel that is up must be reachable via wg*")
+	}
+}
+
+func TestSearchPortOnlyFromTrustedAndLocalOnlyPorts(t *testing.T) {
+	p := testPolicy()
+	p.searchPort = "9117"
+	p.localOnly = []string{"8191"}
+	p.allowOut = []allowOut{{addr: netip.MustParseAddr("172.31.250.31")}}
+	for _, mode := range []string{"required", "off"} {
+		// No trusted source: the search port is closed like the loopback-only ones.
+		in := ruleLines(chain(t, buildRuleset(mode, p, nil, nil), "input"))
+		drop := indexOf(in, "tcp dport { 9117, 8191 } drop")
+		if drop < 0 {
+			t.Fatalf("%s: search + local-only ports must be dropped: %v", mode, in)
+		}
+		for i, l := range in {
+			if strings.Contains(l, "9117") && strings.HasSuffix(l, "accept") {
+				t.Errorf("%s: no search accept expected without SEARCH_TRUSTED_IPS: %s", mode, l)
+			}
+			// Every LAN accept (WebUI, control, allow-listed fixtures dialling in) comes after the drop.
+			if strings.HasPrefix(l, "ip saddr") && strings.HasSuffix(l, "accept") && i < drop {
+				t.Errorf("%s: %q precedes the search/local-only drop", mode, l)
+			}
+			if strings.Contains(l, "8191") && l != in[drop] {
+				t.Errorf("%s: the local-only port must appear in the drop only: %s", mode, l)
+			}
+		}
+		if lo := indexOf(in, `iifname "lo" accept`); lo < 0 || lo > drop {
+			t.Errorf("%s: loopback must be accepted before the drop (Jackett -> FlareSolverr on 127.0.0.1)", mode)
+		}
+
+		p2 := p
+		p2.searchFrom = []netip.Addr{netip.MustParseAddr("172.31.250.3")}
+		in = ruleLines(chain(t, buildRuleset(mode, p2, nil, nil), "input"))
+		acc := indexOf(in, `iifname != "wg*" ip saddr { 172.31.250.3 } tcp dport 9117 accept`)
+		drop = indexOf(in, "tcp dport { 9117, 8191 } drop")
+		if acc < 0 || drop < 0 || acc > drop {
+			t.Errorf("%s: want the api's search accept (never via the tunnel), then the drop: %v", mode, in)
+		}
+	}
+	// Empty LAN (no LAN_CIDRS) still closes the ports.
+	p.lan = nil
+	if indexOf(ruleLines(chain(t, buildRuleset("off", p, nil, nil), "input")), "tcp dport { 9117, 8191 } drop") < 0 {
+		t.Error("ports must be closed without a LAN too")
+	}
+}
+
+func TestLoopbackIsScopedByUid(t *testing.T) {
+	p := testPolicy()
+	p.searchPort, p.localOnly, p.searchUID = "9117", []string{"8191"}, "1001"
+	for _, mode := range []string{"required", "off"} {
+		out := ruleLines(chain(t, buildRuleset(mode, p, nil, nil), "output"))
+		lo := indexOf(out, `oifname "lo" accept`)
+		want := []string{
+			`oifname "lo" tcp dport 8000 meta skuid != 0 drop`,
+			`oifname "lo" tcp dport { 9117, 8191 } meta skuid != { 0, 1001 } drop`,
+			`oifname "lo" tcp dport 8080 meta skuid 1001 drop`,
+		}
+		for _, w := range want {
+			if i := indexOf(out, w); i < 0 || i > lo {
+				t.Errorf("%s: %q must exist and precede the loopback accept: %v", mode, w, out)
+			}
+		}
+	}
+	// Without a search uid only the control port is restricted (root only) and the search ports are root-only.
+	p.searchUID = ""
+	out := ruleLines(chain(t, buildRuleset("off", p, nil, nil), "output"))
+	if indexOf(out, `oifname "lo" tcp dport { 9117, 8191 } meta skuid != { 0 } drop`) < 0 || strings.Contains(strings.Join(out, "|"), "skuid 1001") {
+		t.Errorf("no search uid: search ports root-only, no uid-specific rules: %v", out)
+	}
+}
+
+func TestParsePorts(t *testing.T) {
+	if got, err := parsePorts("X", " 8191, 9000 "); err != nil || strings.Join(got, ",") != "8191,9000" {
+		t.Errorf("got %v %v", got, err)
+	}
+	for _, bad := range []string{"0", "65536", "abc", "80;drop", "1 2"} {
+		if _, err := parsePorts("X", bad); err == nil {
+			t.Errorf("parsePorts(%q) accepted", bad)
+		}
+	}
+	if got, err := parsePorts("X", ""); err != nil || len(got) != 0 {
+		t.Error("empty must mean none")
+	}
+}
+
+func TestCompanionProbeIsFixedAndLoopbackOnly(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+		http.Redirect(w, r, "/health", http.StatusFound)
+	}))
+	defer up.Close()
+	s := &Server{}
+	if !strings.HasPrefix(up.URL, "http://127.0.0.1:") || !s.probeLocal(up.URL+"/health") {
+		t.Fatalf("a healthy loopback service must report true (%s)", up.URL)
+	}
+	if s.probeLocal(up.URL + "/other") {
+		t.Error("redirects are not followed: only a direct 200 counts")
+	}
+	if s.probeLocal("http://example.com:8191/health") || s.probeLocal("") {
+		t.Error("non-loopback URLs must never be probed")
+	}
+	if s.probeLocal("http://127.0.0.1:1/health") {
+		t.Error("closed port must report false")
 	}
 }

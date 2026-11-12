@@ -17,10 +17,12 @@ This file is the contract between components. Change it before changing an inter
 | `worker` | `apps/api` (`node dist/worker.js`) | Job state machine: drives qBittorrent, runs rclone uploads, VPN rotation. | none |
 | `vpn` | `services/vpn` | WireGuard client + kill switch + control API. Owns the network namespace used by `qbittorrent`. | none |
 | `qbittorrent` | `qbittorrentofficial/qbittorrent-nox` | Torrent engine, `network_mode: service:vpn`. | none |
+| `jackett` (+ one-shot `jackett-init`) | `linuxserver/jackett` (upstream, pinned) | Optional torrent search (profile `search`), `network_mode: service:vpn`. Only the api may connect. | none |
+| `flaresolverr` | `flaresolverr/flaresolverr` (upstream, pinned) | Optional Cloudflare solver for Jackett (profile `search-flaresolverr`), `network_mode: service:vpn`, loopback only. | none |
 | `apps/drive-proxy` | Cloudflare Worker (not in compose) | Signed-URL download proxy for the shared Google Drive. | — |
 
 Volumes: `data` (SQLite, api+worker), `downloads` (worker: whole volume rw; qbittorrent: only the `incomplete/` subpath rw; gateway: only the `library/` subpath, read-only; api: only the `library/` subpath, for the local-destination test probe),
-`authelia`, `qbt-config`. The `downloads` subpaths are Compose `volume.subpath` mounts (Docker Engine 26+, Compose 2.26+), so qBittorrent, which parses untrusted
+`authelia`, `qbt-config`, `jackett-config` (search profile only: Jackett's settings, indexers and API key). The `downloads` subpaths are Compose `volume.subpath` mounts (Docker Engine 26+, Compose 2.26+), so qBittorrent, which parses untrusted
 input in the VPN namespace, never sees the delivered files of other users; the worker sees both and `incomplete/<infohash>` -> `library/...` stays a rename on one filesystem.
 The one-shot `init` service creates the subfolders (a subpath must exist before its container starts) and fixes ownership. Capabilities: every service drops `ALL`; `vpn` keeps `NET_ADMIN`, `qbittorrent` `CHOWN`, `SETUID`, `SETGID` and `KILL` with a read-only root filesystem (tmpfs `/tmp`), `authelia` and `nginx-proxy` only what their entrypoints need (see the compose files). No container mounts the Docker socket. Nothing but `gateway`
 is reachable from outside the compose network.
@@ -134,6 +136,88 @@ Limits: `GET /api/events` allows `SSE_MAX_PER_USER` (default 5; the oldest is cl
 user and `SSE_MAX_TOTAL` (default 200, then 503); one shared poller feeds all streams and closes
 the streams of users who become disabled. Per-user token buckets (429 + `Retry-After`): destination
 test 10/min, job create 30/min, destination create 20/min.
+
+### Torrent search (optional)
+
+Decision record: [adr/0001-torrent-search-backend.md](adr/0001-torrent-search-backend.md). Off unless `SEARCH_BACKEND=jackett`
+(`./setup.sh --search`: compose profile `search`, `JACKETT_API_KEY` generated once and kept in `deploy/.env`). Off = `GET /me`
+says `searchEnabled: false`, the UI hides it, every `/api/search*` route and `/jackett/*` answer 404 `search_disabled`.
+
+- **Where it runs:** `jackett` shares the vpn container's network namespace (`network_mode: service:vpn`): all tracker-site
+  traffic is subject to the kill switch exactly like qBittorrent's. It runs the upstream image as uid **1001** (not qBittorrent's 1000: see "Loopback" below) without its s6
+  init, read-only root filesystem, no capabilities, `mem_limit` 768m. `deploy/jackett/entrypoint.sh` (mounted read-only)
+  re-asserts in `ServerConfig.json` on every start: `APIKey` = `JACKETT_API_KEY` (passed via the environment, read by jq from
+  `$ENV`, then unset before `exec`), `BasePathOverride=/jackett`, port 9117, `AllowExternal`, updates off, and
+  `FlareSolverrUrl` (set from `JACKETT_FLARESOLVERR_URL`, cleared again when that is empty and the value is our loopback
+  URL). Indexers, Jackett's own admin password and everything else belong to the admin. `jackett-init` (root, `CHOWN` only)
+  gives the volume to uid 1001; Jackett mounts it with `nocopy`. Healthcheck: Jackett answers AND the container still shares
+  a live namespace (one of Docker's interfaces, `eth*`, is listed in `/proc/net/dev`). After a plain `docker restart vpn`
+  (outside compose; `depends_on: restart: true` only covers compose operations) a companion sits in the dead old namespace:
+  Docker removed its `eth*`, only `lo` and the sidecar's `wg*` are left; unreachable, but answering its own loopback. FlareSolverr's healthcheck (listening on `127.0.0.1:8191`, read from
+  `/proc/net/tcp`) and qBittorrent's (WebUI answers 403/200) have the same second condition.
+- **Kill switch:** the sidecar's INPUT chain accepts new connections to `SEARCH_PORT` (9117) only from `SEARCH_TRUSTED_IPS`
+  (compose: `API_IP`) and never from a `wg*` interface; `SEARCH_PORT` and `LOCAL_ONLY_PORTS` (8191, FlareSolverr) are then
+  dropped for everything else, on every interface, before any LAN accept (also before the test-only allow-list). Both rules
+  exist whether or not the services run.
+- **Loopback:** the sidecar, qBittorrent, Jackett and FlareSolverr share ONE loopback, so the OUTPUT chain decides by socket
+  owner (`meta skuid`, before `oifname "lo" accept`; `SEARCH_UID`, compose 1001, is Jackett's uid):
+  `lo` -> control port (8000): root only (the sidecar's own healthcheck); `lo` -> `SEARCH_PORT` and `LOCAL_ONLY_PORTS`
+  (9117, 8191): root (the `/companions` probe) and Jackett only; `lo` -> WebUI (8080): never Jackett. So qBittorrent (uid
+  1000) reaches neither Jackett's unauthenticated admin API nor FlareSolverr, FlareSolverr's browser (uid 1000) cannot reach
+  Jackett, and only Jackett can drive FlareSolverr. FlareSolverr shares uid 1000 with qBittorrent (its image patches files
+  owned by that uid), so the WebUI is protected from it by qBittorrent itself: `LocalHostAuth=true` (loopback clients must
+  log in like everyone outside `AuthSubnetWhitelist`). `services/vpn/test` asserts every direction.
+- **VPN off:** with `vpn.mode = off` Jackett and FlareSolverr would reach tracker sites from the server's own address, so
+  `GET /api/search` and adding a result through Jackett's `/dl/` answer 503 `search_vpn_off` unless an admin sets
+  `search.allowWithoutVpn` (Admin -> Search, which warns while the VPN is off). Adding a magnet result is not affected (it
+  goes to qBittorrent, which follows `vpn.mode` like any magnet); the indexer list and the admin UI stay available.
+- **FlareSolverr** (profile `search-flaresolverr`, `./setup.sh --flaresolverr`, needs search): same namespace, `HOST=127.0.0.1`,
+  no capabilities, `mem_limit` 1g, `pids_limit` 512, `shm_size` 256m, healthcheck on `/health`. Not read-only (it patches its
+  chromedriver binary at start). Its status reaches the admin through the sidecar's control API: `GET /companions` ->
+  `{ flaresolverr: bool }`, a probe of the fixed URL `http://127.0.0.1:$FLARESOLVERR_PORT/health` (2 s, no redirects).
+- **API seam:** `lib/search/backend.ts` `SearchBackend { kind, uiPath, search(query), indexers(), download(link) }`;
+  `lib/search/jackett.ts` is the only implementation (Torznab: `GET {JACKETT_URL}/jackett/api/v2.0/indexers/{all|id}/results/torznab/api?apikey&t=search&q&cat&limit=100`,
+  `t=indexers&configured=true`). `JACKETT_URL` is an origin (default `http://vpn:9117`). Timeouts 45 s (search) / 60 s
+  (download), 5 MiB response cap, at most 100 results. Errors are fixed texts (`SearchError` codes `unavailable`,
+  `rejected`, `bad_response`, `link_refused`); upstream bodies, URLs and the API key never appear in errors or logs.
+- **XML:** `lib/search/xml.ts`, a DTD-free reader: any `<!DOCTYPE`/`<!ENTITY`/other declaration is an error (no XXE, no
+  entity expansion), only the five predefined entities and valid numeric references are decoded, 5 MiB / depth 16 /
+  200,000 elements, linear scan, attributes in prototype-less objects. `lib/search/torznab.ts` maps items: title (control
+  characters stripped, 300 chars), size, seeders, leechers (`peers - seeders` when absent), indexer, categories, `pubDate`,
+  `magneturl`, link.
+- **Links and the SSRF exemption:** a result's download link is kept only if it is Jackett's own `/jackett/dl/...` on the
+  exact configured origin; `jackett_apikey`/`apikey` are stripped from it. `download()` adds the key back and fetches with
+  `redirect: manual`: 200 = .torrent bytes (5 MiB cap); a redirect to `magnet:` = that magnet; to another Jackett `/dl/`
+  URL = followed (3 hops max); anything else is refused: `assertPublicEndpoint` classifies it (private/internal ->
+  "redirects to a private or internal address") and a public http(s) target is still not fetched ("not fetched from
+  outside the VPN"), because the api container is outside the VPN namespace. Jackett itself follows such redirects inside
+  the VPN, so in practice only magnets come back.
+- **Categories:** `lib/search/categories.ts`, fixed list -> Torznab ids: All, Movies 2000, TV 5000, Music 3000,
+  Audiobooks 3030, Books 7000, Software/PC 4000, Games 1000 + 4050, Anime 5070, Other 8000, XXX 6000. Setting
+  `search.disabledCategories` (default `["xxx"]`, edited only through `/admin/search`). "All" sends the ids of every
+  enabled category. A result carrying any id of a disabled category (subcategories first: 3030, 4050, 5070; then the
+  thousand-block family) is dropped server-side; ids >= 100000 (tracker-specific) are ignored; none left = Other.
+- **Result tokens:** `lib/search/token.ts`. AES-256-GCM (key `HKDF(APP_SECRET, "search-result-token")`, version byte as
+  AAD) over the deflated JSON `{ u: userId, e: exp, m: magnet | l: link }`, base64url. Valid 30 min, only for the user it
+  was issued to; anything else is 400 `search_token` (410 when expired). Stateless: no server-side storage.
+- **Limits:** `GET /api/search` 20/min per user (token bucket); at most 2 searches in flight per user (429 `search_busy`)
+  and 8 in total (503); identical queries are coalesced; results (without tokens) are cached 5 min per (normalised query,
+  categories, indexer), at most 200 entries; the indexer list 60 s. Adding uses the job-create bucket (30/min).
+- **Admin UI passthrough** (`api/routes/jackett-ui.ts`, in the admin plugin): `GET|POST|PUT|DELETE /jackett` and `/jackett/*`.
+  Forwards method, path + query, the raw body (<= 1 MiB, no parsing), `accept`, `accept-language`, `content-type`,
+  `cache-control`, `if-none-match`, `if-modified-since`, `x-requested-with` and only Jackett's cookies (`Jackett`,
+  `TestCookie`); never this app's cookie, `Remote-*`, `X-Gateway-Secret`, `Authorization` or `X-Forwarded-*`. Back: status,
+  content headers, Jackett's own `Set-Cookie`, `Location` rewritten to a path on this host (`/jackett/` if it pointed
+  elsewhere). Non-GET requests must be same-origin (`Origin` = `PUBLIC_SCHEME://APP_HOST` and/or `Sec-Fetch-Site:
+  same-origin`, at least one present), else 403 `csrf`. 120 s timeout; Jackett unreachable = 502 without detail. The
+  gateway routes `/jackett/` (APP_HOST, every layout) like a page (login redirect) to the api, never to Jackett.
+  Jackett's API key never reaches the browser: every occurrence is removed from text responses (json/html/xml/js, buffered,
+  <= 16 MiB; binaries are streamed) and from `Location`; a request carrying an `apikey`/`jackett_apikey` parameter (empty,
+  since the UI never saw the key) gets the real key added; a JSON body with `api_key` (Jackett's server-config save) keeps
+  the real key. Every response carries `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval';
+  style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none';
+  base-uri 'self'; form-action 'self'; frame-ancestors 'none'` (Jackett's UI has no inline scripts but compiles Handlebars
+  templates at run time); the gateway adds `X-Frame-Options: DENY`.
 
 ## Domain model (SQLite)
 
@@ -251,7 +335,14 @@ POST            /admin/vpn/rotate            { configId? }  (next enabled if omi
 GET|PUT         /admin/settings
 GET             /admin/users                 PATCH /admin/users/:id { disabled?, maxActiveJobs? }
 GET             /admin/jobs                  DELETE /admin/jobs/:id
+GET|PUT         /admin/search                -> SearchAdminDto (status card + categories); PUT { disabledCategories }
+
+GET    /search/meta                          -> { categories (enabled), indexers, indexersOk }         (search on only)
+GET    /search?q=&cat=&indexer=              -> { results: SearchResultDto[], cached }  q 2-200 chars, cat all|<id>
+POST   /search/add  { token, destinationId } -> JobDto (201 new / 200 existing), like POST /jobs
 ```
+
+Outside `/api`, admin-only (search on only): `GET|POST|PUT|DELETE /jackett/*`, Jackett's own UI (see "Torrent search").
 
 Settings keys (defaults): `vpn.mode` (`"off"` | `"required"`, default `"off"` until a
 config exists), `vpn.rotation` (`"manual"` | `"interval"` | `"on-failure"`),
@@ -375,10 +466,18 @@ check): its fetch runs inside the VPN namespace, validates nothing (no scheme/ho
 | `EGRESS_ALLOW_PLAIN_HTTP` | worker | `1` lets the egress proxy forward plain `http://` requests (default off: user destinations must be https) |
 | `TRACKER_LIST_ALLOW_PRIVATE` | api, worker | **test-only** `1` lets tracker-list URLs be http / private (needs `E2E_HERMETIC=1`, otherwise startup fails); unset by default |
 | `E2E_HERMETIC` | api, worker | **test-only** marker of the hermetic e2e stack; only enables the flag above |
+| `SEARCH_BACKEND` | api | empty = torrent search off; `jackett` = on (needs `JACKETT_API_KEY`) |
+| `JACKETT_URL` | api | `http://vpn:9117` (fixed in compose): origin of Jackett, no path |
+| `JACKETT_API_KEY` | api, jackett | 16-128 letters/digits, generated by `setup.sh --search` |
+| `FLARESOLVERR_ENABLED` | api | `1` = show FlareSolverr's status on the admin card |
+| `JACKETT_FLARESOLVERR_URL` | jackett | `http://127.0.0.1:8191` with the `search-flaresolverr` profile, else empty |
+| `SEARCH_PORT`, `SEARCH_TRUSTED_IPS` | vpn | `9117`; who may connect to it (compose: `API_IP`; empty = nobody) |
+| `LOCAL_ONLY_PORTS`, `FLARESOLVERR_PORT` | vpn | `8191`: ports reachable over `lo` only; the port `/companions` probes |
 | `LOG_LEVEL` | all | `info` |
 
 Ports inside the compose network: `gateway:8080`, `web:8080`, `api:3000`,
-`authelia:9091`, `vpn:8000` (control) and `vpn:8080` (qBittorrent WebUI).
+`authelia:9091`, `vpn:8000` (control), `vpn:8080` (qBittorrent WebUI) and, with search, `vpn:9117` (Jackett; api only).
+FlareSolverr's `8191` exists only on the namespace's loopback.
 The compose network uses the fixed subnet `LAN_CIDRS` so the kill switch can allow it.
 
 ## Downloader interface
@@ -448,6 +547,7 @@ The exact compose blocks for `vpn` and `qbittorrent` are in `services/vpn/README
 
 ```
 GET  /status      -> { mode, connected, name, publicIp, lastHandshakeSec, since, mtu }
+GET  /companions  -> { flaresolverr }   (fixed loopback health probe; nothing else is reachable through it)
 POST /connect     { name, config }   -> brings the tunnel up (replacing any current one); 409 while the mode is off
 POST /disconnect
 POST /mode        { mode: "off" | "required" }
@@ -513,7 +613,8 @@ uid/gid 1000 (`doas -u qbtUser`; another `PUID`/`PGID` needs a writable `/etc/pa
 official `/entrypoint.sh` is not used (it runs `chown -R` and writes config as root, both of which follow symlinks that a
 compromised qBittorrent can plant in `/config`). `conf-edit.sh` then runs as uid 1000 and (re)asserts, in `qBittorrent.conf` (`[WebUI]` section
 in qBittorrent 5): WebUI port 8080, password-less access only for `QBT_TRUSTED_IPS` (compose: the static `api` and `worker` /32
-addresses) via `AuthSubnetWhitelist`, `LocalHostAuth=false` (loopback is shared only with the vpn sidecar), host-header
+addresses) via `AuthSubnetWhitelist`, `LocalHostAuth=true` (loopback is shared with the sidecar and, with search, Jackett and
+FlareSolverr: loopback clients must log in; the healthcheck accepts the 403), host-header
 validation and CSRF protection off, no UPnP, anonymous mode off, no interface binding, libtorrent's SSRF mitigation
 (`Session\SSRFMitigation=true`) and, on first
 start only: DHT/PeX on, LSD off, anonymous mode off, no pre-allocation, default save path `/downloads/incomplete`
@@ -545,7 +646,12 @@ Cache API), stream `files/<id>?alt=media` passing `Range` through, set
   (rclone cannot target a fake Drive API); it is covered by API unit tests with a fake
   Google and by the live suite.
   Also asserts the kill switch: in `required` mode with no tunnel, a host outside
-  `LAN_CIDRS` is unreachable from the qBittorrent namespace. Playwright logs in through
+  `LAN_CIDRS` is unreachable from the qBittorrent namespace. With `e2e/run.sh --search on` (default) Jackett runs with a
+  custom Cardigann definition for a mock indexer (`e2e/fixtures/indexer`) that sits behind the WireGuard servers: search
+  -> results -> add (.torrent through Jackett's `/dl/`, and a link that redirects to a magnet) -> the torrent completes;
+  the indexer asserts every request came from a WG server. `--search off` runs the disabled-mode checks (`tests/17`).
+  `services/vpn/test` runs the real Jackett and FlareSolverr images in the namespace and checks their hardening, that only
+  the trusted address reaches :9117, that :8191 is loopback-only, and that neither has egress without a tunnel. Playwright logs in through
   Authelia and drives the UI: add torrent → completed → download link returns bytes
   with the right sha256, for local and S3 destinations; admin VPN/destination CRUD.
 - `e2e/live/`: opt-in, real credentials from `credentials/` (Drive folder, B2 prefix

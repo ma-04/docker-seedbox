@@ -26,7 +26,7 @@ export class RateLimiter {
   }
 }
 
-export const RATE = { destinationTest: 10, jobCreate: 30, destinationCreate: 20, trackerRefresh: 6 } as const;
+export const RATE = { destinationTest: 10, jobCreate: 30, destinationCreate: 20, trackerRefresh: 6, search: 20 } as const;
 
 /** Throws 429 + Retry-After when `userId` exceeded `perMinute` calls of `bucket`. */
 export function enforce(limiter: RateLimiter, userId: number, bucket: string, perMinute: number): void {

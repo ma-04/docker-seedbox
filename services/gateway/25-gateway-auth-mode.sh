@@ -6,7 +6,7 @@
 #                 another hostname    -> its own server block (separate login host)
 #      FILES_HOST empty or = APP_HOST -> signed downloads at https://APP_HOST/dl/     (single domain, the default)
 #                 another hostname    -> its own server block; /dl/ on APP_HOST answers 404
-# Output: $GATEWAY_OUT (default /tmp/gateway)/{auth-page,auth-api,app-locations,servers}.conf, all included by
+# Output: $GATEWAY_OUT (default /tmp/gateway)/{auth-page,auth-api,auth-page-to-api,app-locations,servers}.conf, all included by
 # templates/gateway.conf.template. GATEWAY_SNIPPETS / GATEWAY_OUT exist so the script can be run outside the image.
 # POSIX sh (busybox ash in the image): no bashisms.
 set -eu
@@ -49,12 +49,15 @@ case "$mode" in
   authelia)
     cp "$snip/auth-authelia-page.conf" "$out/auth-page.conf"
     cp "$snip/auth-authelia-api.conf" "$out/auth-api.conf"
+    # A page (browser login redirect) served by the API (/jackett/): page auth + the gateway secret, exactly once.
+    cat "$snip/auth-authelia-page.conf" "$snip/to-api.conf" > "$out/auth-page-to-api.conf"
     ;;
   external)
     echo "gateway: AUTH_MODE=external - trusting Remote-* headers from the upstream proxy." >&2
     echo "gateway: The gateway must be reachable ONLY from your SSO proxy." >&2
     cp "$snip/auth-external.conf" "$out/auth-page.conf"
     cp "$snip/auth-external.conf" "$out/auth-api.conf"
+    cat "$snip/auth-external.conf" "$snip/to-api.conf" > "$out/auth-page-to-api.conf"
     ;;
   *)
     die "AUTH_MODE must be 'authelia' or 'external' (got '$mode')"

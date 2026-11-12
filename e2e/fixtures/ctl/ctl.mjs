@@ -31,6 +31,15 @@ http.createServer(async (req, res) => {
         const r = await sh(['restart', '-t', '3', await container(s)]);
         if (!r.ok) return send(500, { error: r.stderr });
       }
+      // A plain `docker restart vpn` leaves every other container of its network namespace attached to the dead one
+      // (compose's `depends_on: restart: true` only acts on compose operations). qbittorrent is restarted by the tests
+      // that need it; the optional search containers (Jackett, FlareSolverr) follow here, as compose would do.
+      if (services.includes('vpn')) {
+        for (const s of ['jackett', 'flaresolverr']) {
+          const id = await container(s).catch(() => null);
+          if (id) await sh(['restart', '-t', '3', id]);
+        }
+      }
       return send(200, { ok: true });
     }
     // POST /stop | /start {"services": ["worker"]} : pause the worker so a test can observe the sidecar before it reconciles.
@@ -56,6 +65,16 @@ http.createServer(async (req, res) => {
         q.on('error', (e) => resolve({ reachable: false, status: 0, body: '', error: String(e.message) }));
       });
       return send(200, r);
+    }
+    // GET /qbt?path=/api/v2/... : qBittorrent's WebUI API as the WORKER sees it (a whitelisted address). Loopback clients must
+    // log in (LocalHostAuth=true), so reading engine state from inside the namespace is no longer possible. Fixed paths only.
+    if (req.method === 'GET' && url.pathname === '/qbt') {
+      const path = url.searchParams.get('path') ?? '';
+      if (!/^\/api\/v2\/(app\/version|app\/preferences|torrents\/info|torrents\/trackers\?hash=[0-9a-f]{40})$/.test(path)) return send(400, { error: 'bad path' });
+      const js = 'fetch(process.argv[1],{signal:AbortSignal.timeout(8000)}).then(async r=>{process.stdout.write(r.status+"\\n"+await r.text())},e=>{process.stderr.write(String(e));process.exit(1)})';
+      const r = await sh(['exec', await container('worker'), 'node', '-e', js, `http://vpn:8080${path}`]);
+      const i = r.stdout.indexOf('\n');
+      return send(200, { reachable: r.ok, status: r.ok ? Number(r.stdout.slice(0, i)) : 0, body: r.ok ? r.stdout.slice(i + 1) : '', error: r.ok ? '' : r.stderr.trim().slice(0, 200) });
     }
     // GET /probe?url=http://host/ : curl from inside the qbittorrent container (uid 1000, the vpn namespace).
     if (req.method === 'GET' && url.pathname === '/probe') {

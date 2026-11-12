@@ -55,6 +55,8 @@ These are pulled by Docker from their own publishers when you run the stack; thi
 |---|---|---|---|
 | Authelia (`authelia/authelia`) | login portal | Apache-2.0 | https://github.com/authelia/authelia |
 | nginx-proxy (`nginxproxy/nginx-proxy`) and docker-gen | optional bundled TLS proxy | MIT | https://github.com/nginx-proxy/nginx-proxy |
+| Jackett (`linuxserver/jackett`, image by linuxserver.io) | optional torrent search (compose profile `search`), run unmodified with a mounted entrypoint script | GPL-2.0-only (Jackett); GPL-3.0-only (linuxserver image) | https://github.com/Jackett/Jackett , https://github.com/linuxserver/docker-jackett |
+| FlareSolverr (`flaresolverr/flaresolverr`) | optional Cloudflare challenge solver for Jackett (profile `search-flaresolverr`) | MIT | https://github.com/FlareSolverr/FlareSolverr |
 | acme-companion (`nginxproxy/acme-companion`) and acme.sh | optional Let's Encrypt automation | GPL-3.0 | https://github.com/nginx-proxy/acme-companion , https://github.com/acmesh-official/acme.sh |
 | BusyBox (`busybox`) | the one-shot `init` helper and `setup.sh` backup/restore | GPL-2.0-only | https://busybox.net/ |
 

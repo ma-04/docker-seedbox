@@ -1,11 +1,13 @@
 import type {
   DestinationCreateDto, DestinationDto, DestinationUpdateDto, EngineSettingsDto, EngineSettingsUpdateDto, JobDto, JobFilesDto, MeDto, SettingsDto,
   TestResultDto, TrackersDto, TrackersUpdateDto, TrackerListStatusDto, UserDto, UserUpdateDto, VpnConfigCreateDto, VpnConfigDto, VpnConfigUpdateDto, VpnStatusDto,
+  SearchAdminDto, SearchAdminUpdateDto, SearchCategoryId, SearchMetaDto, SearchResponseDto, SearchResultDto,
 } from '../../../api/src/lib/dto';
 
 export type {
   DestinationCreateDto, DestinationDto, DestinationUpdateDto, EngineSettingsDto, EngineSettingsUpdateDto, JobDto, JobFilesDto, MeDto, SettingsDto,
   TestResultDto, TrackersDto, TrackersUpdateDto, TrackerListStatusDto, UserDto, UserUpdateDto, VpnConfigCreateDto, VpnConfigDto, VpnConfigUpdateDto, VpnStatusDto,
+  SearchAdminDto, SearchAdminUpdateDto, SearchCategoryId, SearchMetaDto, SearchResponseDto, SearchResultDto,
 };
 
 export class ApiError extends Error {
@@ -71,6 +73,10 @@ export const endpoints = {
   deleteJob: (id: number) => api<void>(`/jobs/${id}`, { method: 'DELETE' }),
   retryJob: (id: number) => api<JobDto>(`/jobs/${id}/retry`, { method: 'POST' }),
   jobFiles: (id: number) => api<JobFilesDto>(`/jobs/${id}/files`),
+  searchMeta: () => api<SearchMetaDto>('/search/meta'),
+  search: (q: string, cat: string, indexer: string) =>
+    api<SearchResponseDto>(`/search?${new URLSearchParams({ q, cat, ...(indexer ? { indexer } : {}) }).toString()}`),
+  searchAdd: (token: string, destinationId: number) => api<JobDto>('/search/add', { method: 'POST', body: { token, destinationId } }),
   admin: {
     destinations: () => api<DestinationDto[]>('/admin/destinations'),
     createDestination: (b: DestinationCreateDto) => api<DestinationDto>('/admin/destinations', { method: 'POST', body: b }),
@@ -94,5 +100,7 @@ export const endpoints = {
     updateUser: (id: number, b: UserUpdateDto) => api<UserDto>(`/admin/users/${id}`, { method: 'PATCH', body: b }),
     jobs: () => api<JobDto[]>('/admin/jobs'),
     deleteJob: (id: number) => api<void>(`/admin/jobs/${id}`, { method: 'DELETE' }),
+    search: () => api<SearchAdminDto>('/admin/search'),
+    updateSearch: (b: SearchAdminUpdateDto) => api<SearchAdminDto>('/admin/search', { method: 'PUT', body: b }),
   },
 };
