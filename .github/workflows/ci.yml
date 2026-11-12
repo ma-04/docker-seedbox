@@ -89,9 +89,9 @@ jobs:
             COMPOSE_PROFILES=authelia,search,search-flaresolverr COMPOSE_FILE="compose.yaml:compose.proxy-$mode.yaml" docker compose config -q
           done
           COMPOSE_PROFILES=authelia,search,search-flaresolverr COMPOSE_FILE=compose.yaml:compose.proxy-none.yaml docker compose config --format json > /tmp/search.json
-          jq -e '.services.jackett | .network_mode == "service:vpn" and (.ports // [] | length) == 0 and .read_only and .user == "1000:1000" and .cap_drop == ["ALL"] and ((.cap_add // []) | length) == 0 and (.security_opt | index("no-new-privileges:true"))' /tmp/search.json
+          jq -e '.services.jackett | .network_mode == "service:vpn" and (.ports // [] | length) == 0 and .read_only and .user == "1001:1001" and .cap_drop == ["ALL"] and ((.cap_add // []) | length) == 0 and (.security_opt | index("no-new-privileges:true"))' /tmp/search.json
           jq -e '.services.flaresolverr | .network_mode == "service:vpn" and (.ports // [] | length) == 0 and .cap_drop == ["ALL"] and ((.cap_add // []) | length) == 0 and .mem_limit != null and .pids_limit != null and .environment.HOST == "127.0.0.1" and .environment.LOG_LEVEL == "info" and .healthcheck != null and (.security_opt | index("no-new-privileges:true"))' /tmp/search.json
-          jq -e '.services.vpn.environment | .SEARCH_TRUSTED_IPS == "172.31.250.3" and .LOCAL_ONLY_PORTS == "8191"' /tmp/search.json
+          jq -e '.services.vpn.environment | .SEARCH_TRUSTED_IPS == "172.31.250.3" and .LOCAL_ONLY_PORTS == "8191" and .SEARCH_UID == "1001"' /tmp/search.json
           jq -e '[.services[] | select(.network_mode == null and .ports != null) | .ports[]] | all(.target != 9117 and .target != 8191)' /tmp/search.json
           # and without them nothing of search is started
           test "$(COMPOSE_FILE=compose.yaml:compose.proxy-none.yaml docker compose config --services | grep -cE '^(jackett|jackett-init|flaresolverr)$')" = 0
