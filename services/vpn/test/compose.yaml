@@ -116,7 +116,7 @@ services:
     tmpfs: ["/tmp:uid=1000,gid=1000"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    healthcheck: { test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login"], interval: 5s, timeout: 5s, retries: 30, start_period: 10s }
+    healthcheck: { test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login && test \"$$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/status)\" = 401"], interval: 5s, timeout: 5s, retries: 30, start_period: 10s }
     depends_on:
       jackett-init: { condition: service_completed_successfully }
       vpn: { condition: service_healthy, restart: true }
@@ -130,7 +130,7 @@ services:
     pids_limit: 512
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    healthcheck: { test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8191/health"], interval: 5s, timeout: 10s, retries: 30, start_period: 20s }
+    healthcheck: { test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8191/health && test \"$$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/status)\" = 401"], interval: 5s, timeout: 10s, retries: 30, start_period: 20s }
     depends_on: { vpn: { condition: service_healthy, restart: true } }
 
   # test helpers

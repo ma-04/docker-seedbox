@@ -317,8 +317,11 @@ services:
       vpn:
         condition: service_healthy
         restart: true                 # re-attach to the new namespace when vpn is recreated/restarted
+    # Healthy = Jackett answers AND it still shares the vpn container's namespace (the sidecar's control port answers 401 on
+    # loopback). After a plain `docker restart vpn` (not through compose) it would sit in the dead old namespace, unreachable
+    # but answering its own loopback; this makes that state "unhealthy" (`./setup.sh doctor`; fix: docker compose up -d).
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login"]
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:9117/jackett/UI/Login && test \"$$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/status)\" = 401"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -348,7 +351,7 @@ services:
         condition: service_healthy
         restart: true
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8191/health"]
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8191/health && test \"$$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/status)\" = 401"]   # same namespace as vpn, see jackett
       interval: 30s
       timeout: 10s
       retries: 3

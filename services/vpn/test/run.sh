@@ -373,6 +373,14 @@ docker stop -t 20 sbvpn-qbittorrent-1 sbvpn-probe-1 >/dev/null
 check "qbittorrent got SIGTERM and exited cleanly (tini could forward it: needs CAP_KILL; otherwise resume data is lost)" sh_ "! docker logs sbvpn-qbittorrent-1 2>&1 | grep -q 'FATAL tini' && test \"\$(docker inspect -f '{{.State.ExitCode}}' sbvpn-qbittorrent-1)\" = 0"
 docker restart -t 1 sbvpn-vpn-1 >/dev/null
 for i in $(seq 1 20); do [ "$(docker inspect -f '{{.State.Health.Status}}' sbvpn-vpn-1)" = healthy ] && break; sleep 1; done
+# A plain `docker restart` of vpn (not through compose) leaves Jackett in the old, dead namespace: unreachable, but its own
+# loopback still answers. Its configured healthcheck must notice (it also requires the sidecar's control port on loopback).
+hc() { $DC exec -T "$1" sh -c "$(docker inspect -f '{{index .Config.Healthcheck.Test 1}}' "sbvpn-$1-1")"; }
+checkno "detached by a plain vpn restart: Jackett's healthcheck fails" hc jackett
+checkno "detached by a plain vpn restart: FlareSolverr's healthcheck fails" hc flaresolverr
+docker restart -t 3 sbvpn-jackett-1 sbvpn-flaresolverr-1 >/dev/null
+check "restarted with the namespace: Jackett's healthcheck passes again" retry 60 hc jackett
+check "restarted with the namespace: FlareSolverr's healthcheck passes again" retry 90 hc flaresolverr
 check "docker restart (required default): fail closed, mode=required" test "$(status | jqs '.mode+" "+(.connected|tostring)')" = "required false"
 P2="docker run --rm --network container:sbvpn-vpn-1 -u 1000 sbvpn-tools"
 checkno "fresh namespace: direct echo blocked" $P2 curl -sS -m 3 http://198.51.100.20/

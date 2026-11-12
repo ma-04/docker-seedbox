@@ -38,6 +38,17 @@ export interface JackettOptions {
   lookup?: GuardOptions['lookup'];
 }
 
+/**
+ * Jackett builds a magnet redirect from a .NET Uri, which DECODES it: `dn=E2E%20Multi%20Pack` arrives as `dn=E2E Multi Pack`
+ * and UTF-8 names as raw bytes (fetch exposes header values as latin1). Spaces and bytes >= 0x80 are percent-encoded again;
+ * every other character (control characters, CR/LF included) is left alone, so the strict magnet policy still rejects it.
+ */
+export function reencodeMagnet(loc: string): string {
+  let out = '';
+  for (const b of Buffer.from(loc, 'latin1')) out += b === 0x20 || b >= 0x80 ? `%${b.toString(16).toUpperCase().padStart(2, '0')}` : String.fromCharCode(b);
+  return out;
+}
+
 /** Read a body, refusing more than `max` bytes (declared or actual). */
 async function readCapped(res: Response, max: number): Promise<Buffer> {
   const declared = Number(res.headers.get('content-length'));
@@ -157,8 +168,9 @@ export class JackettBackend implements SearchBackend {
         const loc = res.headers.get('location');
         if (!loc) throw new SearchError('bad_response', 'The search backend sent a redirect without a target');
         if (/^magnet:/i.test(loc.trim())) {
-          if (loc.length > MAX_MAGNET_CHARS) throw new SearchError('bad_response', 'The magnet link is too long');
-          return { kind: 'magnet', magnet: loc.trim() };
+          const magnet = reencodeMagnet(loc.trim());
+          if (magnet.length > MAX_MAGNET_CHARS) throw new SearchError('bad_response', 'The magnet link is too long');
+          return { kind: 'magnet', magnet };
         }
         let next: URL;
         try { next = new URL(loc, url); } catch { throw new SearchError('bad_response', 'The search backend sent an invalid redirect'); }

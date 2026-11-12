@@ -150,7 +150,10 @@ says `searchEnabled: false`, the UI hides it, every `/api/search*` route and `/j
   `$ENV`, then unset before `exec`), `BasePathOverride=/jackett`, port 9117, `AllowExternal`, updates off, and
   `FlareSolverrUrl` (set from `JACKETT_FLARESOLVERR_URL`, cleared again when that is empty and the value is our loopback
   URL). Indexers, Jackett's own admin password and everything else belong to the admin. `jackett-init` (root, `CHOWN` only)
-  gives the volume to uid 1000; Jackett mounts it with `nocopy`.
+  gives the volume to uid 1000; Jackett mounts it with `nocopy`. Healthcheck: Jackett answers AND the sidecar's control port answers 401 on
+  loopback, i.e. the container still shares the live vpn namespace (after a plain `docker restart vpn`, outside compose, it
+  would sit in the dead old namespace: unreachable but answering its own loopback; `depends_on: restart: true` only covers
+  compose operations). FlareSolverr's healthcheck has the same second condition.
 - **Kill switch:** the sidecar's INPUT chain accepts new connections to `SEARCH_PORT` (9117) only from `SEARCH_TRUSTED_IPS`
   (compose: `API_IP`) and never from a `wg*` interface; `SEARCH_PORT` and `LOCAL_ONLY_PORTS` (8191, FlareSolverr) are then
   dropped for everything else, on every interface, before any LAN accept (also before the test-only allow-list). Loopback

@@ -173,11 +173,11 @@ describe('POST /api/search/add', () => {
     const e = env();
     const dest = await makeLocalDest(e);
     e.b.hits = [hit({ title: 'R' })];
-    e.b.dl = async () => ({ kind: 'magnet', magnet: magnet(H2, 'Redirected') });
+    e.b.dl = async () => ({ kind: 'magnet', magnet: magnet(H2, 'Redirected%20Name') });
     const [t] = await tokens(e);
     const r = await e.call(alice, 'POST', '/api/search/add', { token: t!.token, destinationId: dest });
     expect(r.statusCode).toBe(201);
-    expect(r.json()).toMatchObject({ infohash: H2, name: 'Redirected' });
+    expect(r.json()).toMatchObject({ infohash: H2, name: 'Redirected Name' });
     // a hostile magnet from the redirect is refused by the same policy as a typed one
     e.b.dl = async () => ({ kind: 'magnet', magnet: `magnet:?xt=urn:btih:${H1}&xt=urn:btih:${H2}` });
     expect((await e.call(alice, 'POST', '/api/search/add', { token: t!.token, destinationId: dest })).statusCode).toBe(400);

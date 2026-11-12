@@ -129,6 +129,18 @@ describe('JackettBackend.download', () => {
     expect(await b.download(ref)).toEqual({ kind: 'magnet', magnet: m });
   });
 
+  it('re-encodes the spaces / UTF-8 that Jackett decodes in a magnet redirect; control characters stay for the policy to reject', async () => {
+    // fetch exposes header values as latin1 strings: "é" arrives as the two characters of its UTF-8 bytes
+    const raw = 'magnet:?xt=urn:btih:5692f09fa9723a2777e5af44f94219dc456865ec&dn=E2E Multi Pack ' + Buffer.from('é', 'utf8').toString('latin1');
+    const { b } = backend(() => new Response(null, { status: 302, headers: new Headers([['location', raw]]) }));
+    const d = await b.download(ref);
+    expect(d).toEqual({ kind: 'magnet', magnet: 'magnet:?xt=urn:btih:5692f09fa9723a2777e5af44f94219dc456865ec&dn=E2E%20Multi%20Pack%20%C3%A9' });
+    const { canonicalizeMagnet } = await import('../source.js');
+    expect(canonicalizeMagnet((d as { magnet: string }).magnet).name).toBe('E2E Multi Pack é');
+    const { reencodeMagnet } = await import('./jackett.js');
+    expect(reencodeMagnet('magnet:?dn=a\tb\nc')).toBe('magnet:?dn=a\tb\nc');
+  });
+
   it('follows a redirect to another Jackett /dl/ URL (bounded)', async () => {
     let n = 0;
     const { b, calls } = backend(() => (n++ === 0 ? redirect('/jackett/dl/sbmock/?path=BBB') : new Response('d1:ai1ee')));

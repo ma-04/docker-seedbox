@@ -31,6 +31,15 @@ http.createServer(async (req, res) => {
         const r = await sh(['restart', '-t', '3', await container(s)]);
         if (!r.ok) return send(500, { error: r.stderr });
       }
+      // A plain `docker restart vpn` leaves every other container of its network namespace attached to the dead one
+      // (compose's `depends_on: restart: true` only acts on compose operations). qbittorrent is restarted by the tests
+      // that need it; the optional search containers (Jackett, FlareSolverr) follow here, as compose would do.
+      if (services.includes('vpn')) {
+        for (const s of ['jackett', 'flaresolverr']) {
+          const id = await container(s).catch(() => null);
+          if (id) await sh(['restart', '-t', '3', id]);
+        }
+      }
       return send(200, { ok: true });
     }
     // POST /stop | /start {"services": ["worker"]} : pause the worker so a test can observe the sidecar before it reconciles.
