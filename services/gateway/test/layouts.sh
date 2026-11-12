@@ -31,6 +31,17 @@ has "$(section single /etc/nginx/snippets/files-locations.conf)" "location /_pro
 has "$(cat "$T/single.conf")" 'proxy_set_header Cookie "";' "the login cookie is blanked towards the API on /dl/"
 hasnt "$(section single /tmp/gateway/servers.conf)" "server_name" "no separate login or download server"
 
+# /jackett/ (torrent search UI, admin-only in the API): routed to the api on the app host, behind the page login,
+# with exactly ONE X-Gateway-Secret (a duplicate would arrive as "secret, secret" and fail the API's check).
+jk() { awk '/location \^~ \/jackett\/ \{/{f=1} f{print} f&&/^  \}/{exit}' "$T/$1.conf"; }
+has "$(jk single)" "include /tmp/gateway/auth-page-to-api.conf;" "/jackett/ goes through the page login"
+# shellcheck disable=SC2016  # a literal nginx variable
+has "$(jk single)" 'proxy_pass $api_upstream;' "/jackett/ is proxied to the api (never to Jackett directly)"
+hasnt "$(jk single)" "to-api.conf;" "/jackett/ does not add a second gateway secret"
+n=$(section single /tmp/gateway/auth-page-to-api.conf | grep -c 'X-Gateway-Secret')
+if [ "$n" = 1 ]; then ok "authelia: the /jackett/ snippet sets X-Gateway-Secret exactly once"; else bad "authelia: X-Gateway-Secret set $n times"; fi
+hasnt "$(cat "$T/single.conf")" "vpn:9117" "the gateway never addresses Jackett"
+
 echo "equal to APP_HOST counts as empty (any case)"
 if render equal authelia app.example.test APP.example.test app.example.test; then ok "nginx -t passes"; else bad "nginx -t passes: $(cat "$T/equal.err")"; fi
 has "$(app equal)" "location ^~ /auth/" "portal under /auth/"
@@ -48,6 +59,7 @@ hasnt "$files" "/auth/" "download host has no portal"
 echo "three hosts (the layout before single-domain support)"
 if render multi authelia app.example.test auth.example.test files.example.test; then ok "nginx -t passes"; else bad "nginx -t passes: $(cat "$T/multi.err")"; fi
 app=$(app multi); auth=$(server multi auth.example.test); files=$(server multi files.example.test)
+has "$(jk multi)" "include /tmp/gateway/auth-page-to-api.conf;" "three hosts: /jackett/ stays on the app host"
 hasnt "$app" "/auth/" "no portal location on the app host"
 has "$app" "location ^~ /dl/ { return 404; }" "/dl/ on the app host is a 404"
 has "$auth" "include /etc/nginx/snippets/authelia-portal.conf;" "login host proxies to Authelia"
@@ -56,6 +68,9 @@ has "$files" "include /etc/nginx/snippets/files-locations.conf;" "download host 
 
 echo "AUTH_MODE=external, single domain: no Authelia location"
 if render ext external app.example.test "" ""; then ok "nginx -t passes"; else bad "nginx -t passes: $(cat "$T/ext.err")"; fi
+n=$(section ext /tmp/gateway/auth-page-to-api.conf | grep -c 'X-Gateway-Secret')
+if [ "$n" = 1 ]; then ok "external: the /jackett/ snippet sets X-Gateway-Secret exactly once"; else bad "external: X-Gateway-Secret set $n times"; fi
+hasnt "$(section ext /tmp/gateway/auth-page-to-api.conf)" "auth_request" "external: no Authelia sub-request for /jackett/"
 hasnt "$(app ext)" "location ^~ /auth/" "no /auth/ location"
 has "$(app ext)" "files-locations.conf" "app host serves /dl/"
 

@@ -111,6 +111,23 @@ server {
     proxy_read_timeout 120s;
   }
 
+  # Jackett's own UI (torrent search, optional): login like a page, then the API, which lets admins only through to
+  # Jackett (and answers 404 when search is off). The gateway never talks to Jackett: the VPN sidecar's firewall admits
+  # the api container alone. Same host in every layout.
+  location = /jackett {
+    absolute_redirect off;
+    return 301 /jackett/$is_args$args;
+  }
+  location ^~ /jackett/ {
+    include /etc/nginx/snippets/proxy-common.conf;
+    include /tmp/gateway/auth-page-to-api.conf;   # page login (redirect to the portal) + exactly one X-Gateway-Secret
+    include /etc/nginx/snippets/security-headers.conf;
+    client_max_body_size 1m;
+    set $api_upstream http://api:3000;
+    proxy_pass $api_upstream;
+    proxy_read_timeout 130s;                    # Jackett's "test indexer" can take a while
+  }
+
   location / {
     include /etc/nginx/snippets/proxy-common.conf;
     include /tmp/gateway/auth-page.conf;
