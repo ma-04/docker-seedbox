@@ -12,7 +12,7 @@ interface Sub {
   watermark: number;
 }
 
-const sigOf = (r: JobJoin) => [r.updated_at, r.state, r.upload_progress, r.upload_speed, r.t_progress, r.t_dl_speed, r.t_state, r.t_name, r.error].join('|');
+const sigOf = (r: JobJoin) => [r.updated_at, r.state, r.upload_progress, r.upload_speed, r.t_progress, r.t_dl_speed, r.t_state, r.t_name, r.error, r.t_stage, r.t_seeds, r.t_peers, r.t_seeds_total, r.t_progress_at].join('|');
 
 /**
  * Server-sent events. One shared poller (a single timer and a single query per tick, for all

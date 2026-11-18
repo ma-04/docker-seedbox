@@ -1,5 +1,5 @@
 import type { Db } from '../lib/db.js';
-import type { DestinationDto, JobDto, UserDto } from '../lib/dto.js';
+import type { DestinationDto, DownloadStage, JobDto, JobStageDto, UserDto } from '../lib/dto.js';
 import { maskConfig } from '../lib/destinations.js';
 import { decryptJson } from '../lib/crypto.js';
 import type { DestinationConfig, DestinationRow, JobRow, UserRow } from '../lib/types.js';
@@ -10,11 +10,13 @@ export const ACTIVE_SQL = "('queued','downloading','uploading')";
 
 export interface JobJoin extends JobRow {
   t_name: string | null; t_infohash: string; t_total_size: number; t_progress: number; t_dl_speed: number; t_state: string;
+  t_stage: DownloadStage | null; t_seeds: number; t_peers: number; t_seeds_total: number; t_progress_at: number | null;
   d_name: string; d_type: DestinationRow['type']; u_username: string;
 }
 
 export const JOB_SELECT = `SELECT j.*, t.name AS t_name, t.infohash AS t_infohash, t.total_size AS t_total_size,
-  t.progress AS t_progress, t.dl_speed AS t_dl_speed, t.state AS t_state, d.name AS d_name, d.type AS d_type, u.username AS u_username
+  t.progress AS t_progress, t.dl_speed AS t_dl_speed, t.state AS t_state, t.stage AS t_stage, t.seeds AS t_seeds, t.peers AS t_peers,
+  t.seeds_total AS t_seeds_total, t.progress_at AS t_progress_at, d.name AS d_name, d.type AS d_type, u.username AS u_username
   FROM jobs j JOIN torrents t ON t.id = j.torrent_id JOIN destinations d ON d.id = j.destination_id JOIN users u ON u.id = j.user_id`;
 
 export function jobDto(r: JobJoin, withUser = false): JobDto {
@@ -26,10 +28,25 @@ export function jobDto(r: JobJoin, withUser = false): JobDto {
     uploadProgress: r.upload_progress, uploadSpeed: r.upload_speed,
     destination: { id: r.destination_id, name: r.d_name, type: r.d_type },
     error: r.error, folderUrl: r.folder_url, createdAt: r.created_at, updatedAt: r.updated_at, completedAt: r.completed_at,
+    stage: jobStage(r),
   };
   if (withUser) dto.user = { id: r.user_id, username: r.u_username };
   return dto;
 }
+
+/** Only meaningful while the job waits on its torrent: a stage left over from an earlier run is never shown. */
+function jobStage(r: JobJoin): JobStageDto | null {
+  if (r.state !== 'queued' && r.state !== 'downloading') return null;
+  if (r.t_state !== 'pending' && r.t_state !== 'downloading') return null;
+  const live = r.t_state === 'downloading';
+  return {
+    // A downloader stage left over from before the torrent went back to pending is not current.
+    stage: live || (r.t_stage !== null && PENDING_STAGES.has(r.t_stage)) ? r.t_stage : null,
+    seeds: live ? r.t_seeds : 0, peers: live ? r.t_peers : 0, seedsTotal: live ? r.t_seeds_total : 0,
+    lastProgressAt: live ? r.t_progress_at : null,
+  };
+}
+const PENDING_STAGES = new Set<DownloadStage>(['waiting-vpn', 'waiting-disk', 'waiting-engine', 'adding']);
 
 export function getJobJoin(db: Db, id: number): JobJoin | undefined {
   return db.prepare(`${JOB_SELECT} WHERE j.id = ?`).get(id) as JobJoin | undefined;

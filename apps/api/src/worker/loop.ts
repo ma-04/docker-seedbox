@@ -10,6 +10,7 @@ import { getSetting } from '../lib/settings.js';
 import { canonicalizeMagnet, SourceError } from '../lib/source.js';
 import { rebuildTorrent } from '../lib/torrent-file.js';
 import { now, type JobRow, type TorrentRow, type TorrentSource } from '../lib/types.js';
+import type { DownloadStage } from '../lib/dto.js';
 import type { VpnClient } from '../lib/vpn.js';
 import { DownloaderUnavailableError, type DownloadAddInput, type Downloader } from '../downloaders/types.js';
 import type { RcloneProc, SpawnFn } from './rclone.js';
@@ -149,6 +150,11 @@ export class Worker {
     this.log.warn({ err: err instanceof Error ? err.message : err }, msg);
   }
 
+  /** Record what a torrent is doing / waiting on (shown to users). Only writes on change: the tick runs every few seconds. */
+  private setStage(id: number, stage: DownloadStage): void {
+    this.db.prepare('UPDATE torrents SET stage = ? WHERE id = ? AND stage IS NOT ?').run(stage, id, stage);
+  }
+
   private async step(name: string, fn: () => Promise<void> | void): Promise<void> {
     try { await fn(); } catch (err) { this.warnOnce(`step:${name}`, `worker step ${name} failed`, err, 10_000); }
   }
@@ -262,25 +268,32 @@ export class Worker {
       wanted.splice(i, 1);
     }
     if (!wanted.length) return;
+    const stageAll = (stage: DownloadStage) => { for (const t of wanted) this.setStage(t.id, stage); };
 
     if (getSetting(db, 'vpn.mode') === 'required') {
       let connected = false;
       try { connected = (await this.d.vpn.status()).connected; } catch { /* treated as not connected */ }
-      if (!connected) { this.warnOnce('vpn-gate', 'vpn.mode=required and the VPN is not connected; torrents stay pending', undefined, 300_000); return; }
+      if (!connected) { stageAll('waiting-vpn'); this.warnOnce('vpn-gate', 'vpn.mode=required and the VPN is not connected; torrents stay pending', undefined, 300_000); return; }
     }
     const minFree = getSetting(db, 'limits.minFreeDiskBytes');
     if (minFree > 0) {
       const free = await (this.d.freeBytes ?? defaultFree)(config.downloadsDir);
-      if (free < minFree) { this.warnOnce('disk', `free disk space (${free} bytes) is below limits.minFreeDiskBytes; torrents stay pending`, undefined, 300_000); return; }
+      if (free < minFree) { stageAll('waiting-disk'); this.warnOnce('disk', `free disk space (${free} bytes) is below limits.minFreeDiskBytes; torrents stay pending`, undefined, 300_000); return; }
     }
 
     for (const t of wanted) {
       if (!INFOHASH.test(t.infohash)) { this.failTorrent(t, 'Invalid infohash'); continue; }
+      // Keep "waiting-engine" while the engine is down instead of flipping back to "adding" every tick.
+      if (t.stage !== 'waiting-engine') this.setStage(t.id, 'adding');
       try {
         const savePath = await this.addToDownloader(t);
         if (await this.engineHoldsDifferentTorrent(t)) continue;
-        db.prepare("UPDATE torrents SET state = 'downloading', save_path = ?, error = NULL, started_at = ?, library_path = NULL, cleanup_pending = 0 WHERE id = ? AND state = 'pending'")
-          .run(savePath, this.nowSec(), t.id);
+        const startedAt = this.nowSec();
+        db.prepare(
+          `UPDATE torrents SET state = 'downloading', save_path = ?, error = NULL, started_at = ?, library_path = NULL, cleanup_pending = 0,
+             stage = NULL, seeds = 0, peers = 0, seeds_total = 0, progress_at = ?
+           WHERE id = ? AND state = 'pending'`,
+        ).run(savePath, startedAt, startedAt, t.id);
         this.addFailures.delete(t.id);
         this.missingSince.delete(t.id);
         this.diskChecked.delete(t.id);
@@ -289,6 +302,7 @@ export class Worker {
         const n = (this.addFailures.get(t.id) ?? 0) + 1;
         this.addFailures.set(t.id, n);
         this.warnOnce(`add:${t.id}`, `adding torrent ${t.id} failed (attempt ${n})`, err, 30_000);
+        if (err instanceof DownloaderUnavailableError) this.setStage(t.id, 'waiting-engine');
         // A downloader that is down/restarting is not the torrent's fault: keep it pending.
         if (n >= MAX_ADD_FAILURES && !(err instanceof DownloaderUnavailableError)) this.failTorrent(t, 'Could not add the torrent to the downloader');
       }
@@ -312,12 +326,18 @@ export class Worker {
     for (const t of rows) {
       await this.step(`sync:${t.id}`, async () => {
         // Throws (and is only logged) when the downloader is unreachable: that never fails a torrent.
-        const st = await downloader.status(t.infohash);
+        let st;
+        try { st = await downloader.status(t.infohash); } catch (err) {
+          if (err instanceof DownloaderUnavailableError) this.setStage(t.id, 'waiting-engine');
+          throw err;
+        }
         if (!st) return this.handleMissing(t);
         this.missingSince.delete(t.id);
         this.addBefore.delete(t.id);
         if (st.state === 'error') return this.failTorrent(t, `The downloader reported an error (${st.rawState ?? 'error'})`);
         if (st.state === 'metadata-pending') {
+          db.prepare(`UPDATE torrents SET stage = 'metadata', seeds = ?, peers = ?, seeds_total = ? WHERE id = ? AND state = 'downloading'`)
+            .run(st.seeds ?? 0, st.peers ?? 0, st.seedsTotal ?? 0, t.id);
           const limitMin = getSetting(db, 'limits.metadataTimeoutMinutes');
           if (limitMin > 0 && t.started_at !== null && this.nowSec() - t.started_at > limitMin * 60) {
             return this.failTorrent(t, `No metadata received after ${limitMin} minutes (no peers / metadata timeout)`);
@@ -333,9 +353,15 @@ export class Worker {
         const done = st.state === 'completed';
         const progress = done ? 1 : st.progress;
         db.prepare(
-          `UPDATE torrents SET name = ?, total_size = ?, progress = ?, dl_speed = ?, state = ?, completed_at = ?
+          `UPDATE torrents SET name = ?, total_size = ?, progress = ?, dl_speed = ?, state = ?, completed_at = ?,
+             stage = ?, seeds = ?, peers = ?, seeds_total = ?,
+             progress_at = CASE WHEN ? > progress OR progress_at IS NULL OR stage = 'metadata' THEN ? ELSE progress_at END
            WHERE id = ? AND state = 'downloading'`,
-        ).run(st.name || t.name, st.totalSize, progress, done ? 0 : Math.round(st.dlSpeed), done ? 'downloaded' : 'downloading', done ? now() : null, t.id);
+        ).run(
+          st.name || t.name, st.totalSize, progress, done ? 0 : Math.round(st.dlSpeed), done ? 'downloaded' : 'downloading', done ? now() : null,
+          done ? null : (st.phase ?? 'downloading'), st.seeds ?? 0, st.peers ?? 0, st.seedsTotal ?? 0,
+          progress, this.nowSec(), t.id,
+        );
 
         if (this.lastProgress.get(t.id) !== progress) {
           this.lastProgress.set(t.id, progress);

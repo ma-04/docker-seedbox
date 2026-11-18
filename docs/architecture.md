@@ -536,6 +536,23 @@ statement or one immediate transaction evaluated *after* slow work; a final self
 5. VPN: apply `vpn.mode` (only when the sidecar's reported mode differs), health-check, rotate per `vpn.rotation`.
 Crash-safe: all state lives in SQLite; on boot, `uploading` jobs restart their upload.
 
+### Download stage
+
+So a user can see *where* a slow download is stuck, the worker records on each torrent (migration 006) what it is
+doing or waiting on, and `JobDto.stage` exposes it while the job is `queued`/`downloading`:
+
+- `torrents.stage`. While `pending`: `waiting-vpn` (`vpn.mode=required`, VPN down), `waiting-disk` (below
+  `limits.minFreeDiskBytes`), `waiting-engine` (qBittorrent unreachable), `adding`. While `downloading`: the engine's
+  phase (`metadata`, `queued`, `checking`, `paused`, `stalled`, `downloading`, `moving`; qBittorrent 4.x and 5.x
+  state names, unknown states read as `downloading`) or `waiting-engine`. Writes happen only on change.
+- `seeds`/`peers`: connected right now. `seeds_total`: seeds the trackers/DHT report for the swarm.
+- `progress_at`: unix s of the last progress increase, set to `started_at` when the torrent is handed to the engine.
+  It is persisted, so it survives a worker restart.
+
+The web app turns this into a step tracker (Queued › Connecting › Downloading › Uploading/Saving › Done) with one
+line saying what is happening. No progress for 5 min (or no file list after 5 min of `metadata`), a VPN/disk/engine
+wait, or a paused torrent is shown as a warning.
+
 ## VPN sidecar (`services/vpn`)
 
 Purpose-built (Gluetun was evaluated and rejected, see `services/vpn/README.md`): Alpine +

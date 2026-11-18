@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { setSetting } from '../lib/settings.js';
 import { encrypt } from '../lib/crypto.js';
 import { Worker, type WorkerDeps } from './loop.js';
+import { DownloaderUnavailableError } from '../downloaders/types.js';
 import {
   addDest, addJob, addTorrent, addUser, fakeSpawn, FakeDownloader, FakeVpn, files, job, makeEnv, SECRET, silent, torrent, writeFiles,
 } from './testkit.js';
@@ -251,6 +252,75 @@ describe('gating', () => {
     free = 5000;
     await s.worker.tick();
     expect(torrent(s.db, t).state).toBe('downloading');
+  });
+
+  it('records why a torrent is waiting and what a running one is doing', async () => {
+    let nowMs = 1_000_000_000;
+    let free = 10;
+    const s = setup({ nowMs: () => nowMs, freeBytes: async () => free });
+    setSetting(s.db, 'vpn.mode', 'required');
+    setSetting(s.db, 'limits.minFreeDiskBytes', 1000);
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    await s.worker.tick();
+    expect(torrent(s.db, t).stage).toBe('waiting-vpn');
+    s.vpn.status_.connected = true;
+    await s.worker.tick();
+    expect(torrent(s.db, t).stage).toBe('waiting-disk');
+    free = 5000;
+    await s.worker.tick(); // added; the same tick's sync sees the fake's metadata-pending
+    expect(torrent(s.db, t)).toMatchObject({ state: 'downloading', stage: 'metadata', progress_at: 1_000_000 });
+    nowMs += 60_000;
+    s.dl.set(H1, { state: 'downloading', phase: 'downloading', name: 'N', totalSize: 100, progress: 0.25, seeds: 5, peers: 1, seedsTotal: 49 });
+    await s.worker.tick();
+    expect(torrent(s.db, t)).toMatchObject({ stage: 'downloading', seeds: 5, peers: 1, seeds_total: 49, progress_at: 1_000_060 });
+    nowMs += 600_000; // no progress for 10 min: progress_at stays put
+    s.dl.set(H1, { phase: 'stalled', seeds: 0, peers: 0 });
+    await s.worker.tick();
+    expect(torrent(s.db, t)).toMatchObject({ stage: 'stalled', seeds: 0, progress_at: 1_000_060 });
+    s.dl.set(H1, { phase: 'downloading', progress: 0.3 });
+    await s.worker.tick();
+    expect(torrent(s.db, t).progress_at).toBe(1_000_660);
+  });
+
+  it('an engine that is down while adding stays waiting-engine (no flip back to adding)', async () => {
+    const s = setup();
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    const add = s.dl.add.bind(s.dl);
+    s.dl.add = async () => { throw new DownloaderUnavailableError('down'); };
+    await s.worker.tick(); await s.worker.tick();
+    expect(torrent(s.db, t)).toMatchObject({ state: 'pending', stage: 'waiting-engine' });
+    s.dl.add = add;
+    await s.worker.tick();
+    expect(torrent(s.db, t)).toMatchObject({ state: 'downloading', stage: 'metadata' });
+  });
+
+  it('progress_at restarts when the file list arrives, so a slow metadata fetch is not reported as no progress', async () => {
+    let nowMs = 1_000_000_000;
+    const s = setup({ nowMs: () => nowMs });
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    await s.worker.tick();
+    nowMs += 600_000;
+    s.dl.set(H1, { state: 'downloading', phase: 'stalled', name: 'N', totalSize: 100, progress: 0 });
+    await s.worker.tick();
+    expect(torrent(s.db, t)).toMatchObject({ stage: 'stalled', progress_at: 1_000_600 });
+  });
+
+  it('an unreachable downloader is recorded as waiting-engine without failing anything', async () => {
+    const s = setup();
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    const j = addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    await s.worker.tick();
+    s.dl.status = async () => { throw new DownloaderUnavailableError('down'); };
+    await s.worker.tick();
+    expect(torrent(s.db, t)).toMatchObject({ state: 'downloading', stage: 'waiting-engine' });
+    expect(job(s.db, j).state).toBe('downloading');
   });
 
   it('a failing step does not stop the others', async () => {

@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { mapQbtState, QbittorrentDownloader } from './qbittorrent.js';
+import { mapQbtState, qbtPhase, QbittorrentDownloader } from './qbittorrent.js';
 import { DownloaderUnavailableError } from './types.js';
+
+describe('qbtPhase', () => {
+  it.each([
+    ['metaDL', 'metadata'], ['forcedMetaDL', 'metadata'], ['queuedDL', 'queued'], ['checkingDL', 'checking'],
+    ['checkingResumeData', 'checking'], ['allocating', 'checking'], ['pausedDL', 'paused'], ['stoppedDL', 'paused'],
+    ['stalledDL', 'stalled'], ['downloading', 'downloading'], ['forcedDL', 'downloading'], ['moving', 'moving'],
+    ['somethingNew', 'downloading'],
+  ] as const)('%s -> %s', (s, want) => expect(qbtPhase(s)).toBe(want));
+});
 
 describe('mapQbtState', () => {
   it.each([
@@ -90,6 +99,14 @@ describe('QbittorrentDownloader', () => {
     q.torrents.push({ hash: 'f'.repeat(40), name: 'N', size: 100, progress: 0.5, dlspeed: 9, state: 'downloading', ratio: 0.1, content_path: '/d/N', save_path: '/d' });
     expect(await d.status('F'.repeat(40))).toMatchObject({ state: 'downloading', name: 'N', totalSize: 100, progress: 0.5, dlSpeed: 9, ratio: 0.1, contentPath: '/d/N', savePath: '/d' });
     expect(q.calls.at(-1)!.path).toBe('/torrents/info');
+  });
+
+  it('reports the phase and swarm counts (connected seeds/peers, swarm seeds)', async () => {
+    const q = fakeQbt();
+    const d = new QbittorrentDownloader({ baseUrl: 'http://qbt', fetchImpl: q.fetchImpl });
+    q.torrents.push({ hash: 'f'.repeat(40), name: 'N', size: 100, progress: 0.2, dlspeed: 0, state: 'stalledDL', ratio: 0, content_path: '/d/N', save_path: '/d',
+      num_seeds: 5, num_leechs: 2, num_complete: 49 });
+    expect(await d.status('f'.repeat(40))).toMatchObject({ state: 'downloading', phase: 'stalled', seeds: 5, peers: 2, seedsTotal: 49 });
   });
 
   it('remove passes deleteFiles', async () => {

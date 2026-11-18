@@ -1,3 +1,4 @@
+import type { DownloadStage } from './dto.js';
 /** Shared domain types. Authoritative schema: migrations/001_init.sql; contract: docs/architecture.md. */
 export type JobState = 'queued' | 'downloading' | 'uploading' | 'completed' | 'failed' | 'cancelled';
 export type TorrentState = 'pending' | 'downloading' | 'downloaded' | 'error' | 'removed';
@@ -59,6 +60,11 @@ export interface TorrentRow {
   cleanup_pending: number;
   /** Unix seconds the worker first handed it to the downloader (metadata timeout). Migration 003. */
   started_at: number | null;
+  /** What the download is doing / waiting on (migration 006); see DownloadStage. */
+  stage: DownloadStage | null;
+  seeds: number; peers: number; seeds_total: number;
+  /** Unix s of the last progress increase (or the start of the download). Migration 006. */
+  progress_at: number | null;
 }
 export interface JobRow {
   id: number; user_id: number; torrent_id: number; destination_id: number; state: JobState;

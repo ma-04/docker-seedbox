@@ -1,5 +1,5 @@
 /** qBittorrent Web API v2 client (fetch). The WebUI whitelists the compose subnet, so no login is normally needed. */
-import { DownloaderUnavailableError, type DownloadAddInput, type Downloader, type DownloadState, type DownloadStatus } from './types.js';
+import { DownloaderUnavailableError, type DownloadAddInput, type Downloader, type DownloadPhase, type DownloadState, type DownloadStatus } from './types.js';
 
 export interface QbtOptions {
   baseUrl: string;
@@ -13,6 +13,7 @@ export interface QbtOptions {
 interface QbtTorrent {
   hash: string; name: string; size?: number; total_size?: number; progress: number; dlspeed: number; state: string;
   ratio: number; content_path: string; save_path: string;
+  num_seeds?: number; num_leechs?: number; num_complete?: number;
 }
 
 const META = new Set(['metaDL', 'forcedMetaDL']);
@@ -27,6 +28,18 @@ export function mapQbtState(state: string, progress: number): DownloadState {
   if (UPLOAD.has(state) || progress >= 1) return 'completed';
   return 'downloading';
 }
+
+/** qBittorrent 4.x and 5.x state names -> what the user is told the download is doing. Unknown states read as downloading, never stalled. */
+const PHASES: Record<string, DownloadPhase> = {
+  metaDL: 'metadata', forcedMetaDL: 'metadata',
+  queuedDL: 'queued',
+  checkingDL: 'checking', checkingResumeData: 'checking', allocating: 'checking',
+  pausedDL: 'paused', stoppedDL: 'paused',
+  stalledDL: 'stalled',
+  downloading: 'downloading', forcedDL: 'downloading',
+  moving: 'moving',
+};
+export function qbtPhase(state: string): DownloadPhase { return PHASES[state] ?? 'downloading'; }
 
 /**
  * qBittorrent's `urls` field is newline separated: anything with a CR/LF would add extra downloads (or make it fetch
@@ -141,6 +154,10 @@ export class QbittorrentDownloader implements Downloader {
       contentPath: t.content_path,
       savePath: t.save_path,
       rawState: t.state,
+      phase: qbtPhase(t.state),
+      seeds: t.num_seeds ?? 0,
+      peers: t.num_leechs ?? 0,
+      seedsTotal: t.num_complete ?? 0,
     };
   }
 

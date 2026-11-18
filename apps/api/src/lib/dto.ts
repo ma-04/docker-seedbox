@@ -68,8 +68,22 @@ export interface JobDto {
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
+  /**
+   * What the download is doing / waiting on while the job is queued or downloading (null otherwise or not known yet).
+   * `lastProgressAt` (unix s) is when progress last went up, so clients can show "no progress for N min".
+   */
+  stage: JobStageDto | null;
   /** Present on admin listings only. */
   user?: { id: number; username: string };
+}
+export type DownloadStage =
+  | 'waiting-vpn' | 'waiting-disk' | 'waiting-engine' | 'adding'
+  | 'metadata' | 'queued' | 'checking' | 'paused' | 'stalled' | 'downloading' | 'moving';
+export interface JobStageDto {
+  stage: DownloadStage | null;
+  /** Connected seeds / other peers, and seeds the swarm reports (0 = unknown). */
+  seeds: number; peers: number; seedsTotal: number;
+  lastProgressAt: number | null;
 }
 /** POST /jobs as JSON; the multipart variant has fields `torrent` (file) and `destinationId`. */
 export interface JobCreateDto { magnet: string; destinationId: number }
