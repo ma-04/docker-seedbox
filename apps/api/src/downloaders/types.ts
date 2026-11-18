@@ -18,6 +18,12 @@ export interface DownloadAddInput {
 
 export type DownloadState = 'downloading' | 'completed' | 'error' | 'metadata-pending';
 
+/**
+ * Finer-grained "what is the engine doing right now" for an unfinished download, shown to users so a slow download
+ * says *why* it is slow. Never drives the job state machine (that is `DownloadState`).
+ */
+export type DownloadPhase = 'metadata' | 'queued' | 'checking' | 'paused' | 'stalled' | 'downloading' | 'moving';
+
 export interface DownloadStatus {
   state: DownloadState;
   name: string;
@@ -34,6 +40,13 @@ export interface DownloadStatus {
   savePath: string;
   /** Raw backend state, for logs/diagnostics only. */
   rawState?: string;
+  /** What the engine is doing; absent when the downloader cannot tell. */
+  phase?: DownloadPhase;
+  /** Seeds / non-seed peers connected right now. */
+  seeds?: number;
+  peers?: number;
+  /** Seeds in the whole swarm as reported by trackers/DHT (may be 0 = unknown). */
+  seedsTotal?: number;
 }
 
 export interface Downloader {

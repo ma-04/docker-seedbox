@@ -90,7 +90,7 @@ async function redownload(deps: UploadDeps, torrent: TorrentRow): Promise<boolea
   deps.log.warn({ torrentId: torrent.id }, 'the library copy of a downloaded torrent is gone; downloading it again');
   return deps.db.transaction(() => {
     const r = deps.db.prepare(
-      `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, started_at = NULL,
+      `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, stage = NULL, started_at = NULL,
          library_path = NULL, cleanup_pending = 0 WHERE id = ? AND state = 'downloaded'`,
     ).run(torrent.id);
     if (r.changes === 0) return false;

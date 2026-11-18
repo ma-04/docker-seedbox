@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
-import { StateBadge } from '../components/JobParts';
+import { JobSteps, StateBadge } from '../components/JobParts';
 import { Button, ConfirmButton, Empty, ErrorNote, Field, PageHeader, Progress, Spinner, cx, errMsg, useToast } from '../components/ui';
 import { endpoints, type JobDto } from '../lib/api';
 import { formatAge, formatBytes, formatSpeed } from '../lib/format';
@@ -190,6 +190,7 @@ function JobRow({ job }: { job: JobDto }) {
         </div>
         <StateBadge state={job.state} />
       </div>
+      {isActive(job) && <JobSteps job={job} />}
       {(job.state === 'downloading' || job.state === 'queued') && (
         <div className="mt-2">
           <Progress value={job.downloadProgress} label={`Download progress of ${displayName(job)}`} />

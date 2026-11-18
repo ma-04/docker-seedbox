@@ -5,7 +5,7 @@ const t = Math.floor(Date.now() / 1000);
 const job = (id: number, o: Record<string, unknown>) => ({
   id, state: 'queued', name: null, infohash: String(id).repeat(40).slice(0, 40), totalSize: 0, downloadProgress: 0, downloadSpeed: 0,
   uploadProgress: 0, uploadSpeed: 0, destination: { id: 1, name: 'Shared Drive', type: 'gdrive' }, error: null, folderUrl: null,
-  createdAt: t - id * 300, updatedAt: t, completedAt: null, user: { id: 1, username: 'alice' }, ...o,
+  createdAt: t - id * 300, updatedAt: t, completedAt: null, stage: null, user: { id: 1, username: 'alice' }, ...o,
 });
 
 const engine: Record<string, unknown> = {
@@ -28,7 +28,11 @@ const refreshMock = () => {
 
 const db = {
   jobs: [
-    job(1, { state: 'downloading', name: 'Big Buck Bunny', totalSize: 276134947, downloadProgress: 0.42, downloadSpeed: 3_400_000 }),
+    job(1, { state: 'downloading', name: 'Big Buck Bunny', totalSize: 276134947, downloadProgress: 0.42, downloadSpeed: 3_400_000,
+      stage: { stage: 'downloading', seeds: 12, peers: 3, seedsTotal: 49, lastProgressAt: t } }),
+    job(6, { state: 'downloading', name: 'Elephants Dream', totalSize: 1_179_559_336, downloadProgress: 0.22, downloadSpeed: 0,
+      stage: { stage: 'stalled', seeds: 0, peers: 0, seedsTotal: 49, lastProgressAt: t - 760 } }),
+    job(7, { state: 'downloading', name: null, stage: { stage: 'metadata', seeds: 0, peers: 0, seedsTotal: 0, lastProgressAt: t - 40 } }),
     job(2, { state: 'uploading', name: 'Sintel', totalSize: 129902440, downloadProgress: 1, uploadProgress: 0.7, uploadSpeed: 8_000_000, destination: { id: 2, name: 'My S3', type: 's3' } }),
     job(3, { state: 'completed', name: 'Tears of Steel', totalSize: 571_000_000, downloadProgress: 1, uploadProgress: 1, folderUrl: 'https://example.com/folder' }),
     job(4, { state: 'failed', name: null, error: 'Upload failed: access denied' }),

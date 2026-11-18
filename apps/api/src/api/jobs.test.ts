@@ -21,6 +21,22 @@ describe('jobs', () => {
     expect(decryptJson<{ magnet: string }>(env.config.appSecret, row.source_enc).magnet).toContain(HEX);
   });
 
+  it('exposes the download stage only while the job waits on its torrent', async () => {
+    const env = setup();
+    const dest = await makeLocalDest(env);
+    const a = await env.call(alice, 'POST', '/api/jobs', { magnet: magnet(HEX), destinationId: dest });
+    expect(a.json().stage).toEqual({ stage: null, seeds: 0, peers: 0, seedsTotal: 0, lastProgressAt: null });
+    env.db.prepare(`UPDATE torrents SET state = 'downloading', stage = 'stalled', seeds = 3, peers = 1, seeds_total = 49, progress_at = 123`).run();
+    env.db.prepare(`UPDATE jobs SET state = 'downloading'`).run();
+    const list = await env.call(alice, 'GET', '/api/jobs');
+    expect(list.json()[0].stage).toEqual({ stage: 'stalled', seeds: 3, peers: 1, seedsTotal: 49, lastProgressAt: 123 });
+    // A stage left over from the downloader run is not shown once the torrent is pending again.
+    env.db.prepare(`UPDATE torrents SET state = 'pending'`).run();
+    expect((await env.call(alice, 'GET', '/api/jobs')).json()[0].stage.stage).toBeNull();
+    env.db.prepare(`UPDATE jobs SET state = 'failed'`).run();
+    expect((await env.call(alice, 'GET', '/api/jobs')).json()[0].stage).toBeNull();
+  });
+
   it('rejects bad magnets, unknown destinations and disabled destinations', async () => {
     const env = setup();
     const dest = await makeLocalDest(env);
