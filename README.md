@@ -19,8 +19,14 @@ A self-hosted, multi-user **torrent-to-cloud seedbox** in a handful of container
 - **Small attack surface**: one entry point (the gateway), no Docker socket mounts in the app stack, secrets encrypted at rest, signed download links.
 - **Reuses open source**: Authelia, nginx, nginx-proxy + acme-companion, qBittorrent, rclone, WireGuard, and optionally Jackett and FlareSolverr.
 
-<!-- Screenshots: add docs/img/*.png and reference them here. -->
-*Screenshots: coming soon.*
+## Screenshots
+
+![Downloads: add a magnet link or .torrent and pick a destination](docs/img/downloads.png)
+
+| | |
+|---|---|
+| ![Torrent search across Jackett indexers](docs/img/search.png) | ![Shared destinations: Google Drive, S3-compatible, local folder](docs/img/destinations.png) |
+| ![VPN status, kill-switch mode, rotation and WireGuard configs](docs/img/vpn.png) | ![Admin settings: job limits, torrent size, free disk, seeding](docs/img/settings.png) |
 
 ## Quick start
 
