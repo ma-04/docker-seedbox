@@ -71,6 +71,7 @@ describe('jobStep', () => {
   it('downloading shows the swarm; no progress for 5+ minutes is stuck', () => {
     expect(step({ state: 'downloading', stage: st({ stage: 'downloading', seeds: 5, peers: 1, seedsTotal: 49 }) }))
       .toMatchObject({ index: 2, stuck: false, message: '5 of 49 seeds connected, 1 other peer' });
+    expect(step({ state: 'downloading', stage: st({ stage: 'downloading', seeds: 5, seedsTotal: 3 }) })!.message).toBe('5 seeds connected');
     expect(step({ state: 'downloading', stage: st({ stage: 'stalled', seeds: 0, seedsTotal: 49, lastProgressAt: NOW - 30 }) }))
       .toMatchObject({ index: 2, stuck: false, message: 'Waiting for peers to send data: 0 of 49 seeds connected' });
     expect(step({ state: 'downloading', stage: st({ stage: 'stalled', seeds: 1, lastProgressAt: NOW - 12 * 60 }) }))

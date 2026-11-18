@@ -209,7 +209,7 @@ export class Worker {
       // Keep the library copy when it is still there: addPending then serves the job from it instead of re-downloading.
       const keep = r.library_path && (await exists(r.library_path)) ? r.library_path : null;
       healed += this.db.prepare(
-        `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL,
+        `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, stage = NULL,
            started_at = NULL, library_path = ?, cleanup_pending = 0
          WHERE id = ? AND state IN ('removed','error')
            AND EXISTS (SELECT 1 FROM jobs WHERE jobs.torrent_id = torrents.id AND jobs.state IN ${ACTIVE})`,
@@ -336,8 +336,15 @@ export class Worker {
         this.addBefore.delete(t.id);
         if (st.state === 'error') return this.failTorrent(t, `The downloader reported an error (${st.rawState ?? 'error'})`);
         if (st.state === 'metadata-pending') {
-          db.prepare(`UPDATE torrents SET stage = 'metadata', seeds = ?, peers = ?, seeds_total = ? WHERE id = ? AND state = 'downloading'`)
-            .run(st.seeds ?? 0, st.peers ?? 0, st.seedsTotal ?? 0, t.id);
+          // Only on change (this runs every tick per magnet). The file-list clock starts when the stage is entered, so time
+          // spent queued/paused in the engine or waiting for it does not count as "no file list after N min".
+          const [seeds, peers, seedsTotal] = [st.seeds ?? 0, st.peers ?? 0, st.seedsTotal ?? 0];
+          db.prepare(
+            `UPDATE torrents SET stage = 'metadata', seeds = ?, peers = ?, seeds_total = ?,
+               progress_at = CASE WHEN stage IS 'metadata' THEN progress_at ELSE ? END
+             WHERE id = ? AND state = 'downloading'
+               AND (stage IS NOT 'metadata' OR seeds IS NOT ? OR peers IS NOT ? OR seeds_total IS NOT ?)`,
+          ).run(seeds, peers, seedsTotal, this.nowSec(), t.id, seeds, peers, seedsTotal);
           const limitMin = getSetting(db, 'limits.metadataTimeoutMinutes');
           if (limitMin > 0 && t.started_at !== null && this.nowSec() - t.started_at > limitMin * 60) {
             return this.failTorrent(t, `No metadata received after ${limitMin} minutes (no peers / metadata timeout)`);
@@ -355,7 +362,10 @@ export class Worker {
         db.prepare(
           `UPDATE torrents SET name = ?, total_size = ?, progress = ?, dl_speed = ?, state = ?, completed_at = ?,
              stage = ?, seeds = ?, peers = ?, seeds_total = ?,
-             progress_at = CASE WHEN ? > progress OR progress_at IS NULL OR stage = 'metadata' THEN ? ELSE progress_at END
+             -- The stall clock runs only while actually downloading: entering downloading/stalled from any other stage
+             -- (metadata, queued, paused, checking, waiting-engine...) restarts it, as does any progress.
+             progress_at = CASE WHEN ? > progress OR progress_at IS NULL OR stage IS NULL OR stage NOT IN ('downloading','stalled')
+               THEN ? ELSE progress_at END
            WHERE id = ? AND state = 'downloading'`,
         ).run(
           st.name || t.name, st.totalSize, progress, done ? 0 : Math.round(st.dlSpeed), done ? 'downloaded' : 'downloading', done ? now() : null,
@@ -385,6 +395,7 @@ export class Worker {
     // Before re-adding: an untracked torrent that appeared since the first add means the engine parsed something else
     // (and a re-add of a duplicate would only answer "Fails." and hide that).
     if (await this.engineHoldsDifferentTorrent(t)) return;
+    this.setStage(t.id, 'adding'); // the engine answers (it just does not know the torrent): not "waiting-engine"
     try {
       await this.addToDownloader(t);
       if (await this.engineHoldsDifferentTorrent(t)) return;
@@ -604,7 +615,7 @@ export class Worker {
         const outcome = db.transaction((): 'removed' | 'reset' => {
           if (activeCount(t.id) > 0) {
             db.prepare(
-              `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL,
+              `UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, stage = NULL,
                  started_at = NULL, library_path = NULL WHERE id = ?`,
             ).run(t.id);
             return 'reset';

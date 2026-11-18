@@ -311,6 +311,56 @@ describe('gating', () => {
     expect(torrent(s.db, t)).toMatchObject({ stage: 'stalled', progress_at: 1_000_600 });
   });
 
+  it('time queued in the engine does not count as no file list / no progress', async () => {
+    let nowMs = 1_000_000_000;
+    const s = setup({ nowMs: () => nowMs });
+    setSetting(s.db, 'limits.metadataTimeoutMinutes', 0);
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    await s.worker.tick();
+    s.dl.set(H1, { state: 'downloading', phase: 'queued' });
+    nowMs += 1_800_000;
+    await s.worker.tick();
+    expect(torrent(s.db, t).stage).toBe('queued');
+    s.dl.set(H1, { state: 'metadata-pending', phase: 'metadata' });
+    nowMs += 1000;
+    await s.worker.tick();
+    expect(torrent(s.db, t)).toMatchObject({ stage: 'metadata', progress_at: 1_001_801 });
+    nowMs += 1000;
+    await s.worker.tick(); // still fetching: the clock keeps running from when metadata started
+    expect(torrent(s.db, t).progress_at).toBe(1_001_801);
+    s.dl.set(H1, { state: 'downloading', phase: 'paused', totalSize: 100 });
+    nowMs += 1_800_000;
+    await s.worker.tick();
+    s.dl.set(H1, { phase: 'downloading' });
+    await s.worker.tick();
+    expect(torrent(s.db, t)).toMatchObject({ stage: 'downloading', progress_at: 1_003_602 });
+  });
+
+  it('a retried torrent does not carry a stale waiting-engine stage', async () => {
+    const s = setup();
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    s.db.prepare(`UPDATE torrents SET state = 'removed', stage = 'waiting-engine'`).run();
+    await s.worker.tick(); // heal -> pending (stage cleared) -> added
+    expect(torrent(s.db, t)).toMatchObject({ state: 'downloading', stage: 'metadata' });
+  });
+
+  it('a torrent missing from a responsive engine is not reported as waiting-engine', async () => {
+    const s = setup();
+    const u = addUser(s.db, 'alice');
+    const t = addTorrent(s.db, H1);
+    addJob(s.db, u, t, addDest(s.db, { type: 'local' }));
+    await s.worker.tick();
+    s.db.prepare(`UPDATE torrents SET stage = 'waiting-engine'`).run();
+    s.dl.items.clear();
+    s.dl.add = async () => { throw new Error('rejected'); };
+    await s.worker.tick();
+    expect(torrent(s.db, t).stage).toBe('adding');
+  });
+
   it('an unreachable downloader is recorded as waiting-engine without failing anything', async () => {
     const s = setup();
     const u = addUser(s.db, 'alice');

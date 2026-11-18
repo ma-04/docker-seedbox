@@ -65,7 +65,8 @@ export const STUCK_AFTER_SEC = 5 * 60;
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
 function swarm(st: NonNullable<JobDto['stage']>): string {
-  const seeds = st.seedsTotal > 0 ? `${st.seeds} of ${st.seedsTotal} seeds connected` : `${plural(st.seeds, 'seed')} connected`;
+  // Tracker scrapes miss DHT/PEX seeds, so the swarm count can be below the connected count: never say "5 of 3".
+  const seeds = st.seedsTotal >= st.seeds && st.seedsTotal > 0 ? `${st.seeds} of ${st.seedsTotal} seeds connected` : `${plural(st.seeds, 'seed')} connected`;
   return st.peers > 0 ? `${seeds}, ${plural(st.peers, 'other peer')}` : seeds;
 }
 

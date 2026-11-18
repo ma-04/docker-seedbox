@@ -78,7 +78,7 @@ export function createJob(ctx: Ctx, user: UserRow, parsed: ParsedSource, destina
         .run(parsed.infohash, parsed.name, sourceEnc, parsed.totalSize, 'pending', t);
       tor = { id: Number(info.lastInsertRowid) } as TorrentRow;
     } else if (tor.state === 'error' || tor.state === 'removed') {
-      db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, source_enc = ?, name = COALESCE(?, name), total_size = MAX(total_size, ?) WHERE id = ?")
+      db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, stage = NULL, source_enc = ?, name = COALESCE(?, name), total_size = MAX(total_size, ?) WHERE id = ?")
         .run(sourceEnc, parsed.name, parsed.totalSize, tor.id);
     } else {
       // Torrents are deduplicated by infohash across users: keep the first source but MERGE the (sanitised) trackers
@@ -107,7 +107,7 @@ export function registerJobs(app: FastifyInstance, ctx: Ctx): void {
   }
 
   function resetTorrentIfDead(torrentId: number): void {
-    db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL WHERE id = ? AND state IN ('error','removed')").run(torrentId);
+    db.prepare("UPDATE torrents SET state = 'pending', progress = 0, dl_speed = 0, error = NULL, completed_at = NULL, stage = NULL WHERE id = ? AND state IN ('error','removed')").run(torrentId);
   }
 
   const cancelOrDelete = (job: JobRow) => cancelOrDeleteJob(db, ctx.config.appSecret, job);
