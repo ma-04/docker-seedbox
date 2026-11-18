@@ -292,7 +292,7 @@ services:
     logging: *logging
 
   jackett:
-    image: lscr.io/linuxserver/jackett:0.24.3047@sha256:f311762e5549286f71c281f2772125908e5fce73a28445b3f28d01bcf579c867
+    image: lscr.io/linuxserver/jackett:0.24.3078@sha256:6ff71f9c754a64190874851b726461b16e18b7680f237fd6eb9225a0622ec193
     profiles: ["search"]
     restart: unless-stopped
     network_mode: service:vpn
